@@ -88,6 +88,7 @@ fn main() {
             video::download_youtube,
             video::render_video,
             video::cancel_render,
+            video::plan_video,
             video::output_path,
             video::path_exists,
             video::parse_timecode

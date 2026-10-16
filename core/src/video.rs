@@ -15,6 +15,20 @@ pub struct Clip {
     pub start: Option<f64>,
     #[serde(default)]
     pub end: Option<f64>,
+    /// 和前一段怎麼接（第一段忽略）。
+    #[serde(default)]
+    pub join: Join,
+}
+
+/// 兩段之間的接法。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Join {
+    /// 白閃過場（兩段重疊 `transition` 秒）
+    #[default]
+    Flash,
+    /// 直接接（乾淨檔接 promo 用）
+    Cut,
 }
 
 impl Clip {
@@ -95,24 +109,48 @@ pub struct RenderSpec {
     pub fps: String,
     pub encoder: Encoder,
     pub output: String,
+    /// 整體音量增益（dB），剪映的 +6 就是 6.0；0 表示不調整。
+    #[serde(default)]
+    pub gain_db: f64,
 }
 
-/// 每個過場在輸出影片上的起點。重疊式過場：第 i 個過場從
-/// 「前 i 段長度總和 − i × 過場長度」開始。
-pub fn transition_offsets(durations: &[f64], transition: f64) -> Vec<f64> {
-    let mut offsets = Vec::new();
-    let mut elapsed = 0.0;
-    for (i, d) in durations.iter().enumerate().take(durations.len().saturating_sub(1)) {
-        elapsed += d;
-        offsets.push(elapsed - transition * (i + 1) as f64);
+/// 每段在成品上的位置。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Placement {
+    /// 和前一段的過場從第幾秒開始（只有閃白接法才有）
+    pub transition_at: Option<f64>,
+    /// 這段完全出現的時間點（閃白結束後）——章節時間就用這個
+    pub visible_at: f64,
+}
+
+/// 依序算出每段在成品上的位置與成品總長。
+///
+/// 閃白接法兩段重疊 `transition` 秒：過場從「目前長度 − transition」開始，
+/// 結束時這段才完全出現；直接接就是接在目前長度。
+pub fn plan(spec: &RenderSpec) -> (Vec<Placement>, f64) {
+    let t = spec.transition;
+    let mut length = 0.0;
+    let mut placements = Vec::with_capacity(spec.clips.len());
+    for (i, clip) in spec.clips.iter().enumerate() {
+        let d = clip.used_duration();
+        if i == 0 {
+            placements.push(Placement { transition_at: None, visible_at: 0.0 });
+            length = d;
+        } else if clip.join == Join::Flash {
+            let at = length - t;
+            placements.push(Placement { transition_at: Some(at), visible_at: at + t });
+            length += d - t;
+        } else {
+            placements.push(Placement { transition_at: None, visible_at: length });
+            length += d;
+        }
     }
-    offsets
+    (placements, length)
 }
 
-/// 輸出影片總長：各段相加，再扣掉重疊的過場。
+/// 輸出影片總長：各段相加，再扣掉閃白重疊的部分。
 pub fn output_duration(spec: &RenderSpec) -> f64 {
-    let total: f64 = spec.clips.iter().map(Clip::used_duration).sum();
-    total - spec.transition * spec.clips.len().saturating_sub(1) as f64
+    plan(spec).1
 }
 
 /// 組出整支 ffmpeg 指令（不含 ffmpeg 本身）。
@@ -124,7 +162,8 @@ pub fn build_render_args(spec: &RenderSpec) -> Result<Vec<String>, String> {
         return Err("沒有任何影片".to_string());
     }
     let t = spec.transition;
-    if spec.clips.len() > 1 && t <= 0.0 {
+    let has_flash = spec.clips.iter().skip(1).any(|c| c.join == Join::Flash);
+    if has_flash && t <= 0.0 {
         return Err("閃白長度必須大於 0 秒".to_string());
     }
     for (i, clip) in spec.clips.iter().enumerate() {
@@ -132,7 +171,7 @@ pub fn build_render_args(spec: &RenderSpec) -> Result<Vec<String>, String> {
         if d <= 0.0 {
             return Err(format!("第 {} 段影片長度為 0，請檢查裁切時間", i + 1));
         }
-        if spec.clips.len() > 1 && d <= t * 2.0 {
+        if has_flash && d <= t * 2.0 {
             return Err(format!("第 {} 段影片（{d:.1} 秒）比閃白過場還短", i + 1));
         }
     }
@@ -147,10 +186,12 @@ pub fn build_render_args(spec: &RenderSpec) -> Result<Vec<String>, String> {
 
     let (w, h, fps) = (spec.width, spec.height, &spec.fps);
     let mut graph = Vec::new();
+    // settb=AVTB：concat 的輸出時間基準是 1/1000000，xfade 要求兩個輸入的時間基準相同，
+    // 所以每段都先統一成同一個時間基準，閃白和直接接才能混著用。
     for (i, clip) in spec.clips.iter().enumerate() {
         graph.push(format!(
             "[{i}:v]setpts=PTS-STARTPTS,scale={w}:{h}:force_original_aspect_ratio=decrease,\
-             pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps},format=yuv420p[v{i}]"
+             pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps},format=yuv420p,settb=AVTB[v{i}]"
         ));
         if clip.has_audio {
             graph.push(format!(
@@ -165,20 +206,38 @@ pub fn build_render_args(spec: &RenderSpec) -> Result<Vec<String>, String> {
         }
     }
 
-    let durations: Vec<f64> = spec.clips.iter().map(Clip::used_duration).collect();
-    let offsets = transition_offsets(&durations, t);
+    // 逐段往後接：閃白用 xfade + acrossfade（重疊），直接接用 concat。
+    // xfade 的 offset 是相對於「目前已接好的那條」的長度，所以邊接邊累計。
+    let (placements, _) = plan(spec);
     let (mut v_last, mut a_last) = ("v0".to_string(), "a0".to_string());
-    for (k, offset) in offsets.iter().enumerate() {
-        let next = k + 1;
-        let (v_out, a_out) = (format!("vx{next}"), format!("ax{next}"));
-        graph.push(format!(
-            "[{v_last}][v{next}]xfade=transition=fadewhite:duration={}:offset={}[{v_out}]",
-            secs(t),
-            secs(*offset)
-        ));
-        graph.push(format!("[{a_last}][a{next}]acrossfade=d={}[{a_out}]", secs(t)));
+    for (k, (clip, place)) in spec.clips.iter().zip(&placements).enumerate().skip(1) {
+        let (v_out, a_out) = (format!("vx{k}"), format!("ax{k}"));
+        match (clip.join, place.transition_at) {
+            (Join::Flash, Some(at)) => {
+                graph.push(format!(
+                    "[{v_last}][v{k}]xfade=transition=fadewhite:duration={}:offset={}[{v_out}]",
+                    secs(t),
+                    secs(at)
+                ));
+                graph.push(format!("[{a_last}][a{k}]acrossfade=d={}[{a_out}]", secs(t)));
+            }
+            _ => {
+                graph.push(format!("[{v_last}][v{k}]concat=n=2:v=1:a=0[{v_out}]"));
+                graph.push(format!("[{a_last}][a{k}]concat=n=2:v=0:a=1[{a_out}]"));
+            }
+        }
         v_last = v_out;
         a_last = a_out;
+    }
+
+    // 整體音量：先拉高，再用限幅器壓住峰值，避免原本就大聲的地方爆音。
+    // level=false 關掉 alimiter 的自動音量，不然它會再把整體推到上限。
+    if spec.gain_db != 0.0 {
+        graph.push(format!(
+            "[{a_last}]volume={}dB,alimiter=limit=0.95:level=false[again]",
+            secs(spec.gain_db)
+        ));
+        a_last = "again".to_string();
     }
 
     args.push("-filter_complex".into());
@@ -384,7 +443,7 @@ mod tests {
     use super::*;
 
     fn clip(path: &str, duration: f64) -> Clip {
-        Clip { path: path.into(), duration, has_audio: true, start: None, end: None }
+        Clip { path: path.into(), duration, has_audio: true, start: None, end: None, join: Join::Flash }
     }
 
     fn spec(clips: Vec<Clip>) -> RenderSpec {
@@ -396,13 +455,22 @@ mod tests {
             fps: "30000/1001".into(),
             encoder: Encoder::X264,
             output: "out.mp4".into(),
+            gain_db: 0.0,
         }
     }
 
     #[test]
-    fn offsets_account_for_overlap() {
-        assert_eq!(transition_offsets(&[60.0, 20.0, 45.0], 0.5), vec![59.5, 79.0]);
-        assert!(transition_offsets(&[60.0], 0.5).is_empty());
+    fn plan_places_flash_and_cut_joins() {
+        // 全集：第一段 ｜ promo20 ⚡ 第二段 ⚡ 第三段 ｜ promo45
+        let mut clips = vec![clip("s1", 600.0), clip("p20", 20.0), clip("s2", 300.0), clip("s3", 400.0), clip("p45", 45.0)];
+        clips[1].join = Join::Cut;
+        clips[4].join = Join::Cut;
+        let (places, total) = plan(&spec(clips));
+        let visible: Vec<f64> = places.iter().map(|p| p.visible_at).collect();
+        assert_eq!(visible, vec![0.0, 600.0, 620.0, 919.5, 1319.0]);
+        assert_eq!(places[2].transition_at, Some(619.5));
+        assert_eq!(places[1].transition_at, None);
+        assert_eq!(total, 1364.0);
     }
 
     #[test]
@@ -425,6 +493,41 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["-map", "[ax2]"]));
         assert_eq!(args.last().unwrap(), "out.mp4");
         assert_eq!(args.iter().filter(|a| *a == "-i").count(), 3);
+    }
+
+    #[test]
+    fn cut_join_uses_concat_and_shifts_later_offsets() {
+        // 單集：完整影片 ⚡ YT ｜ promo45
+        let mut promo = clip("promo45.mp4", 45.0);
+        promo.join = Join::Cut;
+        let s = spec(vec![clip("main.mp4", 60.0), clip("yt.mp4", 20.0), promo]);
+        let args = build_render_args(&s).unwrap();
+        let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
+        assert!(graph.contains("[v0][v1]xfade=transition=fadewhite:duration=0.5:offset=59.5[vx1]"));
+        assert!(graph.contains("[vx1][v2]concat=n=2:v=1:a=0[vx2]"));
+        assert!(graph.contains("[ax1][a2]concat=n=2:v=0:a=1[ax2]"));
+        assert_eq!(output_duration(&s), 124.5);
+    }
+
+    #[test]
+    fn all_cut_joins_need_no_transition_length() {
+        let mut b = clip("b", 0.8);
+        b.join = Join::Cut;
+        let mut s = spec(vec![clip("a", 60.0), b]);
+        s.transition = 0.0;
+        assert!(build_render_args(&s).is_ok());
+    }
+
+    #[test]
+    fn gain_adds_volume_and_limiter() {
+        let mut s = spec(vec![clip("a", 60.0), clip("b", 20.0)]);
+        s.gain_db = 6.0;
+        let args = build_render_args(&s).unwrap();
+        let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
+        assert!(graph.contains("[ax1]volume=6dB,alimiter=limit=0.95:level=false[again]"));
+        assert!(args.windows(2).any(|w| w == ["-map", "[again]"]));
+        s.gain_db = 0.0;
+        assert!(!build_render_args(&s).unwrap().iter().any(|a| a.contains("volume=")));
     }
 
     #[test]

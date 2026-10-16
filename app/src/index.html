@@ -47,7 +47,7 @@
 
     <!-- name 相同的 details 一次只會展開一個 -->
     <details class="acc" name="video-acc" open>
-      <summary>單集</summary>
+      <summary>單集 <span class="muted acc-hint">完整影片 ⚡ YT 影片 ｜ 45 秒 promo</span></summary>
       <div class="acc-body">
         <div class="vrow">
           <span class="vlabel">完整影片</span>
@@ -71,50 +71,94 @@
 
         <div class="vrow">
           <span class="vlabel">Promo</span>
-          <label class="check"><input type="radio" name="promo" value="20" /> 20 秒</label>
-          <label class="check"><input type="radio" name="promo" value="45" /> 45 秒</label>
-          <span id="promoInfo" class="vinfo muted"></span>
+          <span class="vinfo muted promo45-info"></span>
         </div>
 
         <div class="timeline-head">
           <strong>Timeline</strong>
-          <span id="timelineTotal" class="muted"></span>
+          <span id="singleTotal" class="muted"></span>
           <span class="spacer"></span>
-          <span class="muted">點影格可預覽該位置</span>
+          <span class="legend"><i class="flash-dot"></i>閃白　<i class="cut-dot"></i>直接接　點影格可預覽</span>
         </div>
-        <div id="timeline" class="timeline"><div class="timeline-empty muted">選擇完整影片後會顯示在這裡</div></div>
-        <div id="ruler" class="ruler"></div>
+        <div id="singleTimeline" class="timeline"></div>
+        <div id="singleRuler" class="ruler"></div>
 
         <div class="preview-wrap">
-          <video id="player" class="hidden" controls preload="metadata"></video>
-          <div id="playerLabel" class="muted"></div>
+          <video id="singlePlayer" class="hidden" controls preload="metadata"></video>
+          <div id="singlePlayerLabel" class="muted"></div>
         </div>
 
         <div class="vrow">
           <span class="vlabel">檔名</span>
           <select id="partSelect"></select>
-          <input id="fileName" class="grow" placeholder="輸出檔名" />
+          <input id="singleName" class="grow" placeholder="輸出檔名" />
           <span class="muted">.mp4</span>
         </div>
+
         <div class="vrow">
           <span class="vlabel">輸出到</span>
-          <span id="outDirLabel" class="vinfo"></span>
-          <button id="pickOutDirBtn" class="ghost small">變更資料夾</button>
+          <span class="vinfo out-dir-label"></span>
+          <button class="ghost small pick-out-dir">變更資料夾</button>
         </div>
         <div class="vrow">
           <span class="vlabel"></span>
-          <button id="renderBtn">開始輸出</button>
-          <button id="cancelRenderBtn" class="ghost danger hidden">取消</button>
-          <button id="previewOutputBtn" class="ghost hidden">預覽成品</button>
-          <span id="renderStatus" class="vinfo"></span>
+          <button id="singleRenderBtn" class="render-btn">開始輸出</button>
+          <button id="singleCancelBtn" class="ghost danger hidden">取消</button>
+          <button id="singlePreviewBtn" class="ghost hidden">預覽成品</button>
+          <span id="singleStatus" class="vinfo"></span>
         </div>
-        <progress id="renderProgress" class="hidden" max="1" value="0"></progress>
+        <progress id="singleProgress" class="hidden" max="1" value="0"></progress>
       </div>
     </details>
 
     <details class="acc" name="video-acc">
-      <summary>全集</summary>
-      <div class="acc-body muted">之後製作。</div>
+      <summary>全集 <span class="muted acc-hint">第一段 ｜ 20 秒 promo ⚡ 第二段 ⚡ … ⚡ 第六段 ｜ 45 秒 promo</span></summary>
+      <div class="acc-body">
+        <div id="fullSegments" class="full-segments"></div>
+        <div class="vrow">
+          <span class="vlabel">Promo</span>
+          <span class="vinfo muted"><span class="promo20-info"></span>　／　<span class="promo45-info"></span></span>
+        </div>
+
+        <div class="timeline-head">
+          <strong>Timeline</strong>
+          <span id="fullTotal" class="muted"></span>
+          <span class="spacer"></span>
+          <span class="legend"><i class="flash-dot"></i>閃白　<i class="cut-dot"></i>直接接　點影格可預覽</span>
+        </div>
+        <div id="fullTimeline" class="timeline"></div>
+        <div id="fullRuler" class="ruler"></div>
+
+        <div class="preview-wrap">
+          <video id="fullPlayer" class="hidden" controls preload="metadata"></video>
+          <div id="fullPlayerLabel" class="muted"></div>
+        </div>
+
+        <div class="vrow">
+          <span class="vlabel">章節</span>
+          <button id="fillChaptersBtn" class="ghost">把各段時間填回文稿</button>
+          <span id="chapterInfo" class="vinfo muted">時間點＝閃白結束、該段完全出現的那一秒</span>
+        </div>
+        <div class="vrow">
+          <span class="vlabel">檔名</span>
+          <input id="fullName" class="grow" placeholder="輸出檔名" />
+          <span class="muted">.mp4</span>
+        </div>
+
+        <div class="vrow">
+          <span class="vlabel">輸出到</span>
+          <span class="vinfo out-dir-label"></span>
+          <button class="ghost small pick-out-dir">變更資料夾</button>
+        </div>
+        <div class="vrow">
+          <span class="vlabel"></span>
+          <button id="fullRenderBtn" class="render-btn">開始輸出</button>
+          <button id="fullCancelBtn" class="ghost danger hidden">取消</button>
+          <button id="fullPreviewBtn" class="ghost hidden">預覽成品</button>
+          <span id="fullStatus" class="vinfo"></span>
+        </div>
+        <progress id="fullProgress" class="hidden" max="1" value="0"></progress>
+      </div>
     </details>
   </main>
 
@@ -157,10 +201,11 @@
           <input name="promo_45_path" readonly placeholder="尚未指定" />
           <button type="button" class="ghost small" data-pick="promo_45_path">選擇</button>
         </label>
-        <div class="inline-options">預設 promo
-          <label class="check"><input type="radio" name="default_promo" value="20" /> 20 秒</label>
-          <label class="check"><input type="radio" name="default_promo" value="45" /> 45 秒</label>
-        </div>
+        <p class="muted">單集固定接 45 秒；全集第一段後接 20 秒、第六段後接 45 秒。</p>
+        <label>整體音量（dB）
+          <input name="audio_gain_db" type="number" min="-20" max="20" step="0.5" />
+        </label>
+        <p class="muted">剪映的「+6」就是 +6dB。會自動加限幅器，拉高後也不會爆音。0 表示不調整。</p>
         <label>閃白長度（秒）
           <input name="transition_secs" type="number" min="0.1" max="3" step="0.1" />
         </label>

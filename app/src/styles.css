@@ -136,7 +136,6 @@ button {
 button.ghost { background: transparent; color: var(--text); border-color: var(--border); }
 button.ghost:hover { border-color: var(--accent); }
 button.danger { color: var(--danger); }
-button.danger.armed { background: var(--danger); border-color: var(--danger); color: var(--panel); }
 button.small { padding: 2px 8px; font-size: 12px; }
 
 input, textarea {
@@ -278,3 +277,11 @@ select { font: inherit; color: var(--text); background: var(--input-bg); border:
 
 .tools-status { display: flex; flex-direction: column; gap: 2px; font-size: 13px; word-break: break-all; }
 .inline-options { display: flex; align-items: center; gap: 12px; }
+
+.cut { width: 3px; flex-shrink: 0; background: var(--text); opacity: .55; }
+.legend { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 4px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: middle; }
+.flash-dot { background: #fff; box-shadow: 0 0 4px #fff; border: 1px solid var(--border); }
+.cut-dot { background: var(--text); opacity: .55; width: 3px !important; }
+.acc-hint { font-weight: normal; font-size: 12px; margin-left: 10px; }
+.full-segments { display: flex; flex-direction: column; gap: 6px; }

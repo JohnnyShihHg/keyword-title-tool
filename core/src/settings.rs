@@ -25,8 +25,8 @@ pub struct Settings {
     pub promo_20_path: String,
     /// 45 秒版 promo 檔案路徑
     pub promo_45_path: String,
-    /// 單集預設用哪個 promo：20 或 45
-    pub default_promo: u32,
+    /// 整體音量增益（dB），剪映的 +6 = 6.0
+    pub audio_gain_db: f64,
     /// 閃白過場長度（秒）
     pub transition_secs: f64,
     /// 輸出影片的資料夾；空白時每次另存新檔時選
@@ -47,7 +47,7 @@ impl Default for Settings {
             theme: "light".to_string(),
             promo_20_path: String::new(),
             promo_45_path: String::new(),
-            default_promo: 20,
+            audio_gain_db: 6.0,
             transition_secs: 0.5,
             output_dir: String::new(),
             encoder: "auto".to_string(),

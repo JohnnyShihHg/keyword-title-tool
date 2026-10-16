@@ -164,17 +164,15 @@ $("todayBtn").addEventListener("click", () => {
 
 dateInput.addEventListener("input", changed);
 
-// 清空全部要按兩次，避免誤觸（不用 confirm()，它會卡住 WebView）
-const clearAllBtn = $("clearAllBtn");
-clearAllBtn.addEventListener("click", () => {
-  if (!clearAllBtn.classList.contains("armed")) {
-    clearAllBtn.classList.add("armed");
-    clearAllBtn.textContent = "再按一次確認清空";
-    clearTimeout(clearAllBtn.timer);
-    clearAllBtn.timer = setTimeout(disarmClear, 3000);
-    return;
-  }
-  disarmClear();
+// 清空全部前用系統對話框確認（不用 window.confirm()，它在 WebView 裡會卡住）
+$("clearAllBtn").addEventListener("click", async () => {
+  const ok = await window.__TAURI__.dialog.ask("確定要清空六段的內容和時間嗎？", {
+    title: "清空全部",
+    kind: "warning",
+    okLabel: "清空",
+    cancelLabel: "取消",
+  });
+  if (!ok) return;
   segments.forEach((s) => {
     s.text.value = "";
     s.time.value = "";
@@ -182,11 +180,6 @@ clearAllBtn.addEventListener("click", () => {
   dateInput.value = today();
   changed();
 });
-
-function disarmClear() {
-  clearAllBtn.classList.remove("armed");
-  clearAllBtn.textContent = "清空全部";
-}
 
 // --- 分頁 ---
 
@@ -251,7 +244,9 @@ function readSettingsForm() {
     theme: f.theme.value || settings.theme,
     promo_20_path: f.promo_20_path.value,
     promo_45_path: f.promo_45_path.value,
-    default_promo: parseInt(f.default_promo.value, 10) || settings.default_promo,
+    audio_gain_db: Number.isFinite(parseFloat(f.audio_gain_db.value))
+      ? Math.min(20, Math.max(-20, parseFloat(f.audio_gain_db.value)))
+      : settings.audio_gain_db,
     transition_secs: Math.min(3, Math.max(0.1, parseFloat(f.transition_secs.value) || settings.transition_secs)),
     output_dir: f.output_dir.value,
     encoder: f.encoder.value || settings.encoder,

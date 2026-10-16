@@ -501,6 +501,12 @@ fn collect_tail(stderr: impl Read + Send + 'static) -> std::thread::JoinHandle<S
     })
 }
 
+/// 每段在成品上的位置與總長（timeline 刻度、章節時間用）。
+#[tauri::command]
+pub fn plan_video(spec: RenderSpec) -> (Vec<video::Placement>, f64) {
+    video::plan(&spec)
+}
+
 /// 輸出資料夾 + 檔名（去掉 Windows 不允許的字元）+ `.mp4`
 #[tauri::command]
 pub fn output_path(dir: String, name: String) -> Result<String, String> {
