@@ -220,8 +220,13 @@
             <option value="nvenc">NVIDIA 顯示卡</option>
             <option value="qsv">Intel 內顯</option>
             <option value="amf">AMD 顯示卡</option>
+            <option value="mf">Windows 硬體加速（任何顯示卡）</option>
           </select>
         </label>
+        <div class="update-row">
+          <button type="button" id="redetectEncoderBtn" class="ghost small">偵測硬體編碼</button>
+        </div>
+        <div id="encoderReport" class="tools-status muted">按「偵測硬體編碼」查看這台電腦能用哪一種，以及失敗的原因。</div>
         <p class="muted">輸出規格固定 1920×1080、29.97fps、H.264 + AAC。</p>
       </fieldset>
 

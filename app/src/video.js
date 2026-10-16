@@ -8,6 +8,8 @@ const { listen } = window.__TAURI__.event;
 const dialog = window.__TAURI__.dialog;
 const { convertFileSrc } = window.__TAURI__.core;
 
+const ENCODER_NAMES = { x264: "CPU", nvenc: "NVIDIA", qsv: "Intel", amf: "AMD", mf: "Windows 硬體加速" };
+
 const VIDEO_EXTENSIONS = ["mp4", "mov", "mkv", "m4v", "avi", "mxf", "webm"];
 const OUTPUT = { width: 1920, height: 1080, fps: "30000/1001" };
 /** 整條 timeline 大約放幾張縮圖 */
@@ -344,7 +346,9 @@ function createPanel(prefix, buildSequence, defaultName) {
     if (encoder === "auto") {
       status.textContent = "偵測硬體編碼…";
       try {
-        encoder = await invoke("detect_encoder");
+        const report = await invoke("detect_encoder", { force: false });
+        showEncoderReport(report);
+        encoder = report.chosen;
       } catch (e) {
         return (status.textContent = `⚠ ${e}`);
       }
@@ -357,7 +361,7 @@ function createPanel(prefix, buildSequence, defaultName) {
     el("PreviewBtn").classList.add("hidden");
     progress.classList.remove("hidden");
     progress.value = 0;
-    const encoderName = { x264: "CPU", nvenc: "NVIDIA", qsv: "Intel", amf: "AMD" }[encoder] || encoder;
+    const encoderName = ENCODER_NAMES[encoder] || encoder;
     status.textContent = `輸出中（${encoderName}）…`;
     const startedAt = Date.now();
     const unlisten = await listen("render-progress", ({ payload: p }) => {
@@ -609,6 +613,35 @@ document.querySelectorAll(".pick-out-dir").forEach((btn) =>
     settingsFieldChanged();
   }),
 );
+
+// --- 硬體編碼偵測結果（設定頁） ---
+
+function showEncoderReport(r) {
+  const lines = r.attempts.map(
+    (a) => `<div>${a.ok ? "✓" : "✗"} ${a.label}${a.ok ? "：可以使用" : `：<span class="muted">${escapeHtml(a.error || "失敗")}</span>`}</div>`,
+  );
+  const tried = r.attempts.map((a) => a.encoder);
+  if (r.chosen === "x264") lines.push("<div>→ 都無法使用，改用 CPU 編碼</div>");
+  else if (tried.length < 4) lines.push('<div class="muted">（找到可用的就不再往下測）</div>');
+  $("encoderReport").innerHTML = `<div><strong>目前使用：${ENCODER_NAMES[r.chosen]}</strong></div>` + lines.join("");
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+}
+
+$("redetectEncoderBtn").addEventListener("click", async () => {
+  const btn = $("redetectEncoderBtn");
+  btn.disabled = true;
+  $("encoderReport").textContent = "偵測中…";
+  try {
+    showEncoderReport(await invoke("detect_encoder", { force: true }));
+  } catch (e) {
+    $("encoderReport").textContent = `⚠ ${e}`;
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 // --- 與 app.js 的接點 ---
 

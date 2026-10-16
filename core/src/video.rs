@@ -64,11 +64,14 @@ pub enum Encoder {
     Qsv,
     /// AMD 顯示卡
     Amf,
+    /// Windows Media Foundation：透過顯示卡驅動做硬體編碼，NVIDIA／Intel／AMD 都能用。
+    /// 畫質控制不如各家專用編碼器細，所以排在最後當備援。
+    Mf,
 }
 
 impl Encoder {
     /// 自動偵測時依序嘗試的硬體編碼器（都失敗就用 x264）。
-    pub const HARDWARE: [Encoder; 3] = [Encoder::Nvenc, Encoder::Qsv, Encoder::Amf];
+    pub const HARDWARE: [Encoder; 4] = [Encoder::Nvenc, Encoder::Qsv, Encoder::Amf, Encoder::Mf];
 
     fn codec(self) -> &'static str {
         match self {
@@ -76,6 +79,26 @@ impl Encoder {
             Encoder::Nvenc => "h264_nvenc",
             Encoder::Qsv => "h264_qsv",
             Encoder::Amf => "h264_amf",
+            Encoder::Mf => "h264_mf",
+        }
+    }
+
+    /// 編碼器吃的像素格式：Intel QSV 和 Media Foundation 只收 nv12。
+    fn pix_fmt(self) -> &'static str {
+        match self {
+            Encoder::Qsv | Encoder::Mf => "nv12",
+            _ => "yuv420p",
+        }
+    }
+
+    /// 顯示用名稱
+    pub fn label(self) -> &'static str {
+        match self {
+            Encoder::X264 => "CPU",
+            Encoder::Nvenc => "NVIDIA",
+            Encoder::Qsv => "Intel",
+            Encoder::Amf => "AMD",
+            Encoder::Mf => "Windows 硬體加速",
         }
     }
 
@@ -86,16 +109,21 @@ impl Encoder {
             Encoder::Nvenc => &["-preset", "p4", "-rc", "vbr", "-cq", "21", "-b:v", "0"],
             Encoder::Qsv => &["-preset", "medium", "-global_quality", "21"],
             Encoder::Amf => &["-quality", "balanced", "-rc", "cqp", "-qp_i", "20", "-qp_p", "22"],
+            // hw_encoding=1：只接受硬體編碼，沒有就失敗（不要默默退回 Windows 的軟體編碼）
+            Encoder::Mf => &["-hw_encoding", "1", "-b:v", "12M"],
         }
     }
 
-    /// 偵測這台電腦能不能用此編碼器：編一小段黑畫面，ffmpeg 結束碼為 0 就是可以。
+    /// 偵測這台電腦能不能用此編碼器：用輸出時同一組參數編一小段 1080p 黑畫面，
+    /// ffmpeg 結束碼為 0 就是可以。失敗原因在 stderr（`-v error` 只留錯誤）。
     pub fn probe_args(self) -> Vec<String> {
         let mut args = strings(&[
-            "-hide_banner", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=1280x720:d=0.2",
-            "-frames:v", "3", "-c:v",
+            "-hide_banner", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=1920x1080:r=30000/1001:d=0.5",
+            "-frames:v", "10", "-pix_fmt",
         ]);
-        args.push(self.codec().to_string());
+        args.push(self.pix_fmt().to_string());
+        args.extend(["-c:v".into(), self.codec().to_string()]);
+        args.extend(strings(self.quality_args()));
         args.extend(strings(&["-f", "null", "-"]));
         args
     }
@@ -248,8 +276,9 @@ pub fn build_render_args(spec: &RenderSpec) -> Result<Vec<String>, String> {
     args.extend(["-map".into(), format!("[{v_last}]"), "-map".into(), format!("[{a_last}]")]);
     args.extend(["-c:v".into(), spec.encoder.codec().into()]);
     args.extend(strings(spec.encoder.quality_args()));
+    args.extend(["-pix_fmt".into(), spec.encoder.pix_fmt().into()]);
     args.extend(strings(&[
-        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+        "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
         "-progress", "pipe:1", "-nostats",
     ]));
     args.push(spec.output.clone());
@@ -655,6 +684,15 @@ mod tests {
         let args = build_render_args(&s).unwrap();
         assert!(args.windows(2).any(|w| w == ["-c:v", "h264_nvenc"]));
         assert!(Encoder::Qsv.probe_args().contains(&"h264_qsv".to_string()));
+
+        s.encoder = Encoder::Qsv;
+        let args = build_render_args(&s).unwrap();
+        assert!(args.windows(2).any(|w| w == ["-pix_fmt", "nv12"]));
+
+        let mf = Encoder::Mf.probe_args();
+        assert!(mf.windows(2).any(|w| w == ["-c:v", "h264_mf"]));
+        assert!(mf.windows(2).any(|w| w == ["-hw_encoding", "1"]));
+        assert_eq!(Encoder::HARDWARE.last(), Some(&Encoder::Mf));
     }
 
     #[test]

@@ -18,7 +18,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 pub struct VideoState {
     render: Arc<Mutex<Option<Child>>>,
     cancelled: Arc<AtomicBool>,
-    encoder: Mutex<Option<Encoder>>,
+    encoder: Mutex<Option<EncoderReport>>,
 }
 
 // --- 工具位置 ---
@@ -332,31 +332,78 @@ pub async fn video_thumbnails(
 
 // --- 硬體編碼偵測 ---
 
-/// 依序試 NVIDIA → Intel → AMD，都不行就用 CPU。結果記住，同一次執行只測一次。
+#[derive(Clone, Serialize)]
+pub struct EncoderAttempt {
+    encoder: Encoder,
+    label: &'static str,
+    ok: bool,
+    /// 失敗時 ffmpeg 的錯誤訊息（例如「驅動版本太舊」），設定頁顯示用
+    error: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct EncoderReport {
+    chosen: Encoder,
+    attempts: Vec<EncoderAttempt>,
+}
+
+/// 依序試 NVIDIA → Intel → AMD → Windows Media Foundation，都不行就用 CPU。
+/// 每一個的成敗和錯誤訊息都回傳，偵測失敗時才看得出原因。結果記住，`force` 才重測。
 #[tauri::command]
-pub async fn detect_encoder(app: AppHandle, state: State<'_, VideoState>) -> Result<Encoder, String> {
-    if let Some(e) = *state.encoder.lock().unwrap() {
-        return Ok(e);
+pub async fn detect_encoder(app: AppHandle, state: State<'_, VideoState>, force: Option<bool>) -> Result<EncoderReport, String> {
+    if !force.unwrap_or(false) {
+        if let Some(r) = state.encoder.lock().unwrap().clone() {
+            return Ok(r);
+        }
     }
     let ffmpeg = require_tool(&app, FFMPEG)?;
-    let found = tauri::async_runtime::spawn_blocking(move || {
-        Encoder::HARDWARE
-            .into_iter()
-            .find(|enc| {
-                command(&ffmpeg)
-                    .args(enc.probe_args())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
-            })
-            .unwrap_or(Encoder::X264)
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        let mut attempts = Vec::new();
+        let mut chosen = None;
+        for enc in Encoder::HARDWARE {
+            let (ok, error) = match command(&ffmpeg).args(enc.probe_args()).stdout(Stdio::null()).output() {
+                Ok(o) if o.status.success() => (true, String::new()),
+                Ok(o) => (false, explain_encoder_error(&last_lines(&String::from_utf8_lossy(&o.stderr), 3))),
+                Err(e) => (false, e.to_string()),
+            };
+            attempts.push(EncoderAttempt { encoder: enc, label: enc.label(), ok, error });
+            if ok {
+                chosen = Some(enc);
+                break;
+            }
+        }
+        EncoderReport { chosen: chosen.unwrap_or(Encoder::X264), attempts }
     })
     .await
     .map_err(|e| e.to_string())?;
-    *state.encoder.lock().unwrap() = Some(found);
-    Ok(found)
+    *state.encoder.lock().unwrap() = Some(report.clone());
+    Ok(report)
+}
+
+/// 把 ffmpeg 常見的硬體編碼錯誤翻成白話，原始訊息放後面方便回報。
+fn explain_encoder_error(raw: &str) -> String {
+    let lower = raw.to_lowercase();
+    let hint = if lower.contains("driver does not support") || lower.contains("minimum required nvidia driver") {
+        "NVIDIA 驅動版本太舊，請更新顯示卡驅動"
+    } else if lower.contains("no capable devices") || lower.contains("cuda_error_no_device") || lower.contains("cannot load nvcuda") || lower.contains("cannot load nvencodeapi") {
+        "這台電腦沒有可用的 NVIDIA 顯示卡"
+    } else if lower.contains("amfrt64") || lower.contains("amf") && lower.contains("failed to") {
+        "這台電腦沒有可用的 AMD 顯示卡"
+    } else if lower.contains("mfx") || lower.contains("qsv") || lower.contains("libvpl") {
+        "Intel 內顯不支援，或沒有安裝 Intel 顯示驅動"
+    } else if lower.contains("encoder not found") || lower.contains("unrecognized option") {
+        "這個系統或 ffmpeg 不支援此編碼器"
+    } else if lower.contains("no hardware mft") || lower.contains("could not find") && lower.contains("mft") {
+        "Windows 找不到可用的硬體編碼器"
+    } else {
+        ""
+    };
+    if hint.is_empty() { raw.to_string() } else { format!("{hint}（{raw}）") }
+}
+
+fn last_lines(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    lines[lines.len().saturating_sub(n)..].join(" / ")
 }
 
 // --- YouTube 下載 ---
@@ -567,5 +614,20 @@ mod tests {
             assert!(out.status.success(), "{tool} failed to run");
             println!("{tool}: {}", String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or(""));
         }
+    }
+}
+
+#[cfg(test)]
+mod explain_tests {
+    use super::explain_encoder_error;
+
+    #[test]
+    fn common_errors_get_plain_hints() {
+        assert!(explain_encoder_error("Driver does not support the required nvenc API version. Required: 13.0 Found: 12.1")
+            .starts_with("NVIDIA 驅動版本太舊"));
+        assert!(explain_encoder_error("Cannot load nvcuda.dll").starts_with("這台電腦沒有可用的 NVIDIA"));
+        assert!(explain_encoder_error("Error initializing an internal MFX session: unsupported (-3)").starts_with("Intel 內顯"));
+        assert!(explain_encoder_error("DLL amfrt64.dll failed to open").starts_with("這台電腦沒有可用的 AMD"));
+        assert_eq!(explain_encoder_error("something else"), "something else");
     }
 }
