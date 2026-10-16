@@ -1,0 +1,55 @@
+name: Release
+
+# 推 v* 標籤就會：跑測試 → 建置 Windows 安裝檔 → 用 updater 金鑰簽章 → 發布到 GitHub Release
+# （含 latest.json）。已安裝的程式開啟時會讀 latest.json，有新版就提示更新。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # 只測 core：app crate 沒有測試，編譯錯誤會在 release job 建置時抓到。
+      - name: Rust tests
+        run: cargo test -p keyword-title-core
+
+  release:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build, sign and publish
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 私鑰只存在 repo secret，不進 git。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: app/src-tauri
+          tagName: ${{ github.ref_name }}
+          releaseName: 關鍵標題整理工具 ${{ github.ref_name }}
+          releaseBody: |
+            ## 更新內容
+
+            <!-- 發布後可直接在 GitHub 上編輯這段，App 的更新提示會顯示第一行 -->
+
+            ---
+            安裝後首次啟動若出現「Windows 已保護您的電腦」，請點「其他資訊」→「仍要執行」
+            （此程式未購買程式碼簽章憑證，屬預期行為）。
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true

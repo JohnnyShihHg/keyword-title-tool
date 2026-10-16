@@ -1,0 +1,8 @@
+/target/
+app/src-tauri/gen/schemas/macOS-schema.json
+*.key
+*.key.pub
+/.tauri/
+node_modules/
+.DS_Store
+Thumbs.db

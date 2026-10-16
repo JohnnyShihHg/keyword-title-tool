@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <title>關鍵標題整理工具</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <h1>關鍵標題整理工具</h1>
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-page="script" role="tab">文稿</button>
+      <button class="tab" data-page="video" role="tab">影片</button>
+    </nav>
+    <span class="spacer"></span>
+    <label class="field">日期
+      <input id="date" inputmode="numeric" maxlength="8" placeholder="20261016" />
+    </label>
+    <button id="todayBtn" class="ghost" title="把日期設成今天">今天</button>
+    <button id="clearAllBtn" class="ghost danger" title="清空六段內容和時間">清空全部</button>
+    <button id="updateBadge" class="update-badge hidden" title="前往設定頁更新"></button>
+    <button class="tab" data-page="settings" title="設定">⚙ 設定</button>
+  </header>
+
+  <main id="page-script" class="page split">
+    <section class="editor" id="segments" aria-label="各段輸入"></section>
+
+    <section class="preview">
+      <div class="preview-bar">
+        <span class="muted">預覽</span>
+        <span id="warnSummary" class="warn-summary"></span>
+        <span class="spacer"></span>
+        <span id="status" class="muted"></span>
+        <button id="copyBtn">全部複製</button>
+        <button id="saveBtn" class="ghost">存成 txt</button>
+      </div>
+      <ul id="warnings" class="warnings"></ul>
+      <textarea id="output" readonly spellcheck="false"></textarea>
+    </section>
+  </main>
+
+  <main id="page-video" class="page hidden">
+    <div class="placeholder">
+      <h2>影片處理</h2>
+      <p id="videoStatus" class="muted"></p>
+      <ul class="muted">
+        <li>段落之間加閃白轉場</li>
+        <li>疊上浮水印圖檔</li>
+      </ul>
+    </div>
+  </main>
+
+  <main id="page-settings" class="page hidden">
+    <form id="settingsForm" class="settings" autocomplete="off">
+      <h2>設定</h2>
+      <p class="muted">修改後自動儲存，只存在這台電腦。</p>
+
+      <fieldset>
+        <legend>版本與更新</legend>
+        <div class="update-row">
+          <strong id="versionLabel"></strong>
+          <button type="button" id="checkUpdateBtn" class="ghost">檢查更新</button>
+          <button type="button" id="installUpdateBtn" class="hidden">下載並安裝</button>
+          <span id="updateStatus" class="muted"></span>
+        </div>
+        <progress id="updateProgress" class="hidden" max="1" value="0"></progress>
+        <p class="muted">每次開啟會自動檢查一次；有新版時右上角會出現提示。</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>畫面配色</legend>
+        <div class="theme-list" id="themeList"></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>標題行</legend>
+        <label>主持人
+          <input name="host" required />
+        </label>
+        <label>節目名稱
+          <input name="program_tag" required />
+        </label>
+        <p class="muted example" id="settingsExample"></p>
+      </fieldset>
+
+      <fieldset>
+        <legend>輸出格式</legend>
+        <label class="check">
+          <input type="checkbox" name="label_segments" />
+          每段開頭標註「第一段」「第二段」（關閉時第一段開頭為 open）
+        </label>
+        <label class="check">
+          <input type="checkbox" name="number_line" />
+          段標題下方輸出「1.」「2.」編號行
+        </label>
+        <label class="check">
+          <input type="checkbox" name="include_header" />
+          輸出 open 以上的檔頭（日期標題、串一～串六、全集）
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>解析</legend>
+        <label>講者名字最多幾個字
+          <input name="max_speaker_chars" type="number" min="1" max="20" />
+        </label>
+        <p class="muted">這個字數以內、沒有標點的單獨一行，會當成講者名字刪掉。</p>
+      </fieldset>
+
+      <div class="settings-actions">
+        <button type="button" id="resetSettingsBtn" class="ghost">還原預設</button>
+        <span id="settingsStatus" class="muted"></span>
+      </div>
+    </form>
+  </main>
+
+  <template id="segmentTpl">
+    <div class="segment">
+      <div class="segment-head">
+        <strong class="segment-name"></strong>
+        <label class="field">時間
+          <input class="time" placeholder="00:00:00" inputmode="numeric" />
+        </label>
+        <span class="segment-warn"></span>
+        <span class="spacer"></span>
+        <button class="ghost small clear-seg">清空</button>
+      </div>
+      <textarea class="text" spellcheck="false" placeholder="貼上這一段的標題稿（開場、講者名字照貼即可）"></textarea>
+    </div>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>
