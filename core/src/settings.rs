@@ -19,6 +19,20 @@ pub struct Settings {
     pub max_speaker_chars: usize,
     /// 畫面配色 id（對應 styles.css 的 `[data-theme]`）。
     pub theme: String,
+
+    // --- 影片 ---
+    /// 20 秒版 promo 檔案路徑
+    pub promo_20_path: String,
+    /// 45 秒版 promo 檔案路徑
+    pub promo_45_path: String,
+    /// 單集預設用哪個 promo：20 或 45
+    pub default_promo: u32,
+    /// 閃白過場長度（秒）
+    pub transition_secs: f64,
+    /// 輸出影片的資料夾；空白時每次另存新檔時選
+    pub output_dir: String,
+    /// `auto`（自動偵測硬體編碼）或指定 `x264` / `nvenc` / `qsv` / `amf`
+    pub encoder: String,
 }
 
 impl Default for Settings {
@@ -31,6 +45,12 @@ impl Default for Settings {
             include_header: false,
             max_speaker_chars: 6,
             theme: "light".to_string(),
+            promo_20_path: String::new(),
+            promo_45_path: String::new(),
+            default_promo: 20,
+            transition_secs: 0.5,
+            output_dir: String::new(),
+            encoder: "auto".to_string(),
         }
     }
 }

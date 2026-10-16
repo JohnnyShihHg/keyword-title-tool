@@ -41,10 +41,10 @@ jobs:
           projectPath: app/src-tauri
           tagName: ${{ github.ref_name }}
           releaseName: 關鍵標題整理工具 ${{ github.ref_name }}
+          # 標籤指向的 commit 訊息（scripts/release.sh 寫的「版本 x.y.z：說明」）當更新說明，
+          # App 的更新提示會顯示第一行。發布後也可以直接在 GitHub 上改。
           releaseBody: |
-            ## 更新內容
-
-            <!-- 發布後可直接在 GitHub 上編輯這段，App 的更新提示會顯示第一行 -->
+            ${{ github.event.head_commit.message }}
 
             ---
             安裝後首次啟動若出現「Windows 已保護您的電腦」，請點「其他資訊」→「仍要執行」

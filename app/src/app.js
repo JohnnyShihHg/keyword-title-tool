@@ -197,8 +197,6 @@ document.querySelectorAll(".tab").forEach((tab) => {
   });
 });
 
-invoke("video_status").then((s) => ($("videoStatus").textContent = s.message));
-
 // --- 設定後台 ---
 
 const settingsForm = $("settingsForm");
@@ -251,6 +249,12 @@ function readSettingsForm() {
     include_header: f.include_header.checked,
     max_speaker_chars: Number.isFinite(max) && max > 0 ? max : settings.max_speaker_chars,
     theme: f.theme.value || settings.theme,
+    promo_20_path: f.promo_20_path.value,
+    promo_45_path: f.promo_45_path.value,
+    default_promo: parseInt(f.default_promo.value, 10) || settings.default_promo,
+    transition_secs: Math.min(3, Math.max(0.1, parseFloat(f.transition_secs.value) || settings.transition_secs)),
+    output_dir: f.output_dir.value,
+    encoder: f.encoder.value || settings.encoder,
   };
 }
 
@@ -264,10 +268,16 @@ settingsForm.addEventListener("input", () => {
   settings = readSettingsForm();
   applyTheme(settings.theme);
   showSettingsExample();
+  window.onSettingsChanged?.();
   changed();
   clearTimeout(settingsTimer);
   settingsTimer = setTimeout(persistSettings, 300);
 });
+
+/** 檔案選擇器改了唯讀欄位後呼叫：input 事件不會自己觸發。 */
+function settingsFieldChanged() {
+  settingsForm.dispatchEvent(new Event("input"));
+}
 
 async function persistSettings() {
   try {
@@ -324,7 +334,16 @@ async function checkForUpdate({ silent }) {
   badge.textContent = `有新版本 v${update.version}`;
   badge.classList.remove("hidden");
   $("installUpdateBtn").classList.remove("hidden");
-  setUpdateStatus(`有新版本 v${update.version}` + (update.body ? `：${update.body.trim().split("\n")[0]}` : ""));
+  setUpdateStatus(`有新版本 v${update.version}` + (releaseSummary(update.body) ? `：${releaseSummary(update.body)}` : ""));
+}
+
+/** 更新說明的第一行實際內容（跳過「## 更新內容」標題、HTML 註解、分隔線）。 */
+function releaseSummary(body) {
+  return (body || "")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l && !l.startsWith("#") && !/^-{3,}$/.test(l)) || "";
 }
 
 async function installUpdate() {
@@ -373,4 +392,5 @@ $("updateBadge").addEventListener("click", () => {
   fillSettingsForm();
   loadDraft();
   refresh();
+  window.onSettingsChanged?.();
 })();

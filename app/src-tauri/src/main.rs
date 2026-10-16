@@ -73,13 +73,24 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .manage(video::VideoState::default())
         .invoke_handler(tauri::generate_handler![
             render_document,
             save_text_file,
             get_settings,
             default_settings,
             save_settings,
-            video::video_status
+            video::tools_status,
+            video::install_tools,
+            video::probe_video,
+            video::video_thumbnails,
+            video::detect_encoder,
+            video::download_youtube,
+            video::render_video,
+            video::cancel_render,
+            video::output_path,
+            video::path_exists,
+            video::parse_timecode
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

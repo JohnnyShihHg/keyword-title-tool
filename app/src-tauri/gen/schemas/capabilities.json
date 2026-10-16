@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"主視窗權限。App 自訂指令（render_document 等）在沒有 app manifest 時預設開放。","local":true,"windows":["main"],"permissions":["core:default","dialog:default","dialog:allow-save","updater:default","process:allow-restart"]}}
+{"default":{"identifier":"default","description":"主視窗權限。App 自訂指令（render_document 等）在沒有 app manifest 時預設開放。","local":true,"windows":["main"],"permissions":["core:default","dialog:default","dialog:allow-open","dialog:allow-save","updater:default","process:allow-restart"]}}

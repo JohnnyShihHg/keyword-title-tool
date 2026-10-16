@@ -7,6 +7,7 @@ pub mod parse;
 pub mod render;
 pub mod settings;
 pub mod timecode;
+pub mod video;
 
 pub use render::{render, DocumentInput, Rendered, SegmentInput, Warning};
 pub use settings::Settings;

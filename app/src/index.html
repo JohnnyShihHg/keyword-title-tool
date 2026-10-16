@@ -39,15 +39,83 @@
     </section>
   </main>
 
-  <main id="page-video" class="page hidden">
-    <div class="placeholder">
-      <h2>影片處理</h2>
-      <p id="videoStatus" class="muted"></p>
-      <ul class="muted">
-        <li>段落之間加閃白轉場</li>
-        <li>疊上浮水印圖檔</li>
-      </ul>
+  <main id="page-video" class="page hidden video-page">
+    <div id="toolsWarning" class="tools-warning hidden">
+      還沒有影片工具（ffmpeg、yt-dlp）。
+      <button id="gotoToolsBtn" class="small">前往設定下載</button>
     </div>
+
+    <!-- name 相同的 details 一次只會展開一個 -->
+    <details class="acc" name="video-acc" open>
+      <summary>單集</summary>
+      <div class="acc-body">
+        <div class="vrow">
+          <span class="vlabel">完整影片</span>
+          <button id="pickMainBtn" class="ghost">選擇檔案…</button>
+          <span id="mainInfo" class="vinfo muted">尚未選擇</span>
+        </div>
+
+        <div class="vrow">
+          <span class="vlabel">YT 影片</span>
+          <input id="ytUrl" class="grow" placeholder="貼上 YouTube 連結（選填，沒填就只接完整影片＋promo）" />
+          <button id="ytDownloadBtn" class="ghost">下載</button>
+          <button id="ytClearBtn" class="ghost small">移除</button>
+        </div>
+        <div class="vrow sub">
+          <span class="vlabel"></span>
+          <label class="field">開始 <input id="ytStart" class="time" placeholder="00:00:00" /></label>
+          <label class="field">結束 <input id="ytEnd" class="time" placeholder="到結尾" /></label>
+          <span id="ytInfo" class="vinfo muted"></span>
+        </div>
+        <progress id="ytProgress" class="hidden" max="100" value="0"></progress>
+
+        <div class="vrow">
+          <span class="vlabel">Promo</span>
+          <label class="check"><input type="radio" name="promo" value="20" /> 20 秒</label>
+          <label class="check"><input type="radio" name="promo" value="45" /> 45 秒</label>
+          <span id="promoInfo" class="vinfo muted"></span>
+        </div>
+
+        <div class="timeline-head">
+          <strong>Timeline</strong>
+          <span id="timelineTotal" class="muted"></span>
+          <span class="spacer"></span>
+          <span class="muted">點影格可預覽該位置</span>
+        </div>
+        <div id="timeline" class="timeline"><div class="timeline-empty muted">選擇完整影片後會顯示在這裡</div></div>
+        <div id="ruler" class="ruler"></div>
+
+        <div class="preview-wrap">
+          <video id="player" class="hidden" controls preload="metadata"></video>
+          <div id="playerLabel" class="muted"></div>
+        </div>
+
+        <div class="vrow">
+          <span class="vlabel">檔名</span>
+          <select id="partSelect"></select>
+          <input id="fileName" class="grow" placeholder="輸出檔名" />
+          <span class="muted">.mp4</span>
+        </div>
+        <div class="vrow">
+          <span class="vlabel">輸出到</span>
+          <span id="outDirLabel" class="vinfo"></span>
+          <button id="pickOutDirBtn" class="ghost small">變更資料夾</button>
+        </div>
+        <div class="vrow">
+          <span class="vlabel"></span>
+          <button id="renderBtn">開始輸出</button>
+          <button id="cancelRenderBtn" class="ghost danger hidden">取消</button>
+          <button id="previewOutputBtn" class="ghost hidden">預覽成品</button>
+          <span id="renderStatus" class="vinfo"></span>
+        </div>
+        <progress id="renderProgress" class="hidden" max="1" value="0"></progress>
+      </div>
+    </details>
+
+    <details class="acc" name="video-acc">
+      <summary>全集</summary>
+      <div class="acc-body muted">之後製作。</div>
+    </details>
   </main>
 
   <main id="page-settings" class="page hidden">
@@ -65,6 +133,51 @@
         </div>
         <progress id="updateProgress" class="hidden" max="1" value="0"></progress>
         <p class="muted">每次開啟會自動檢查一次；有新版時右上角會出現提示。</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>影片工具</legend>
+        <div id="toolsStatus" class="tools-status"></div>
+        <div class="update-row">
+          <button type="button" id="installToolsBtn">下載工具</button>
+          <button type="button" id="updateYtdlpBtn" class="ghost">只更新 yt-dlp</button>
+          <span id="toolsMsg" class="muted"></span>
+        </div>
+        <progress id="toolsProgress" class="hidden" max="1" value="0"></progress>
+        <p class="muted">ffmpeg 約 110MB、yt-dlp 約 18MB，下載到程式資料夾。YouTube 下載失敗時先試「只更新 yt-dlp」。</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>影片</legend>
+        <label>20 秒 promo
+          <input name="promo_20_path" readonly placeholder="尚未指定" />
+          <button type="button" class="ghost small" data-pick="promo_20_path">選擇</button>
+        </label>
+        <label>45 秒 promo
+          <input name="promo_45_path" readonly placeholder="尚未指定" />
+          <button type="button" class="ghost small" data-pick="promo_45_path">選擇</button>
+        </label>
+        <div class="inline-options">預設 promo
+          <label class="check"><input type="radio" name="default_promo" value="20" /> 20 秒</label>
+          <label class="check"><input type="radio" name="default_promo" value="45" /> 45 秒</label>
+        </div>
+        <label>閃白長度（秒）
+          <input name="transition_secs" type="number" min="0.1" max="3" step="0.1" />
+        </label>
+        <label>輸出資料夾
+          <input name="output_dir" readonly placeholder="未指定（每次輸出時選擇）" />
+          <button type="button" class="ghost small" data-pick-dir="output_dir">選擇</button>
+        </label>
+        <label>編碼方式
+          <select name="encoder">
+            <option value="auto">自動（有顯示卡就用硬體加速）</option>
+            <option value="x264">CPU（最相容，較慢）</option>
+            <option value="nvenc">NVIDIA 顯示卡</option>
+            <option value="qsv">Intel 內顯</option>
+            <option value="amf">AMD 顯示卡</option>
+          </select>
+        </label>
+        <p class="muted">輸出規格固定 1920×1080、29.97fps、H.264 + AAC。</p>
       </fieldset>
 
       <fieldset>
@@ -130,5 +243,6 @@
   </template>
 
   <script src="app.js"></script>
+  <script src="video.js"></script>
 </body>
 </html>

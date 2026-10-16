@@ -36,6 +36,15 @@ pub struct Rendered {
     pub warnings: Vec<Warning>,
     /// 每段解析出的時間，回填輸入框用（`00:27:08`）；空白或格式錯誤為 None。
     pub times: Vec<Option<String>>,
+    /// 有內容的段落與它的 YouTube 標題行，給影片頁的檔名下拉選單用。
+    pub parts: Vec<PartSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PartSummary {
+    pub number: usize,
+    /// `段標題【關鍵時刻】20261016-1張炤和`
+    pub title_line: String,
 }
 
 /// 輸出檔名：`20261014關鍵標題1-6.txt`
@@ -128,11 +137,24 @@ pub fn render(doc: &DocumentInput) -> Rendered {
         }
     }
 
+    let summaries = parts
+        .iter()
+        .map(|p| PartSummary {
+            number: p.number,
+            title_line: title_line(p, date, &doc.settings),
+        })
+        .collect();
+
     Rendered {
         text: layout(date, &parts, &doc.settings),
         warnings,
         times,
+        parts: summaries,
     }
+}
+
+fn title_line(p: &Part, date: &str, settings: &Settings) -> String {
+    format!("{}{}{date}-{}{}", p.title, settings.program_tag, p.number, settings.host)
 }
 
 fn layout(date: &str, parts: &[Part], settings: &Settings) -> String {
@@ -161,7 +183,7 @@ fn layout(date: &str, parts: &[Part], settings: &Settings) -> String {
             out.push(format!("第{}段", SEGMENT_NAMES[p.number - 1]));
         }
         out.push(String::new());
-        out.push(format!("{}{tag}{date}-{}{host}", p.title, p.number));
+        out.push(title_line(p, date, settings));
         out.push(String::new());
         if settings.number_line {
             out.push(String::new());
@@ -222,6 +244,14 @@ mod tests {
         assert!(r.text.contains("（00：00：00）Part1：標題一！【關鍵時刻】20261016－1張炤和"));
         assert!(r.text.contains("（00：44：59）Part3：第三段的標題很長很長【關鍵時刻】20261016－3張炤和"));
         assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn parts_list_title_lines_for_file_names() {
+        let r = render(&doc(vec![seg("", ""), seg("乙標題乙標題乙", "1:00")]));
+        assert_eq!(r.parts.len(), 1);
+        assert_eq!(r.parts[0].number, 2);
+        assert_eq!(r.parts[0].title_line, "乙標題乙標題乙【關鍵時刻】20261016-2張炤和");
     }
 
     #[test]

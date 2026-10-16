@@ -81,11 +81,38 @@ fn is_section_marker(line: &str) -> bool {
     !num.is_empty() && num.chars().all(|c| "一二三四五六七八九十".contains(c) || c.is_ascii_digit())
 }
 
+/// 講者名字行，可能帶段落編號前綴：`國禎`、`1-1禹宣`、`1-3 毓翔`、`１－２瑞德`。
 fn is_speaker(line: &str, max_chars: usize) -> bool {
-    line.chars().count() <= max_chars
-        && !line
+    let name = strip_speaker_number(line);
+    !name.is_empty()
+        && name.chars().count() <= max_chars
+        && !name
             .chars()
-            .any(|c| c.is_ascii_punctuation() || "！？：；，、。「」".contains(c))
+            .any(|c| c.is_ascii_punctuation() || c.is_ascii_digit() || "！？：；，、。「」".contains(c))
+}
+
+/// 去掉講者名字前的「數字-數字」編號（每組 1～2 位數，半形全形都可，後面可接空白）。
+/// 不是編號開頭就原樣回傳。
+fn strip_speaker_number(line: &str) -> &str {
+    let is_digit = |c: char| c.is_ascii_digit() || ('０'..='９').contains(&c);
+    let is_sep = |c: char| "-－‐–—_.．".contains(c);
+    let mut rest = line;
+    let mut saw_digit = false;
+    loop {
+        let count = rest.chars().take_while(|&c| is_digit(c)).count();
+        // 編號每組最多兩位數；「2028年…」這種年份開頭的不算編號
+        if count == 0 || count > 2 {
+            break;
+        }
+        let digits = rest.chars().take(count).map(char::len_utf8).sum::<usize>();
+        saw_digit = true;
+        rest = &rest[digits..];
+        match rest.chars().next() {
+            Some(c) if is_sep(c) && rest[c.len_utf8()..].starts_with(is_digit) => rest = &rest[c.len_utf8()..],
+            _ => break,
+        }
+    }
+    if saw_digit { rest.trim_start() } else { line }
 }
 
 #[cfg(test)]
@@ -154,6 +181,34 @@ DeepSeek大當機5小時"算力耗盡"!? 進入10月"密集故障"數小時罕�
         for m in ["段", "一段落", "手段"] {
             assert!(!is_section_marker(m), "{m}");
         }
+    }
+
+    #[test]
+    fn numbered_speakers_are_removed() {
+        for line in ["1-1禹宣", "1-2瑞德", "1-3 毓翔", "1-4廷輝", "１－２瑞德", "2-10 國禎", "3禹宣"] {
+            assert!(is_speaker(line, 6), "{line}");
+        }
+        // 編號後面沒有名字、或接的是長標題，都不是講者
+        assert!(!is_speaker("1-1", 6));
+        assert!(!is_speaker("2028年未戰先跛腳", 6));
+    }
+
+    #[test]
+    fn numbered_speaker_sample_from_user() {
+        let raw = "台北告急熟悉的國民黨內戰開打! 藍中央委員連署\"開除趙少康\"捍衛黨魂!?\n\n\n\
+            1-1禹宣\n台北告急熟悉的國民黨內戰開打! 藍中央委員連署\"開除趙少康\"捍衛黨魂!?\n\
+            因專訪沈伯洋開除趙少康!? 趙喊話\"想看黨中央立場\"國民黨急派人溝通!?\n\n\n\
+            1-2瑞德\n蔣萬安急了? 找黃國昌\"直播打地鼠\"..親自站台\"仇家\"秦慧珠親暱喊秦姐!?\n\n\n\
+            1-3 毓翔\n\"激進藍\"怒連署砍趙少康! 遭綠\"空戰轟炸\"難還手..媒體靠山卻狂訪沈伯洋\n\n\
+            1-4廷輝\n綠內鬥見骨整合殺敵..國民黨還忙著分裂!? 林:重蹈\"老蔣\"國共內戰覆轍!";
+        let p = parse_segment(raw, 6);
+        assert_eq!(
+            p.title.as_deref(),
+            Some("台北告急熟悉的國民黨內戰開打！ 藍中央委員連署「開除趙少康」捍衛黨魂！？")
+        );
+        assert_eq!(p.lines.len(), 5, "{:#?}", p.lines);
+        assert!(p.lines.iter().all(|l| !l.contains("禹宣") && !l.contains("毓翔")));
+        assert!(p.lines[2].starts_with("蔣萬安急了？"));
     }
 
     #[test]
