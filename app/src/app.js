@@ -16,20 +16,35 @@ const segments = SEGMENT_NAMES.map((name, i) => {
     root,
     text: root.querySelector(".text"),
     time: root.querySelector(".time"),
+    link: root.querySelector(".link"),
     warn: root.querySelector(".segment-warn"),
   };
   if (i === 0) seg.time.title = "沒填就是 00:00:00";
   root.querySelector(".clear-seg").addEventListener("click", () => {
     seg.text.value = "";
     seg.time.value = "";
+    seg.link.value = "";
     changed();
   });
   seg.text.addEventListener("input", changed);
   seg.time.addEventListener("input", changed);
+  seg.link.addEventListener("input", changed);
   seg.time.addEventListener("blur", () => normalizeTime(i));
   segmentsEl.appendChild(root);
   return seg;
 });
+
+// 全集的 YouTube 連結，放在六段下面
+const fullLinkInput = (() => {
+  const card = document.createElement("div");
+  card.className = "segment";
+  card.innerHTML = `<label class="field link-field"><strong>全集</strong> YT 連結
+    <input class="link" spellcheck="false" placeholder="全集上傳後貼上 YouTube 連結（會填在檔頭「全集」後面）" /></label>`;
+  segmentsEl.appendChild(card);
+  const input = card.querySelector("input");
+  input.addEventListener("input", changed);
+  return input;
+})();
 
 function today() {
   const d = new Date();
@@ -43,7 +58,8 @@ let settings = null;
 function collect() {
   return {
     date: dateInput.value.trim(),
-    segments: segments.map((s) => ({ text: s.text.value, time: s.time.value })),
+    segments: segments.map((s) => ({ text: s.text.value, time: s.time.value, link: s.link.value })),
+    full_link: fullLinkInput.value,
     settings,
   };
 }
@@ -70,7 +86,9 @@ function loadDraft() {
     if (!segments[i]) return;
     segments[i].text.value = s.text || "";
     segments[i].time.value = s.time || "";
+    segments[i].link.value = s.link || "";
   });
+  fullLinkInput.value = draft?.full_link || "";
 }
 
 // --- 轉換 ---
@@ -166,7 +184,7 @@ dateInput.addEventListener("input", changed);
 
 // 清空全部前用系統對話框確認（不用 window.confirm()，它在 WebView 裡會卡住）
 $("clearAllBtn").addEventListener("click", async () => {
-  const ok = await window.__TAURI__.dialog.ask("確定要清空六段的內容和時間嗎？", {
+  const ok = await window.__TAURI__.dialog.ask("確定要清空六段的內容、時間和 YT 連結嗎？", {
     title: "清空全部",
     kind: "warning",
     okLabel: "清空",
@@ -176,7 +194,9 @@ $("clearAllBtn").addEventListener("click", async () => {
   segments.forEach((s) => {
     s.text.value = "";
     s.time.value = "";
+    s.link.value = "";
   });
+  fullLinkInput.value = "";
   dateInput.value = today();
   changed();
 });
@@ -239,7 +259,7 @@ function readSettingsForm() {
     program_tag: f.program_tag.value.trim() || settings.program_tag,
     label_segments: f.label_segments.checked,
     number_line: f.number_line.checked,
-    include_header: f.include_header.checked,
+    show_header: f.show_header.checked,
     max_speaker_chars: Number.isFinite(max) && max > 0 ? max : settings.max_speaker_chars,
     theme: f.theme.value || settings.theme,
     promo_20_path: f.promo_20_path.value,

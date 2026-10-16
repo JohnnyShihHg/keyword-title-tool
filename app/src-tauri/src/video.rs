@@ -426,10 +426,26 @@ struct RenderProgress {
     total: f64,
 }
 
+#[derive(Serialize)]
+pub struct RenderResult {
+    output: String,
+    /// 走了快速模式（畫面直接複製、沒有重新編碼）
+    fast: bool,
+}
+
 #[tauri::command]
-pub async fn render_video(app: AppHandle, state: State<'_, VideoState>, spec: RenderSpec) -> Result<String, String> {
+pub async fn render_video(app: AppHandle, state: State<'_, VideoState>, spec: RenderSpec) -> Result<RenderResult, String> {
     let ffmpeg = require_tool(&app, FFMPEG)?;
-    let args = video::build_render_args(&spec)?;
+    let fast = video::can_copy_video(&spec);
+    let args = if fast {
+        let dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let list = dir.join("concat.txt");
+        std::fs::write(&list, video::concat_list(&spec)).map_err(|e| e.to_string())?;
+        video::build_copy_args(&spec, &list.display().to_string())
+    } else {
+        video::build_render_args(&spec)?
+    };
     let total = video::output_duration(&spec);
     let output = spec.output.clone();
     if let Some(dir) = Path::new(&output).parent() {
@@ -466,7 +482,7 @@ pub async fn render_video(app: AppHandle, state: State<'_, VideoState>, spec: Re
             return Err("已取消".to_string());
         }
         match status {
-            Some(Ok(s)) if s.success() => Ok(output),
+            Some(Ok(s)) if s.success() => Ok(RenderResult { output, fast }),
             Some(Ok(_)) => {
                 let _ = std::fs::remove_file(&output);
                 Err(format!("輸出失敗：{}", stderr_tail.join().unwrap_or_default()))

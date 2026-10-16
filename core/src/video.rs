@@ -18,6 +18,9 @@ pub struct Clip {
     /// 和前一段怎麼接（第一段忽略）。
     #[serde(default)]
     pub join: Join,
+    /// [`ProbeInfo::copy_signature`]，判斷能不能走快速模式。
+    #[serde(default)]
+    pub signature: Option<String>,
 }
 
 /// 兩段之間的接法。
@@ -253,6 +256,47 @@ pub fn build_render_args(spec: &RenderSpec) -> Result<Vec<String>, String> {
     Ok(args)
 }
 
+/// 快速模式：全部直接接（沒有閃白）、沒有裁切、每段規格指紋相同且是目標解析度時，
+/// 畫面不用重新編碼，用 concat demuxer 直接複製串接，只重新編碼聲音（為了音量增益）。
+/// 30 分鐘的影片從十幾分鐘縮短到一分鐘內，畫質也完全不損失。
+pub fn can_copy_video(spec: &RenderSpec) -> bool {
+    let Some(first) = spec.clips.first().and_then(|c| c.signature.as_deref()) else {
+        return false;
+    };
+    first.contains(&format!("|{}x{}|", spec.width, spec.height))
+        && spec.clips.iter().skip(1).all(|c| c.join == Join::Cut)
+        && spec.clips.iter().all(|c| {
+            c.has_audio && !c.is_trimmed() && c.signature.as_deref() == Some(first)
+        })
+}
+
+/// concat demuxer 的清單檔內容（ffconcat 格式）。
+pub fn concat_list(spec: &RenderSpec) -> String {
+    let mut out = String::from("ffconcat version 1.0\n");
+    for clip in &spec.clips {
+        // 單引號內全部照字面解讀；路徑本身的單引號要跳出來另外處理
+        out.push_str(&format!("file '{}'\n", clip.path.replace('\'', "'\\''")));
+    }
+    out
+}
+
+/// 快速模式的 ffmpeg 參數，`list_path` 是 [`concat_list`] 寫成的檔案。
+pub fn build_copy_args(spec: &RenderSpec, list_path: &str) -> Vec<String> {
+    let mut args = strings(&["-hide_banner", "-y", "-f", "concat", "-safe", "0", "-i"]);
+    args.push(list_path.to_string());
+    args.extend(strings(&["-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy"]));
+    if spec.gain_db != 0.0 {
+        args.push("-af".into());
+        args.push(format!("volume={}dB,alimiter=limit=0.95:level=false", secs(spec.gain_db)));
+        args.extend(strings(&["-c:a", "aac", "-b:a", "192k"]));
+    } else {
+        args.extend(strings(&["-c:a", "copy"]));
+    }
+    args.extend(strings(&["-movflags", "+faststart", "-progress", "pipe:1", "-nostats"]));
+    args.push(spec.output.clone());
+    args
+}
+
 /// ffmpeg `-progress pipe:1` 輸出的一行，回傳目前輸出到第幾秒。
 pub fn parse_progress_line(line: &str) -> Option<f64> {
     // out_time_ms 其實也是微秒（ffmpeg 的歷史包袱），兩個都當微秒處理。
@@ -272,6 +316,9 @@ pub struct ProbeInfo {
     /// 例如 29.97
     pub fps: f64,
     pub has_audio: bool,
+    /// 影音規格指紋（編碼、profile、解析度、像素格式、幀率、聲音格式）。
+    /// 每段指紋都一樣時，畫面可以直接複製串接，不用重新編碼。
+    pub copy_signature: String,
 }
 
 pub fn probe_args(path: &str) -> Vec<String> {
@@ -291,6 +338,11 @@ pub fn parse_probe_json(json: &str) -> Result<ProbeInfo, String> {
     #[derive(Deserialize)]
     struct Stream {
         codec_type: Option<String>,
+        codec_name: Option<String>,
+        profile: Option<String>,
+        pix_fmt: Option<String>,
+        sample_rate: Option<String>,
+        channels: Option<u32>,
         width: Option<u32>,
         height: Option<u32>,
         avg_frame_rate: Option<String>,
@@ -334,12 +386,31 @@ pub fn parse_probe_json(json: &str) -> Result<ProbeInfo, String> {
         .find_map(|r| parse_rational(r))
         .unwrap_or(0.0);
 
+    let audio = root.streams.iter().find(|s| s.codec_type.as_deref() == Some("audio"));
+    let opt = |v: &Option<String>| v.clone().unwrap_or_default();
+    let copy_signature = format!(
+        "{}|{}|{}x{}|{}|{}|{}",
+        opt(&video.codec_name),
+        opt(&video.profile),
+        video.width.unwrap_or(0),
+        video.height.unwrap_or(0),
+        opt(&video.pix_fmt),
+        opt(&video.r_frame_rate),
+        audio.map_or("noaudio".to_string(), |a| format!(
+            "{}|{}|{}",
+            opt(&a.codec_name),
+            opt(&a.sample_rate),
+            a.channels.unwrap_or(0)
+        )),
+    );
+
     Ok(ProbeInfo {
         duration,
         width: video.width.unwrap_or(0),
         height: video.height.unwrap_or(0),
         fps,
         has_audio,
+        copy_signature,
     })
 }
 
@@ -443,7 +514,15 @@ mod tests {
     use super::*;
 
     fn clip(path: &str, duration: f64) -> Clip {
-        Clip { path: path.into(), duration, has_audio: true, start: None, end: None, join: Join::Flash }
+        Clip {
+            path: path.into(),
+            duration,
+            has_audio: true,
+            start: None,
+            end: None,
+            join: Join::Flash,
+            signature: Some("h264|High|1920x1080|yuv420p|30000/1001|aac|48000|2".into()),
+        }
     }
 
     fn spec(clips: Vec<Clip>) -> RenderSpec {
@@ -579,6 +658,56 @@ mod tests {
     }
 
     #[test]
+    fn copy_mode_only_when_all_cut_untrimmed_and_identical() {
+        let mut promo = clip("promo45.mp4", 45.0);
+        promo.join = Join::Cut;
+        let s = spec(vec![clip("main.mp4", 1800.0), promo.clone()]);
+        assert!(can_copy_video(&s));
+
+        // 有閃白（接 YT）就不行
+        let s2 = spec(vec![clip("main.mp4", 1800.0), clip("yt.mp4", 60.0), promo.clone()]);
+        assert!(!can_copy_video(&s2));
+
+        // 規格不同就不行
+        let mut other = promo.clone();
+        other.signature = Some("h264|Main|1920x1080|yuv420p|30/1|aac|44100|2".into());
+        assert!(!can_copy_video(&spec(vec![clip("main.mp4", 1800.0), other])));
+
+        // 不是 1080p 就不行（輸出規格要 1920×1080）
+        let mut small = clip("main.mp4", 1800.0);
+        small.signature = Some("h264|High|1280x720|yuv420p|30000/1001|aac|48000|2".into());
+        let mut small_promo = promo.clone();
+        small_promo.signature = small.signature.clone();
+        assert!(!can_copy_video(&spec(vec![small, small_promo])));
+
+        // 沒有聲音、或有裁切就不行
+        let mut silent = promo.clone();
+        silent.has_audio = false;
+        assert!(!can_copy_video(&spec(vec![clip("main.mp4", 1800.0), silent])));
+        let mut trimmed = promo;
+        trimmed.end = Some(10.0);
+        assert!(!can_copy_video(&spec(vec![clip("main.mp4", 1800.0), trimmed])));
+    }
+
+    #[test]
+    fn copy_args_and_list() {
+        let mut promo = clip("C:\\promo\\it's.mp4", 45.0);
+        promo.join = Join::Cut;
+        let mut s = spec(vec![clip("C:\\video\\main.mp4", 1800.0), promo]);
+        s.gain_db = 6.0;
+        assert_eq!(
+            concat_list(&s),
+            "ffconcat version 1.0\nfile 'C:\\video\\main.mp4'\nfile 'C:\\promo\\it'\\''s.mp4'\n"
+        );
+        let args = build_copy_args(&s, "list.txt");
+        assert!(args.windows(2).any(|w| w == ["-c:v", "copy"]));
+        assert!(args.windows(2).any(|w| w == ["-af", "volume=6dB,alimiter=limit=0.95:level=false"]));
+        assert_eq!(args.last().unwrap(), "out.mp4");
+        s.gain_db = 0.0;
+        assert!(build_copy_args(&s, "list.txt").windows(2).any(|w| w == ["-c:a", "copy"]));
+    }
+
+    #[test]
     fn progress_lines() {
         assert_eq!(parse_progress_line("out_time_us=59500000"), Some(59.5));
         assert_eq!(parse_progress_line("out_time_ms=1000000"), Some(1.0));
@@ -589,8 +718,8 @@ mod tests {
     #[test]
     fn probe_json() {
         let json = r#"{"streams":[
-            {"codec_type":"video","width":1920,"height":1080,"avg_frame_rate":"30000/1001","r_frame_rate":"30000/1001"},
-            {"codec_type":"audio"},
+            {"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"30000/1001","r_frame_rate":"30000/1001"},
+            {"codec_type":"audio","codec_name":"aac","sample_rate":"48000","channels":2},
             {"codec_type":"video","width":600,"height":600,"disposition":{"attached_pic":1}}
         ],"format":{"duration":"1935.402000"}}"#;
         let p = parse_probe_json(json).unwrap();
@@ -598,6 +727,7 @@ mod tests {
         assert!((p.fps - 29.97).abs() < 0.01);
         assert!(p.has_audio);
         assert!((p.duration - 1935.402).abs() < 1e-6);
+        assert_eq!(p.copy_signature, "h264|High|1920x1080|yuv420p|30000/1001|aac|48000|2");
     }
 
     #[test]

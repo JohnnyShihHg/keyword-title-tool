@@ -11,6 +11,9 @@ const SEGMENT_NAMES: [&str; SEGMENT_COUNT] = ["一", "二", "三", "四", "五",
 pub struct SegmentInput {
     pub text: String,
     pub time: String,
+    /// 這段上傳後的 YouTube 連結，填在檔頭「串一」後面。
+    #[serde(default)]
+    pub link: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -18,6 +21,9 @@ pub struct DocumentInput {
     /// `20261014`
     pub date: String,
     pub segments: Vec<SegmentInput>,
+    /// 全集的 YouTube 連結，填在檔頭「全集」後面。
+    #[serde(default)]
+    pub full_link: String,
     #[serde(default)]
     pub settings: Settings,
 }
@@ -146,7 +152,7 @@ pub fn render(doc: &DocumentInput) -> Rendered {
         .collect();
 
     Rendered {
-        text: layout(date, &parts, &doc.settings),
+        text: layout(date, &parts, doc),
         warnings,
         times,
         parts: summaries,
@@ -157,19 +163,21 @@ fn title_line(p: &Part, date: &str, settings: &Settings) -> String {
     format!("{}{}{date}-{}{}", p.title, settings.program_tag, p.number, settings.host)
 }
 
-fn layout(date: &str, parts: &[Part], settings: &Settings) -> String {
+fn layout(date: &str, parts: &[Part], doc: &DocumentInput) -> String {
+    let settings = &doc.settings;
     let Settings { host, program_tag: tag, .. } = settings;
     let mut out: Vec<String> = Vec::new();
 
-    // 檔頭（日期標題、串一～串六、全集）實際使用時不需要，預設不輸出，從 open 開始。
-    if settings.include_header {
+    // 檔頭：日期標題、串一～串六、全集，後面接各自的 YouTube 連結（範本留一個空格給連結）。
+    if settings.show_header {
         out.push(format!("{date}關鍵標題1-{SEGMENT_COUNT}"));
         out.push(String::new());
-        for name in SEGMENT_NAMES {
-            out.push(format!("串{name} "));
+        for (i, name) in SEGMENT_NAMES.iter().enumerate() {
+            let link = doc.segments.get(i).map_or("", |s| s.link.trim());
+            out.push(format!("串{name} {link}"));
         }
         out.push(String::new());
-        out.push("全集 ".to_string());
+        out.push(format!("全集 {}", doc.full_link.trim()));
         out.push(DIVIDER.to_string());
         out.push(String::new());
     }
@@ -220,6 +228,7 @@ mod tests {
         SegmentInput {
             text: text.into(),
             time: time.into(),
+            link: String::new(),
         }
     }
 
@@ -227,7 +236,11 @@ mod tests {
         DocumentInput {
             date: "20261016".into(),
             segments,
-            settings: Settings::default(),
+            full_link: String::new(),
+            settings: Settings {
+                show_header: false,
+                ..Settings::default()
+            },
         }
     }
 
@@ -306,7 +319,7 @@ mod tests {
             program_tag: "【別的節目】".into(),
             label_segments: false,
             number_line: true,
-            include_header: true,
+            show_header: true,
             ..Settings::default()
         };
         let r = render(&d);
@@ -316,6 +329,18 @@ mod tests {
         assert!(!r.text.contains("第一段"));
         assert!(r.text.contains("\nopen\n\n甲標題"));
         assert!(r.text.contains("代班主持\n\n\n1.\n甲標題"));
+    }
+
+    #[test]
+    fn header_lists_youtube_links() {
+        let mut d = doc(vec![seg("甲標題甲標題甲", ""), seg("乙標題乙標題乙", "1:00")]);
+        d.settings.show_header = true;
+        d.segments[0].link = " https://youtu.be/aaa ".into();
+        d.full_link = "https://youtu.be/full".into();
+        let r = render(&d);
+        assert!(r.text.starts_with(
+            "20261016關鍵標題1-6\n\n串一 https://youtu.be/aaa\n串二 \n串三 \n串四 \n串五 \n串六 \n\n全集 https://youtu.be/full\n=======\n\n第一段\n"
+        ));
     }
 
     #[test]

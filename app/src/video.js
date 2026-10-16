@@ -172,6 +172,7 @@ function createPanel(prefix, buildSequence, defaultName) {
           start: c.start,
           end: c.end,
           join: item.join || "flash",
+          signature: c.info.copy_signature,
         };
       }),
       transition: settings?.transition_secs ?? 0.5,
@@ -368,9 +369,11 @@ function createPanel(prefix, buildSequence, defaultName) {
         `輸出中（${encoderName}）${Math.round(frac * 100)}%` + (remain != null ? ` · 剩約 ${fmtTime(remain)}` : "");
     });
     try {
-      lastOutput = await invoke("render_video", { spec });
+      const result = await invoke("render_video", { spec });
+      lastOutput = result.output;
       progress.value = 1;
-      status.textContent = `✓ 完成（花了 ${fmtTime((Date.now() - startedAt) / 1000)}）：${lastOutput}`;
+      const mode = result.fast ? "快速模式，畫面未重新編碼" : encoderName;
+      status.textContent = `✓ 完成（${mode}，花了 ${fmtTime((Date.now() - startedAt) / 1000)}）：${lastOutput}`;
       el("PreviewBtn").classList.remove("hidden");
     } catch (e) {
       status.textContent = `⚠ ${e}`;

@@ -23,11 +23,13 @@ fn render_fixture(settings: Settings) -> String {
         .map(|(i, time)| SegmentInput {
             text: read(&format!("seg{}.txt", i + 1)),
             time: time.to_string(),
+            link: String::new(),
         })
         .collect();
     let r = render(&DocumentInput {
         date: "20261014".into(),
         segments,
+        full_link: String::new(),
         settings,
     });
     assert!(r.warnings.is_empty(), "{:?}", r.warnings);
@@ -42,7 +44,7 @@ fn expected() -> String {
 #[test]
 fn reproduces_template_exactly_with_header_and_no_labels() {
     let actual = render_fixture(Settings {
-        include_header: true,
+        show_header: true,
         label_segments: false,
         number_line: true,
         ..Settings::default()
@@ -53,13 +55,14 @@ fn reproduces_template_exactly_with_header_and_no_labels() {
 
 #[test]
 fn default_output_is_template_from_open_with_segment_labels() {
-    // 由範本推出預設格式：去掉 open 以上的檔頭，open 換成「第一段」，
+    // 由範本推出預設格式：保留檔頭，open 換成「第一段」，
     // 之後每個 ======= 的下一行補「第N段」（最後一個 ======= 後面接全集，不補），
     // 並拿掉段標題下方的空行＋「1.」編號行。
     let template = expected();
-    let from_open = &template[template.find("open\r\n").unwrap() + "open\r\n".len()..];
+    let open_at = template.find("open\r\n").unwrap();
+    let from_open = &template[open_at + "open\r\n".len()..];
     let names = ["一", "二", "三", "四", "五", "六"];
-    let mut want = format!("第{}段\r\n", names[0]);
+    let mut want = format!("{}第{}段\r\n", &template[..open_at], names[0]);
     for (i, chunk) in from_open.split("=======\r\n").enumerate() {
         if i > 0 {
             want.push_str("=======\r\n");

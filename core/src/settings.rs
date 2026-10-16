@@ -13,8 +13,9 @@ pub struct Settings {
     pub label_segments: bool,
     /// 段標題下方輸出範本的「1.」「2.」編號行。
     pub number_line: bool,
-    /// 輸出 open 以上的檔頭（日期標題、串一～串六、全集）。
-    pub include_header: bool,
+    /// 輸出檔頭（日期標題、串一～串六、全集，後面接 YouTube 連結）。
+    /// 舊版叫 include_header 且預設關閉；改名讓舊設定檔裡的 false 不會把它蓋掉。
+    pub show_header: bool,
     /// 幾個字以內、沒有標點的單獨一行視為講者名字並刪除。
     pub max_speaker_chars: usize,
     /// 畫面配色 id（對應 styles.css 的 `[data-theme]`）。
@@ -42,7 +43,7 @@ impl Default for Settings {
             program_tag: "【關鍵時刻】".to_string(),
             label_segments: true,
             number_line: false,
-            include_header: false,
+            show_header: true,
             max_speaker_chars: 6,
             theme: "light".to_string(),
             promo_20_path: String::new(),
@@ -68,6 +69,6 @@ mod tests {
         assert_eq!(s.host, "別人");
         assert_eq!(s.program_tag, "【關鍵時刻】");
         assert!(s.label_segments);
-        assert!(!s.include_header);
+        assert!(s.show_header);
     }
 }

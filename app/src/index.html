@@ -252,8 +252,8 @@
           段標題下方輸出「1.」「2.」編號行
         </label>
         <label class="check">
-          <input type="checkbox" name="include_header" />
-          輸出 open 以上的檔頭（日期標題、串一～串六、全集）
+          <input type="checkbox" name="show_header" />
+          輸出檔頭（日期標題、串一～串六、全集，後面接 YT 連結）
         </label>
       </fieldset>
 
@@ -284,6 +284,9 @@
         <button class="ghost small clear-seg">清空</button>
       </div>
       <textarea class="text" spellcheck="false" placeholder="貼上這一段的標題稿（開場、講者名字照貼即可）"></textarea>
+      <label class="field link-field">YT 連結
+        <input class="link" spellcheck="false" placeholder="上傳後貼上這段的 YouTube 連結（會填在檔頭「串N」後面）" />
+      </label>
     </div>
   </template>
 

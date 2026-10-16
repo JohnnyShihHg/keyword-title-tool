@@ -285,3 +285,7 @@ select { font: inherit; color: var(--text); background: var(--input-bg); border:
 .cut-dot { background: var(--text); opacity: .55; width: 3px !important; }
 .acc-hint { font-weight: normal; font-size: 12px; margin-left: 10px; }
 .full-segments { display: flex; flex-direction: column; gap: 6px; }
+
+.link-field { display: flex; margin-top: 6px; }
+.link-field strong { color: var(--text); }
+.link-field input { flex: 1; font-size: 13px; }
