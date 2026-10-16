@@ -48,5 +48,5 @@ git tag "v$VERSION"
 git push origin HEAD "v$VERSION"
 
 echo
-echo "已推上 v$VERSION，GitHub Actions 打包約需 10～15 分鐘："
+echo "已推上 v${VERSION}，GitHub Actions 打包約需 10～15 分鐘："
 echo "  https://github.com/JohnnyShihHg/keyword-title-tool/actions"
