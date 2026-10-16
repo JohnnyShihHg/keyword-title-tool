@@ -111,8 +111,9 @@ body { display: flex; flex-direction: column; }
 
 header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: 8px 10px;
   padding: 8px 14px;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
@@ -159,7 +160,8 @@ input.invalid { border-color: var(--warn); background: var(--warn-bg); }
 
 .page { flex: 1; min-height: 0; }
 
-.split { display: grid; grid-template-columns: minmax(420px, 1fr) minmax(420px, 1fr); }
+/* 兩欄都可以縮到很窄；視窗不夠寬時改成上下排列（見檔尾 @media） */
+.split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
 
 .editor {
   overflow-y: auto;
@@ -187,7 +189,7 @@ input.invalid { border-color: var(--warn); background: var(--warn-bg); }
 }
 
 .preview { display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
-.preview-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.preview-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
 .warn-summary { color: var(--warn); }
 
 .warnings {
@@ -289,3 +291,11 @@ select { font: inherit; color: var(--text); background: var(--input-bg); border:
 .link-field { display: flex; margin-top: 6px; }
 .link-field strong { color: var(--text); }
 .link-field input { flex: 1; font-size: 13px; }
+
+/* --- 窄視窗：輸入在上、預覽在下，各佔一半高度 --- */
+@media (max-width: 900px) {
+  .split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
+  .editor { border-right: none; border-bottom: 1px solid var(--border); }
+  h1 { font-size: 15px; }
+  .vlabel { width: 56px; }
+}

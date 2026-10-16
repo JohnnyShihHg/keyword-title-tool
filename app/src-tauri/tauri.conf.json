@@ -12,10 +12,11 @@
       {
         "label": "main",
         "title": "關鍵標題整理工具",
-        "width": 1400,
-        "height": 900,
-        "minWidth": 900,
-        "minHeight": 600
+        "width": 1200,
+        "height": 760,
+        "minWidth": 640,
+        "minHeight": 480,
+        "center": true
       }
     ],
     "security": {
