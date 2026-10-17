@@ -32,8 +32,9 @@ pub struct Settings {
     pub audio_gain_db: f64,
     /// 閃白過場長度（秒）
     pub transition_secs: f64,
-    /// 全集「砍掉片尾」時，第一、二、四、五段從檔尾砍掉的秒數（單集輸出接的 45 秒 promo）
-    pub promo_tail_secs: f64,
+    /// 全集「砍掉片尾」的微調秒數。第一、二、四、五段砍掉的長度＝45 秒 promo 檔的實際長度＋這個值
+    /// （正數多砍、負數少砍）。
+    pub promo_tail_adjust_secs: f64,
     /// 輸出影片的資料夾；空白時每次另存新檔時選
     pub output_dir: String,
     /// `auto`（自動偵測硬體編碼）或指定 `x264` / `nvenc` / `qsv` / `amf`
@@ -55,7 +56,7 @@ impl Default for Settings {
             promo_45_path: String::new(),
             audio_gain_db: 6.0,
             transition_secs: 0.5,
-            promo_tail_secs: 45.0,
+            promo_tail_adjust_secs: 0.0,
             output_dir: String::new(),
             encoder: "auto".to_string(),
         }

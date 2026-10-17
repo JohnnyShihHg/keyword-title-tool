@@ -38,13 +38,33 @@ function fmtPrecise(sec) {
   return `${p(Math.floor(s / 3600))}:${p(Math.floor((s / 60) % 60))}:${p(s % 60)}.${p(cs % 100)}`;
 }
 
-/** 解析 時:分:秒(.小數)、分:秒(.小數) 或 秒(.小數)，全形數字與冒號也可；格式不對回傳 null。 */
+/**
+ * 解析切點時間，全形數字與冒號也可；格式不對回傳 null。
+ *   0456 → 4 分 56 秒、015620 → 1 小時 56 分 20 秒（純數字從右邊每兩位一組：秒、分、時）
+ *   04:56、1:56:20、0456.5、04:56.43 也可以
+ */
 function parsePreciseTime(text) {
   const t = String(text ?? "")
     .replace(/[\uFF10-\uFF19\uFF1A\uFF0E]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
-    .trim();
-  if (!/^\d+(:\d{1,2}){0,2}(\.\d+)?$/.test(t)) return null;
-  return t.split(":").reduce((acc, part) => acc * 60 + parseFloat(part), 0);
+    .replace(/\s+/g, "");
+  let parts;
+  let frac = 0;
+  if (/^\d+(\.\d+)?$/.test(t)) {
+    const [digits, dec] = t.split(".");
+    if (digits.length > 6) return null;
+    const padded = digits.padStart(Math.ceil(digits.length / 2) * 2, "0");
+    parts = padded.match(/\d\d/g).map(Number);
+    frac = dec ? parseFloat(`0.${dec}`) : 0;
+  } else if (/^\d+(:\d{1,2}){1,2}(\.\d+)?$/.test(t)) {
+    const [main, dec] = t.split(".");
+    parts = main.split(":").map(Number);
+    frac = dec ? parseFloat(`0.${dec}`) : 0;
+  } else {
+    return null;
+  }
+  // 分、秒超過 59 多半是打錯（例如 0475），不要默默換算
+  if (parts.slice(1).some((n) => n > 59) || (parts.length > 1 && parts[parts.length - 1] > 59)) return null;
+  return parts.reduce((acc, n) => acc * 60 + n, 0) + frac;
 }
 
 function baseName(path) {
@@ -391,7 +411,43 @@ function createPanel(prefix, buildSequence, defaultName) {
     tlTick();
   }
 
+  /** 成品時間 → 第幾段、該段原始檔的第幾秒 */
+  function locateOut(out) {
+    let idx = 0;
+    tl.placements.forEach((p, i) => {
+      if ((p.transition_at ?? p.visible_at) <= out) idx = i;
+    });
+    const p = tl.placements[idx];
+    const item = tl.seq[idx];
+    if (!p || !item) return null;
+    const { start, end } = clipRange(item);
+    return { idx, seconds: Math.min(end - 0.04, start + Math.max(0, out - (p.transition_at ?? p.visible_at))) };
+  }
+
+  let outDragging = false;
+  function showOutPos(out) {
+    el("OutBar").classList.remove("hidden");
+    const range = el("OutRange");
+    range.max = String(Math.max(tl.total, 0.01));
+    if (!outDragging) range.value = String(out);
+    el("OutTime").textContent = `${fmtPrecise(out)} / ${fmtPrecise(tl.total)}`;
+  }
+
+  {
+    const range = el("OutRange");
+    range.addEventListener("input", () => {
+      outDragging = true;
+      el("OutTime").textContent = `${fmtPrecise(+range.value)} / ${fmtPrecise(tl.total)}`;
+    });
+    range.addEventListener("change", () => {
+      outDragging = false;
+      const at = locateOut(+range.value);
+      if (at) tlGoto(at.idx, at.seconds, !el("Player").paused);
+    });
+  }
+
   function tlStop() {
+    el("OutBar").classList.add("hidden");
     tl.idx = -1;
     if (tl.raf) cancelAnimationFrame(tl.raf);
     tl.raf = 0;
@@ -439,7 +495,8 @@ function createPanel(prefix, buildSequence, defaultName) {
     const place = tl.placements[tl.idx];
     const outAt = place ? (place.transition_at ?? place.visible_at) + Math.max(0, t - start) : 0;
     el("PlayerLabel").textContent =
-      `播放時間軸（尚未輸出，閃白與音量為近似）：${item.label} · 成品約 ${fmtTime(outAt)} / ${fmtTime(tl.total)}`;
+      `播放時間軸（尚未輸出，閃白與音量為近似）：${item.label}。播放器自己的進度條是原始檔長度，請看上面的「成品」進度條`;
+    showOutPos(outAt);
 
     if (t >= end - 0.03 || player.ended) {
       if (next) tlGoto(tl.idx + 1, clipRange(next).start, playing);
@@ -978,11 +1035,18 @@ const full = createPanel(
 );
 
 // 砍掉片尾：單集輸出的檔案尾巴接著 45 秒 promo（第三、六段前面還多接了 YT），
-// 全集要把它砍掉再接。第一、二、四、五段砍最後 promo_tail_secs 秒；第三、六段
+// 全集要把它砍掉再接。第一、二、四、五段砍掉 45 秒 promo 檔的實際長度（＋設定的微調）；第三、六段
 // 由使用者指定從哪個時間點以後都不要。預設勾選：放進全集的幾乎都是單集輸出的成品。
 const CUT_AT_SEGMENTS = new Set([3, 6]);
 const segTrim = Object.fromEntries([1, 2, 3, 4, 5, 6].map((n) => [n, { on: true, text: "", ok: true, error: "" }]));
 const segRows = {};
+
+/** 片尾要砍的秒數＝45 秒 promo 檔的實際長度＋微調；還沒指定 promo 時回傳 null。 */
+function promoTailSecs() {
+  const promo = store.promo45;
+  if (!promo) return null;
+  return Math.max(0, promo.info.duration + (settings?.promo_tail_adjust_secs ?? 0));
+}
 
 /** 依勾選狀態算出第 n 段的結束點，寫回 store，並更新該列的說明。 */
 async function applySegTrim(n) {
@@ -1002,7 +1066,7 @@ async function applySegTrim(n) {
         end = parsePreciseTime(t.text);
         if (end == null) {
           t.ok = false;
-          t.error = "時間格式不對，例如 00:15:20 或 00:15:20.43";
+          t.error = "時間格式不對，例如 0456（4 分 56 秒）、015620（1 小時 56 分 20 秒）或 04:56.43";
         }
         if (t.ok && !(end > 0 && end < duration)) {
           t.ok = false;
@@ -1010,10 +1074,16 @@ async function applySegTrim(n) {
         }
       }
     } else if (t.on) {
-      end = duration - (settings?.promo_tail_secs ?? 45);
-      if (!(end > 0)) {
+      const tail = promoTailSecs();
+      if (tail == null) {
         t.ok = false;
-        t.error = `檔案只有 ${fmtTime(duration)}，比片尾要砍的 ${settings?.promo_tail_secs ?? 45} 秒還短`;
+        t.error = "請先在設定指定 45 秒 promo 檔案，才知道片尾要砍多長";
+      } else {
+        end = duration - tail;
+        if (!(end > 0)) {
+          t.ok = false;
+          t.error = `檔案只有 ${fmtPrecise(duration)}，比片尾要砍的 ${tail.toFixed(2)} 秒還短`;
+        }
       }
     }
     clip.end = t.ok ? end : null;
@@ -1024,7 +1094,9 @@ async function applySegTrim(n) {
       ? ""
       : !t.ok
         ? `⚠ ${t.error}`
-        : `使用到 ${fmtPrecise(clip.end)}，後面 ${fmtPrecise(clip.info.duration - clip.end)} 不要`;
+        : CUT_AT_SEGMENTS.has(n)
+          ? `使用到 ${fmtPrecise(clip.end)}，後面 ${fmtPrecise(clip.info.duration - clip.end)} 不要`
+          : `砍掉片尾 ${(clip.info.duration - clip.end).toFixed(2)} 秒，使用到 ${fmtPrecise(clip.end)}`;
     row.trimInfo.classList.toggle("warn", !t.ok);
   }
   full.refresh();
@@ -1046,7 +1118,7 @@ $("fullSegments").replaceChildren(
       <label class="seg-trim" title="${cutAt ? "從指定時間點以後都不要（YT 與片尾 promo）" : "砍掉檔案最後的片尾 promo，秒數在設定裡調整"}">
         <input type="checkbox" class="seg-trim-on" checked /> 砍掉片尾
       </label>
-      ${cutAt ? `<span class="seg-cut-at">從 <input class="time seg-trim-time" placeholder="00:00:00.00" /> 以後都不要
+      ${cutAt ? `<span class="seg-cut-at">從 <input class="time seg-trim-time" placeholder="例 0456" title="只打數字即可：0456＝4 分 56 秒、015620＝1 小時 56 分 20 秒；要更準可加小數，如 0456.43" /> 以後都不要
         <button class="ghost small seg-use-pos" title="用「播放時間軸」播到要切的地方暫停，再按這顆">用目前播放位置</button></span>` : ""}
       <span class="vinfo muted seg-info">尚未選擇</span>
       <span class="vinfo muted seg-trim-info"></span>`;
