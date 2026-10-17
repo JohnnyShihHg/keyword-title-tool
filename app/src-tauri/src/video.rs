@@ -363,7 +363,7 @@ pub async fn detect_encoder(app: AppHandle, state: State<'_, VideoState>, force:
         for enc in Encoder::HARDWARE {
             let (ok, error) = match command(&ffmpeg).args(enc.probe_args()).stdout(Stdio::null()).output() {
                 Ok(o) if o.status.success() => (true, String::new()),
-                Ok(o) => (false, explain_encoder_error(&last_lines(&String::from_utf8_lossy(&o.stderr), 3))),
+                Ok(o) => (false, explain_encoder_error(&key_error_lines(&String::from_utf8_lossy(&o.stderr)))),
                 Err(e) => (false, e.to_string()),
             };
             attempts.push(EncoderAttempt { encoder: enc, label: enc.label(), ok, error });
@@ -399,6 +399,41 @@ fn explain_encoder_error(raw: &str) -> String {
         ""
     };
     if hint.is_empty() { raw.to_string() } else { format!("{hint}（{raw}）") }
+}
+
+/// ffmpeg 失敗時最後幾行通常是「Task finished / Terminating / Nothing was written」這類收尾訊息，
+/// 真正的原因（例如「minimum required Nvidia driver is 610」）在前面。去掉收尾訊息，留前兩句。
+fn key_error_lines(text: &str) -> String {
+    const NOISE: [&str; 6] = [
+        "task finished with error code",
+        "terminating thread with return code",
+        "nothing was written into output file",
+        "conversion failed",
+        "could not open encoder before eof",
+        "error sending frames to consumers",
+    ];
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter(|l| {
+            let lower = l.to_lowercase();
+            !NOISE.iter().any(|n| lower.contains(n))
+        })
+        .collect();
+    if lines.is_empty() {
+        return last_lines(text, 2);
+    }
+    // 去掉「[h264_nvenc @ 0000…] 」這種前綴，訊息比較好讀
+    lines
+        .iter()
+        .take(2)
+        .map(|l| match (l.starts_with('['), l.find("] ")) {
+            (true, Some(i)) => &l[i + 2..],
+            _ => l,
+        })
+        .collect::<Vec<_>>()
+        .join(" / ")
 }
 
 fn last_lines(text: &str, n: usize) -> String {
@@ -620,6 +655,20 @@ mod tests {
 #[cfg(test)]
 mod explain_tests {
     use super::explain_encoder_error;
+
+    #[test]
+    fn picks_the_real_cause_not_the_shutdown_noise() {
+        let stderr = "[h264_nvenc @ 000000d7bd3e3f80] The minimum required Nvidia driver for nvenc is 610.00 or newer
+[vost#0:0/h264_nvenc @ 000000d7bce25d80] [enc:h264_nvenc @ 000000d7bd3d4b80] Error while opening encoder - maybe incorrect parameters such as bit_rate, rate, width or height.
+[fc#0 @ 000000d7bc5dcc80] Error sending frames to consumers: Function not implemented
+[vost#0:0/h264_nvenc @ 00000255d98af900] Task finished with error code: -22 (Invalid argument)
+[vost#0:0/h264_nvenc @ 00000255d98af900] Terminating thread with return code -22 (Invalid argument)
+[out#0/null @ 00000255d77a9680] Nothing was written into output file, because at least one of its streams received no packets.";
+        let key = super::key_error_lines(stderr);
+        assert!(key.starts_with("The minimum required Nvidia driver for nvenc is 610.00"), "{key}");
+        assert!(!key.contains("Task finished"));
+        assert!(explain_encoder_error(&key).starts_with("NVIDIA 驅動版本太舊"));
+    }
 
     #[test]
     fn common_errors_get_plain_hints() {
