@@ -339,3 +339,8 @@ select { font: inherit; color: var(--text); background: var(--input-bg); border:
 .seg-cut-at.hidden { display: none; }
 .seg-trim-time { width: 90px; }
 .seg-trim-info.warn { color: var(--warn); }
+
+/* 播放器逐格／逐秒 */
+.step-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; }
+.step-bar.hidden { display: none; }
+.precise { font-variant-numeric: tabular-nums; font-weight: bold; min-width: 9em; }

@@ -80,6 +80,14 @@
             <video id="singlePlayer" class="hidden" controls preload="metadata"></video>
             <div id="singleFlash" class="flash-overlay"></div>
           </div>
+          <div id="singleStepBar" class="step-bar hidden">
+            <button class="ghost small" data-step="-1s" title="Shift + ←">◀◀ 1 秒</button>
+            <button class="ghost small" data-step="-1f" title="←">◀ 1 格</button>
+            <button class="ghost small" data-step="+1f" title="→">1 格 ▶</button>
+            <button class="ghost small" data-step="+1s" title="Shift + →">1 秒 ▶▶</button>
+            <span id="singlePrecise" class="precise"></span>
+            <span class="muted">點一下播放器後，← → 逐格、Shift + ← → 逐秒</span>
+          </div>
           <div id="singlePlayerLabel" class="muted"></div>
         </div>
 
@@ -129,6 +137,14 @@
           <div class="player-box">
             <video id="fullPlayer" class="hidden" controls preload="metadata"></video>
             <div id="fullFlash" class="flash-overlay"></div>
+          </div>
+          <div id="fullStepBar" class="step-bar hidden">
+            <button class="ghost small" data-step="-1s" title="Shift + ←">◀◀ 1 秒</button>
+            <button class="ghost small" data-step="-1f" title="←">◀ 1 格</button>
+            <button class="ghost small" data-step="+1f" title="→">1 格 ▶</button>
+            <button class="ghost small" data-step="+1s" title="Shift + →">1 秒 ▶▶</button>
+            <span id="fullPrecise" class="precise"></span>
+            <span class="muted">點一下播放器後，← → 逐格、Shift + ← → 逐秒</span>
           </div>
           <div id="fullPlayerLabel" class="muted"></div>
         </div>
