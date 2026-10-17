@@ -275,7 +275,10 @@ select { font: inherit; color: var(--text); background: var(--input-bg); border:
 .ruler-end { flex: 0 0 auto; }
 
 .preview-wrap { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
-#player { width: 100%; max-width: 720px; max-height: 405px; background: #000; border-radius: 6px; }
+/* 用 class 選擇器套到單集、全集兩個播放器（之前用 #player，改 id 後失效，影片以原始 1920px 顯示撐爆版面） */
+.preview-wrap { width: 100%; }
+.preview-wrap video { display: block; width: 100%; max-width: 720px; max-height: 40vh; aspect-ratio: 16 / 9; background: #000; border-radius: 6px; object-fit: contain; }
+.preview-wrap video.hidden { display: none; }
 
 .tools-status { display: flex; flex-direction: column; gap: 2px; font-size: 13px; word-break: break-all; }
 .inline-options { display: flex; align-items: center; gap: 12px; }
