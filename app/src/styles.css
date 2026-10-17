@@ -331,3 +331,11 @@ select { font: inherit; color: var(--text); background: var(--input-bg); border:
 .fast-info { font-size: 13px; }
 .fast-yes { color: var(--accent); font-weight: bold; }
 .fast-no { color: var(--warn); font-weight: bold; }
+
+/* 全集：砍掉片尾 */
+.seg-row { flex-wrap: wrap; }
+.seg-trim { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; white-space: nowrap; }
+.seg-cut-at { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; }
+.seg-cut-at.hidden { display: none; }
+.seg-trim-time { width: 90px; }
+.seg-trim-info.warn { color: var(--warn); }

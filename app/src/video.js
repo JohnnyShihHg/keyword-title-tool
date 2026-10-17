@@ -443,6 +443,14 @@ function createPanel(prefix, buildSequence, defaultName) {
     player.addEventListener("seeked", () => tl.idx >= 0 && tlTick());
   }
 
+  /** 播放器目前停在 key 那個檔案的第幾秒（原始檔時間）；播放器不在那個檔案就回傳 null。 */
+  panel.playerTimeIn = (key) => {
+    const player = el("Player");
+    const clip = store[key];
+    if (!clip || player.classList.contains("hidden") || player.dataset.path !== clip.path) return null;
+    return player.currentTime;
+  };
+
   el("PlayTimelineBtn").addEventListener("click", () => {
     if (!tl.seq.length) return;
     tlGoto(0, clipRange(tl.seq[0]).start, true);
@@ -908,17 +916,87 @@ const full = createPanel(
   () => `${$("date").value.trim()}關鍵時刻全集`,
 );
 
+// 砍掉片尾：單集輸出的檔案尾巴接著 45 秒 promo（第三、六段前面還多接了 YT），
+// 全集要把它砍掉再接。第一、二、四、五段砍最後 promo_tail_secs 秒；第三、六段
+// 由使用者指定從哪個時間點以後都不要。預設勾選：放進全集的幾乎都是單集輸出的成品。
+const CUT_AT_SEGMENTS = new Set([3, 6]);
+const segTrim = Object.fromEntries([1, 2, 3, 4, 5, 6].map((n) => [n, { on: true, text: "", ok: true, error: "" }]));
+const segRows = {};
+
+/** 依勾選狀態算出第 n 段的結束點，寫回 store，並更新該列的說明。 */
+async function applySegTrim(n) {
+  const clip = store[`s${n}`];
+  const t = segTrim[n];
+  const row = segRows[n];
+  t.ok = true;
+  t.error = "";
+  if (clip) {
+    const duration = clip.info.duration;
+    let end = null;
+    if (t.on && CUT_AT_SEGMENTS.has(n)) {
+      if (!t.text.trim()) {
+        t.ok = false;
+        t.error = "請填入從哪個時間點以後不要";
+      } else {
+        try {
+          end = await invoke("parse_timecode", { input: t.text });
+        } catch (e) {
+          t.ok = false;
+          t.error = `時間格式不對：${e}`;
+        }
+        if (t.ok && !(end > 0 && end < duration)) {
+          t.ok = false;
+          t.error = `時間點要在 00:00:00 和檔案長度 ${fmtTime(duration)} 之間`;
+        }
+      }
+    } else if (t.on) {
+      end = duration - (settings?.promo_tail_secs ?? 45);
+      if (!(end > 0)) {
+        t.ok = false;
+        t.error = `檔案只有 ${fmtTime(duration)}，比片尾要砍的 ${settings?.promo_tail_secs ?? 45} 秒還短`;
+      }
+    }
+    clip.end = t.ok ? end : null;
+  }
+  if (row) {
+    row.timeInput?.classList.toggle("invalid", !t.ok);
+    row.trimInfo.textContent = !clip || !t.on
+      ? ""
+      : !t.ok
+        ? `⚠ ${t.error}`
+        : `使用到 ${fmtTime(clip.end)}，後面 ${fmtTime(clip.info.duration - clip.end)} 不要`;
+    row.trimInfo.classList.toggle("warn", !t.ok);
+  }
+  full.refresh();
+}
+
+async function applyAllSegTrims() {
+  for (const n of [1, 2, 3, 4, 5, 6]) await applySegTrim(n);
+}
+
 $("fullSegments").replaceChildren(
   ...SEGMENT_NAMES.map((name, i) => {
     const n = i + 1;
+    const cutAt = CUT_AT_SEGMENTS.has(n);
     const row = document.createElement("div");
-    row.className = "vrow";
+    row.className = "vrow seg-row";
     row.innerHTML = `<span class="vlabel">第${name}段</span>
       <button class="ghost">選擇檔案…</button>
       <button class="ghost small">移除</button>
-      <span class="vinfo muted">尚未選擇</span>`;
+      <label class="seg-trim" title="${cutAt ? "從指定時間點以後都不要（YT 與片尾 promo）" : "砍掉檔案最後的片尾 promo，秒數在設定裡調整"}">
+        <input type="checkbox" class="seg-trim-on" checked /> 砍掉片尾
+      </label>
+      ${cutAt ? `<span class="seg-cut-at">從 <input class="time seg-trim-time" placeholder="00:00:00" /> 以後都不要
+        <button class="ghost small seg-use-pos" title="用「播放時間軸」播到要切的地方暫停，再按這顆">用目前播放位置</button></span>` : ""}
+      <span class="vinfo muted seg-info">尚未選擇</span>
+      <span class="vinfo muted seg-trim-info"></span>`;
     const [pick, clear] = row.querySelectorAll("button");
-    const info = row.querySelector(".vinfo");
+    const info = row.querySelector(".seg-info");
+    const onBox = row.querySelector(".seg-trim-on");
+    const cutAtBox = row.querySelector(".seg-cut-at");
+    const timeInput = row.querySelector(".seg-trim-time");
+    segRows[n] = { timeInput, trimInfo: row.querySelector(".seg-trim-info") };
+
     pick.addEventListener("click", async () => {
       const path = await pickVideo();
       if (!path) return;
@@ -929,10 +1007,31 @@ $("fullSegments").replaceChildren(
       } catch (e) {
         info.textContent = `⚠ ${e}`;
       }
+      await applySegTrim(n);
     });
-    clear.addEventListener("click", () => {
+    clear.addEventListener("click", async () => {
       info.textContent = "尚未選擇";
-      setClip(`s${n}`, null);
+      await setClip(`s${n}`, null);
+      await applySegTrim(n);
+    });
+    onBox.addEventListener("change", () => {
+      segTrim[n].on = onBox.checked;
+      cutAtBox?.classList.toggle("hidden", !onBox.checked);
+      applySegTrim(n);
+    });
+    timeInput?.addEventListener("input", () => {
+      segTrim[n].text = timeInput.value;
+      applySegTrim(n);
+    });
+    row.querySelector(".seg-use-pos")?.addEventListener("click", async () => {
+      const t = full.playerTimeIn(`s${n}`);
+      if (t == null) {
+        segRows[n].trimInfo.textContent = `⚠ 請先用「播放時間軸」或點時間軸，播到第${name}段要切的地方`;
+        return;
+      }
+      timeInput.value = fmtTime(Math.floor(t));
+      segTrim[n].text = timeInput.value;
+      await applySegTrim(n);
     });
     return row;
   }),
@@ -958,6 +1057,10 @@ $("fullRenderBtn").addEventListener("click", () =>
     if (![1, 2, 3, 4, 5, 6].some((n) => store[`s${n}`])) return "請至少選擇一段影片";
     if (!store.promo20) return "請先在設定指定 20 秒 promo 檔案";
     if (!store.promo45) return "請先在設定指定 45 秒 promo 檔案";
+    for (const n of [1, 2, 3, 4, 5, 6]) {
+      const t = segTrim[n];
+      if (store[`s${n}`] && t.on && !t.ok) return `第${SEGMENT_NAMES[n - 1]}段砍掉片尾：${t.error}`;
+    }
     return null;
   }),
 );
@@ -1017,6 +1120,7 @@ window.onSettingsChanged = async () => {
   if (!settings) return;
   refreshOutDir();
   await refreshPromos();
+  await applyAllSegTrims();
   for (const b of blocks) if (b.type === "promo20" || b.type === "promo45") await loadPromoBlock(b);
   panels.forEach((p) => p.refresh());
 };

@@ -269,6 +269,9 @@ function readSettingsForm() {
       ? Math.min(20, Math.max(-20, parseFloat(f.audio_gain_db.value)))
       : settings.audio_gain_db,
     transition_secs: Math.min(3, Math.max(0.1, parseFloat(f.transition_secs.value) || settings.transition_secs)),
+    promo_tail_secs: Number.isFinite(parseFloat(f.promo_tail_secs.value))
+      ? Math.min(300, Math.max(0, parseFloat(f.promo_tail_secs.value)))
+      : settings.promo_tail_secs,
     output_dir: f.output_dir.value,
     encoder: f.encoder.value || settings.encoder,
   };
