@@ -548,8 +548,10 @@ pub fn thumbnail_args(path: &str, at: f64, height: u32) -> Vec<String> {
 /// 最後印出存檔路徑。
 pub fn ytdlp_args(url: &str, output_template: &str, ffmpeg_dir: &str) -> Vec<String> {
     let mut args = strings(&[
+        // 優先 H.264（avc1）＋AAC（mp4a）：YouTube 同一支影片也有 VP9、AV1，沒指定編碼常會抓到 VP9，
+        // 跟電視台的 H.264 素材規格不同、解碼也慢。1080p 以內 YouTube 一定有 avc1，找不到才退而求其次。
         "-f",
-        "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/bv*[height<=1080]+ba/b[height<=1080]/b",
+        "bv*[vcodec^=avc1][height<=1080]+ba[acodec^=mp4a]/bv*[vcodec^=avc1][height<=1080]+ba/bv*[height<=1080]+ba/b[height<=1080]/b",
         "--merge-output-format",
         "mp4",
         "--no-playlist",
@@ -881,6 +883,8 @@ mod tests {
         assert!(parse_ytdlp_line("[youtube] abc: Downloading webpage").is_none());
         let args = ytdlp_args("https://youtu.be/x", "/tmp/%(id)s.%(ext)s", "/tools");
         assert!(args.contains(&"--no-simulate".to_string()));
+        let format = &args[args.iter().position(|a| a == "-f").unwrap() + 1];
+        assert!(format.starts_with("bv*[vcodec^=avc1][height<=1080]+ba[acodec^=mp4a]"), "{format}");
         assert_eq!(args.last().unwrap(), "https://youtu.be/x");
     }
 

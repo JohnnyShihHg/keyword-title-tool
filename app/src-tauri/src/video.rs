@@ -480,7 +480,8 @@ pub async fn download_youtube(app: AppHandle, url: String) -> Result<String, Str
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
     tauri::async_runtime::spawn_blocking(move || {
-        let template = dir.join("%(id)s.%(ext)s").display().to_string();
+        // 檔名加 -h264：舊版抓下來的是 VP9（同名 .mp4），換檔名才不會被 yt-dlp 當成已下載而沿用
+        let template = dir.join("%(id)s-h264.%(ext)s").display().to_string();
         let ffmpeg_dir = ffmpeg.parent().unwrap_or(Path::new(".")).display().to_string();
         let mut child = command(&ytdlp)
             .args(video::ytdlp_args(&url, &template, &ffmpeg_dir))
@@ -507,7 +508,7 @@ pub async fn download_youtube(app: AppHandle, url: String) -> Result<String, Str
         }
         file_path
             .map(PathBuf::from)
-            .or_else(|| id.map(|i| dir.join(format!("{i}.mp4"))))
+            .or_else(|| id.map(|i| dir.join(format!("{i}-h264.mp4"))))
             .filter(|p| p.is_file())
             .map(|p| p.display().to_string())
             .ok_or_else(|| "下載完成但找不到影片檔".to_string())
