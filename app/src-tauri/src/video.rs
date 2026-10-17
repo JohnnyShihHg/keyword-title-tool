@@ -616,9 +616,18 @@ fn collect_tail(stderr: impl Read + Send + 'static) -> std::thread::JoinHandle<S
 }
 
 /// 每段在成品上的位置與總長（timeline 刻度、章節時間用）。
+#[derive(Serialize)]
+pub struct PlanResult {
+    placements: Vec<video::Placement>,
+    total: f64,
+    /// 不能走快速模式的原因；空的就是會走快速模式
+    fast_blockers: Vec<String>,
+}
+
 #[tauri::command]
-pub fn plan_video(spec: RenderSpec) -> (Vec<video::Placement>, f64) {
-    video::plan(&spec)
+pub fn plan_video(spec: RenderSpec) -> PlanResult {
+    let (placements, total) = video::plan(&spec);
+    PlanResult { placements, total, fast_blockers: video::copy_blockers(&spec) }
 }
 
 /// 輸出資料夾 + 檔名（去掉 Windows 不允許的字元）+ `.mp4`

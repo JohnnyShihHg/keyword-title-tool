@@ -322,3 +322,7 @@ select { font: inherit; color: var(--text); background: var(--input-bg); border:
 .block-add-flash { border-color: var(--text); }
 
 .tools-outdated { color: var(--warn); font-weight: bold; margin-top: 4px; }
+
+.fast-info { font-size: 13px; }
+.fast-yes { color: var(--accent); font-weight: bold; }
+.fast-no { color: var(--warn); font-weight: bold; }

@@ -21,6 +21,9 @@ pub struct Clip {
     /// [`ProbeInfo::copy_signature`]，判斷能不能走快速模式。
     #[serde(default)]
     pub signature: Option<String>,
+    /// 顯示用名稱（「Promo 45 秒」），說明為什麼不能走快速模式時用。
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 /// 兩段之間的接法。
@@ -289,14 +292,86 @@ pub fn build_render_args(spec: &RenderSpec) -> Result<Vec<String>, String> {
 /// 畫面不用重新編碼，用 concat demuxer 直接複製串接，只重新編碼聲音（為了音量增益）。
 /// 30 分鐘的影片從十幾分鐘縮短到一分鐘內，畫質也完全不損失。
 pub fn can_copy_video(spec: &RenderSpec) -> bool {
-    let Some(first) = spec.clips.first().and_then(|c| c.signature.as_deref()) else {
-        return false;
+    copy_blockers(spec).is_empty()
+}
+
+/// 不能走快速模式的原因（白話），空的就是可以。
+pub fn copy_blockers(spec: &RenderSpec) -> Vec<String> {
+    let name = |i: usize, c: &Clip| c.label.clone().unwrap_or_else(|| format!("第 {} 段", i + 1));
+    let mut reasons = Vec::new();
+    if spec.clips.iter().skip(1).any(|c| c.join == Join::Flash) {
+        reasons.push("有閃白過場（閃白一定要重新編碼畫面）".to_string());
+    }
+    for (i, c) in spec.clips.iter().enumerate() {
+        if c.is_trimmed() {
+            reasons.push(format!("「{}」有設定開始／結束時間", name(i, c)));
+        }
+        if !c.has_audio {
+            reasons.push(format!("「{}」沒有聲音", name(i, c)));
+        }
+    }
+    let Some(first) = spec.clips.first() else {
+        return reasons;
     };
-    first.contains(&format!("|{}x{}|", spec.width, spec.height))
-        && spec.clips.iter().skip(1).all(|c| c.join == Join::Cut)
-        && spec.clips.iter().all(|c| {
-            c.has_audio && !c.is_trimmed() && c.signature.as_deref() == Some(first)
-        })
+    let Some(first_sig) = first.signature.as_deref() else {
+        reasons.push("讀不到影片規格".to_string());
+        return reasons;
+    };
+    let first_fields = signature_fields(first_sig);
+    if first_fields.get(2) != Some(&format!("{}x{}", spec.width, spec.height)) {
+        reasons.push(format!(
+            "「{}」解析度是 {}，不是 {}x{}",
+            name(0, first),
+            first_fields.get(2).cloned().unwrap_or_default(),
+            spec.width,
+            spec.height
+        ));
+    }
+    for (i, c) in spec.clips.iter().enumerate().skip(1) {
+        let Some(sig) = c.signature.as_deref() else {
+            reasons.push(format!("讀不到「{}」的規格", name(i, c)));
+            continue;
+        };
+        if sig == first_sig {
+            continue;
+        }
+        let fields = signature_fields(sig);
+        let diffs: Vec<String> = SIGNATURE_NAMES
+            .iter()
+            .enumerate()
+            .filter(|(k, _)| fields.get(*k) != first_fields.get(*k))
+            .map(|(k, field)| {
+                let show = |v: Option<&String>| {
+                    let v = v.cloned().unwrap_or_default();
+                    if k == 4 { pretty_fps(&v) } else if v.is_empty() { "無".to_string() } else { v }
+                };
+                format!("{field} {} ≠ {}", show(fields.get(k)), show(first_fields.get(k)))
+            })
+            .collect();
+        reasons.push(format!("「{}」和「{}」規格不同：{}", name(i, c), name(0, first), diffs.join("、")));
+    }
+    reasons
+}
+
+const SIGNATURE_NAMES: [&str; 8] = ["編碼", "profile", "解析度", "像素格式", "幀率", "聲音編碼", "聲音取樣率", "聲道數"];
+
+fn signature_fields(sig: &str) -> Vec<String> {
+    let mut f: Vec<String> = sig.split('|').map(str::to_string).collect();
+    // 沒有聲音的指紋最後是單一個 "noaudio"，補齊成三欄方便逐欄比較
+    if f.last().map(String::as_str) == Some("noaudio") {
+        f.pop();
+        f.extend(["無".to_string(), "無".to_string(), "無".to_string()]);
+    }
+    f
+}
+
+/// `30000/1001` → `29.97`、`30/1` → `30`
+fn pretty_fps(rational: &str) -> String {
+    match parse_rational(rational) {
+        Some(v) if (v - v.round()).abs() < 0.001 => format!("{}", v.round()),
+        Some(v) => format!("{v:.2}"),
+        None => rational.to_string(),
+    }
 }
 
 /// concat demuxer 的清單檔內容（ffconcat 格式）。
@@ -551,6 +626,7 @@ mod tests {
             end: None,
             join: Join::Flash,
             signature: Some("h264|High|1920x1080|yuv420p|30000/1001|aac|48000|2".into()),
+            label: None,
         }
     }
 
@@ -725,6 +801,24 @@ mod tests {
         let mut trimmed = promo;
         trimmed.end = Some(10.0);
         assert!(!can_copy_video(&spec(vec![clip("main.mp4", 1800.0), trimmed])));
+    }
+
+    #[test]
+    fn blockers_explain_why_copy_mode_is_off() {
+        let mut promo = clip("promo45.mp4", 45.0);
+        promo.join = Join::Cut;
+        promo.label = Some("Promo 45 秒".into());
+        promo.signature = Some("h264|High|1920x1080|yuv420p|30/1|aac|48000|2".into());
+        let mut main = clip("main.mp4", 300.0);
+        main.label = Some("測試3".into());
+        let r = copy_blockers(&spec(vec![main.clone(), promo.clone()]));
+        assert_eq!(r, vec!["「Promo 45 秒」和「測試3」規格不同：幀率 30 ≠ 29.97"]);
+
+        let r = copy_blockers(&spec(vec![main.clone(), clip("yt.mp4", 60.0)]));
+        assert_eq!(r, vec!["有閃白過場（閃白一定要重新編碼畫面）"]);
+
+        promo.signature = main.signature.clone();
+        assert!(copy_blockers(&spec(vec![main, promo])).is_empty());
     }
 
     #[test]

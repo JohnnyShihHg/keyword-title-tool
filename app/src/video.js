@@ -188,6 +188,7 @@ function createPanel(prefix, buildSequence, defaultName) {
           end: c.end,
           join: item.join || "flash",
           signature: c.info.copy_signature,
+          label: item.label,
         };
       }),
       transition: settings?.transition_secs ?? 0.5,
@@ -202,9 +203,9 @@ function createPanel(prefix, buildSequence, defaultName) {
   /** 每段在成品上的位置（由 Rust 端計算，和實際輸出一致）。 */
   panel.plan = async () => {
     const seq = panel.sequence();
-    if (!seq.length) return { seq, placements: [], total: 0 };
-    const [placements, total] = await invoke("plan_video", { spec: baseSpec(seq) });
-    return { seq, placements, total };
+    if (!seq.length) return { seq, placements: [], total: 0, fastBlockers: [] };
+    const r = await invoke("plan_video", { spec: baseSpec(seq) });
+    return { seq, placements: r.placements, total: r.total, fastBlockers: r.fast_blockers };
   };
 
   panel.refresh = async () => {
@@ -227,9 +228,17 @@ function createPanel(prefix, buildSequence, defaultName) {
     return `${clip.path}|${clip.start ?? 0}|${usedDuration(clip)}|${count}`;
   }
 
-  function draw({ seq, placements, total }) {
+  function draw({ seq, placements, total, fastBlockers }) {
     const timeline = el("Timeline");
     const ruler = el("Ruler");
+    const fastInfo = el("FastInfo");
+    if (fastInfo) {
+      fastInfo.innerHTML = !seq.length
+        ? ""
+        : fastBlockers.length
+          ? `<span class="fast-no">需要完整重新編碼（較慢）：</span>${fastBlockers.map(escapeHtml).join("；")}`
+          : '<span class="fast-yes">⚡ 快速模式：畫面直接複製，只重新編碼聲音，幾十秒內完成</span>';
+    }
     timeline.replaceChildren();
     ruler.replaceChildren();
     if (!seq.length) {
