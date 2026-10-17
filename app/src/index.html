@@ -67,15 +67,19 @@
         <div class="timeline-head">
           <strong>Timeline</strong>
           <span id="singleTotal" class="muted"></span>
+          <button id="singlePlayTimelineBtn" class="ghost small">▶ 從頭播放時間軸</button>
           <span class="spacer"></span>
-          <span class="legend"><i class="flash-dot"></i>閃白　<i class="cut-dot"></i>直接接　點影格可預覽</span>
+          <span class="legend"><i class="flash-dot"></i>閃白　<i class="cut-dot"></i>直接接　點時間軸可從該處播放（不用先輸出）</span>
         </div>
         <div id="singleTimeline" class="timeline"></div>
         <div id="singleRuler" class="ruler"></div>
         <div id="singleFastInfo" class="fast-info muted"></div>
 
         <div class="preview-wrap">
-          <video id="singlePlayer" class="hidden" controls preload="metadata"></video>
+          <div class="player-box">
+            <video id="singlePlayer" class="hidden" controls preload="metadata"></video>
+            <div id="singleFlash" class="flash-overlay"></div>
+          </div>
           <div id="singlePlayerLabel" class="muted"></div>
         </div>
 
@@ -95,7 +99,7 @@
           <span class="vlabel"></span>
           <button id="singleRenderBtn" class="render-btn">開始輸出</button>
           <button id="singleCancelBtn" class="ghost danger hidden">取消</button>
-          <button id="singlePreviewBtn" class="ghost hidden">預覽成品</button>
+          <button id="singlePreviewBtn" class="ghost hidden">觀看成品</button>
           <span id="singleStatus" class="vinfo"></span>
         </div>
         <progress id="singleProgress" class="hidden" max="1" value="0"></progress>
@@ -114,14 +118,18 @@
         <div class="timeline-head">
           <strong>Timeline</strong>
           <span id="fullTotal" class="muted"></span>
+          <button id="fullPlayTimelineBtn" class="ghost small">▶ 從頭播放時間軸</button>
           <span class="spacer"></span>
-          <span class="legend"><i class="flash-dot"></i>閃白　<i class="cut-dot"></i>直接接　點影格可預覽</span>
+          <span class="legend"><i class="flash-dot"></i>閃白　<i class="cut-dot"></i>直接接　點時間軸可從該處播放（不用先輸出）</span>
         </div>
         <div id="fullTimeline" class="timeline"></div>
         <div id="fullRuler" class="ruler"></div>
 
         <div class="preview-wrap">
-          <video id="fullPlayer" class="hidden" controls preload="metadata"></video>
+          <div class="player-box">
+            <video id="fullPlayer" class="hidden" controls preload="metadata"></video>
+            <div id="fullFlash" class="flash-overlay"></div>
+          </div>
           <div id="fullPlayerLabel" class="muted"></div>
         </div>
 
@@ -145,7 +153,7 @@
           <span class="vlabel"></span>
           <button id="fullRenderBtn" class="render-btn">開始輸出</button>
           <button id="fullCancelBtn" class="ghost danger hidden">取消</button>
-          <button id="fullPreviewBtn" class="ghost hidden">預覽成品</button>
+          <button id="fullPreviewBtn" class="ghost hidden">觀看成品</button>
           <span id="fullStatus" class="vinfo"></span>
         </div>
         <progress id="fullProgress" class="hidden" max="1" value="0"></progress>

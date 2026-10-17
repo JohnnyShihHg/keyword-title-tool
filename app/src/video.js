@@ -173,6 +173,9 @@ function createPanel(prefix, buildSequence, defaultName) {
   const el = (name) => $(`${prefix}${name}`);
   const panel = { sequence: () => buildSequence().filter((item) => store[item.key]) };
   let lastOutput = null;
+  // 輸出當下的時間軸（不含檔名、編碼器），用來判斷成品是不是目前時間軸的樣子
+  let lastOutputKey = null;
+  let lastOutputStamp = 0;
   let overwriteArmed = null;
   let drawSeq = 0;
 
@@ -208,11 +211,25 @@ function createPanel(prefix, buildSequence, defaultName) {
     return { seq, placements: r.placements, total: r.total, fastBlockers: r.fast_blockers };
   };
 
+  /** 時間軸的指紋：同樣的片段、裁切、接法、閃白秒數、音量就會一樣。 */
+  function timelineKey(seq) {
+    return JSON.stringify(baseSpec(seq));
+  }
+
+  /** 時間軸改過之後，「觀看成品」要講清楚播的是上次輸出的檔案。 */
+  function updatePreviewBtn() {
+    const btn = el("PreviewBtn");
+    const stale = lastOutput && timelineKey(panel.sequence()) !== lastOutputKey;
+    btn.textContent = stale ? "觀看上次輸出的成品（時間軸已變更，需重新輸出）" : "觀看成品";
+    btn.title = lastOutput ? lastOutput : "";
+  }
+
   panel.refresh = async () => {
     const mySeq = ++drawSeq;
     const plan = await panel.plan();
     if (mySeq !== drawSeq) return;
     draw(plan);
+    updatePreviewBtn();
     loadThumbs(plan.seq);
   };
 
@@ -229,6 +246,12 @@ function createPanel(prefix, buildSequence, defaultName) {
   }
 
   function draw({ seq, placements, total, fastBlockers }) {
+    // 時間軸播放跟著最新的時間軸走；播放中改了時間軸，下一格就照新的播
+    tl.seq = seq;
+    tl.placements = placements;
+    tl.total = total;
+    tl.blocks = [];
+    if (tl.idx >= seq.length) tlStop();
     const timeline = el("Timeline");
     const ruler = el("Ruler");
     const fastInfo = el("FastInfo");
@@ -266,7 +289,8 @@ function createPanel(prefix, buildSequence, defaultName) {
       block.className = `clip ${SLOT_CLASS[item.kind]}`;
       block.style.flexGrow = widthOf(used);
       block.title = `${item.label}：${baseName(clip.path)}（${fmtTime(used)}）`;
-      block.innerHTML = `<div class="clip-name">${item.label} · ${fmtTime(used)}</div><div class="thumbs"></div>`;
+      block.innerHTML = `<div class="clip-name">${item.label} · ${fmtTime(used)}</div><div class="thumbs"></div><div class="playhead hidden"></div>`;
+      tl.blocks.push(block);
       const thumbs = block.querySelector(".thumbs");
       const cached = thumbCache.get(thumbKey(clip, thumbCount(used, used_total)));
       if (cached) {
@@ -281,7 +305,7 @@ function createPanel(prefix, buildSequence, defaultName) {
       block.addEventListener("click", (ev) => {
         const rect = block.getBoundingClientRect();
         const frac = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
-        previewAt(item, (clip.start ?? 0) + frac * used);
+        tlGoto(i, clipRange(item).start + frac * used, false);
       });
       timeline.appendChild(block);
 
@@ -315,19 +339,114 @@ function createPanel(prefix, buildSequence, defaultName) {
     }
   }
 
-  function previewAt(item, seconds) {
-    const clip = store[item.key];
+  // --- 播放時間軸：照順序連播原始檔，不用先輸出 ---
+  //
+  // 近似成品：閃白用白色遮罩模擬（前一段最後半個過場淡到白、下一段前半個過場從白淡出），
+  // 不像 xfade 那樣兩段重疊，音量也沒有 +6dB。拿來確認順序、裁切點、有沒有放錯片。
+  const tl = { idx: -1, seq: [], placements: [], total: 0, blocks: [], raf: 0, switching: false };
+
+  function clipRange(item) {
+    const c = store[item.key];
+    const start = Math.min(c.start ?? 0, c.info.duration);
+    return { start, end: start + usedDuration(c) };
+  }
+
+  function loadInto(player, path) {
+    if (player.dataset.path === path && player.readyState >= 1) return Promise.resolve();
+    return new Promise((resolve) => {
+      player.addEventListener("loadedmetadata", () => resolve(), { once: true });
+      player.dataset.path = path;
+      player.src = convertFileSrc(path);
+    });
+  }
+
+  async function tlGoto(i, seconds, play) {
+    const item = tl.seq[i];
+    if (!item || !store[item.key]) return tlStop();
+    tl.idx = i;
+    tl.switching = true;
     const player = el("Player");
     player.classList.remove("hidden");
-    if (player.dataset.path !== clip.path) {
-      player.src = convertFileSrc(clip.path);
-      player.dataset.path = clip.path;
-    }
-    const seek = () => (player.currentTime = seconds);
-    if (player.readyState >= 1) seek();
-    else player.addEventListener("loadedmetadata", seek, { once: true });
-    el("PlayerLabel").textContent = `預覽：${item.label} ${fmtTime(seconds)}`;
+    await loadInto(player, store[item.key].path);
+    player.currentTime = seconds;
+    tl.switching = false;
+    if (play) await player.play().catch(() => {});
+    tlTick();
   }
+
+  function tlStop() {
+    tl.idx = -1;
+    if (tl.raf) cancelAnimationFrame(tl.raf);
+    tl.raf = 0;
+    el("Flash").style.opacity = "0";
+    tl.blocks.forEach((b) => b.querySelector(".playhead")?.classList.add("hidden"));
+  }
+
+  function tlFrame() {
+    tl.raf = 0;
+    if (tl.idx < 0) return;
+    tlTick();
+    if (!el("Player").paused) tl.raf = requestAnimationFrame(tlFrame);
+  }
+
+  function tlTick() {
+    const item = tl.seq[tl.idx];
+    if (!item || tl.switching) return;
+    const clip = store[item.key];
+    if (!clip) return tlStop();
+    const player = el("Player");
+    const playing = !player.paused || player.ended;
+    const { start, end } = clipRange(item);
+    // 播放中把這格換了別的片，就重新載入
+    if (player.dataset.path !== clip.path) return tlGoto(tl.idx, start, playing);
+    const t = player.currentTime;
+    if (t < start - 0.2) {
+      player.currentTime = start;
+      return;
+    }
+
+    const half = (settings?.transition_secs ?? 0.5) / 2;
+    const next = tl.seq[tl.idx + 1];
+    let white = 0;
+    if (next && next.join !== "cut" && half > 0 && t > end - half) white = (t - (end - half)) / half;
+    if (tl.idx > 0 && item.join !== "cut" && half > 0 && t < start + half) white = Math.max(white, 1 - (t - start) / half);
+    el("Flash").style.opacity = String(Math.min(1, Math.max(0, white)));
+
+    const used = end - start;
+    tl.blocks.forEach((b, i) => {
+      const head = b.querySelector(".playhead");
+      if (!head) return;
+      head.classList.toggle("hidden", i !== tl.idx);
+      if (i === tl.idx) head.style.left = `${Math.min(100, Math.max(0, ((t - start) / Math.max(used, 0.001)) * 100))}%`;
+    });
+    const place = tl.placements[tl.idx];
+    const outAt = place ? (place.transition_at ?? place.visible_at) + Math.max(0, t - start) : 0;
+    el("PlayerLabel").textContent =
+      `播放時間軸（尚未輸出，閃白與音量為近似）：${item.label} · 成品約 ${fmtTime(outAt)} / ${fmtTime(tl.total)}`;
+
+    if (t >= end - 0.03 || player.ended) {
+      if (next) tlGoto(tl.idx + 1, clipRange(next).start, playing);
+      else {
+        player.pause();
+        el("Flash").style.opacity = "0";
+      }
+    }
+  }
+
+  {
+    const player = el("Player");
+    player.addEventListener("play", () => {
+      if (tl.idx >= 0 && !tl.raf) tl.raf = requestAnimationFrame(tlFrame);
+    });
+    // rAF 在視窗不在前景時會停，timeupdate 補位
+    player.addEventListener("timeupdate", () => tl.idx >= 0 && tlTick());
+    player.addEventListener("seeked", () => tl.idx >= 0 && tlTick());
+  }
+
+  el("PlayTimelineBtn").addEventListener("click", () => {
+    if (!tl.seq.length) return;
+    tlGoto(0, clipRange(tl.seq[0]).start, true);
+  });
 
   /** 決定輸出路徑；有設定資料夾就直接組，沒有就跳另存新檔。 */
   async function resolveOutputPath(nameInput) {
@@ -376,7 +495,9 @@ function createPanel(prefix, buildSequence, defaultName) {
       }
     }
 
-    const spec = baseSpec(panel.sequence(), { encoder, output });
+    const renderSeq = panel.sequence();
+    const renderKey = timelineKey(renderSeq);
+    const spec = baseSpec(renderSeq, { encoder, output });
     const progress = el("Progress");
     document.querySelectorAll(".render-btn").forEach((b) => (b.disabled = true));
     el("CancelBtn").classList.remove("hidden");
@@ -397,10 +518,13 @@ function createPanel(prefix, buildSequence, defaultName) {
     try {
       const result = await invoke("render_video", { spec });
       lastOutput = result.output;
+      lastOutputKey = renderKey;
+      lastOutputStamp = Date.now();
       progress.value = 1;
       const mode = result.fast ? "快速模式，畫面未重新編碼" : encoderName;
       status.textContent = `✓ 完成（${mode}，花了 ${fmtTime((Date.now() - startedAt) / 1000)}）：${lastOutput}`;
       el("PreviewBtn").classList.remove("hidden");
+      updatePreviewBtn();
     } catch (e) {
       status.textContent = `⚠ ${e}`;
     } finally {
@@ -414,12 +538,15 @@ function createPanel(prefix, buildSequence, defaultName) {
   el("CancelBtn").addEventListener("click", () => invoke("cancel_render"));
   el("PreviewBtn").addEventListener("click", () => {
     if (!lastOutput) return;
+    tlStop();
     const player = el("Player");
     player.classList.remove("hidden");
-    player.src = convertFileSrc(lastOutput);
+    // 覆蓋同一個檔名時網址不變，播放器會沿用舊檔的快取；加上輸出時間讓它重新讀檔
+    player.src = `${convertFileSrc(lastOutput)}?v=${lastOutputStamp}`;
     player.dataset.path = lastOutput;
+    player.load();
     player.play();
-    el("PlayerLabel").textContent = `預覽成品：${baseName(lastOutput)}`;
+    el("PlayerLabel").textContent = `觀看成品：${baseName(lastOutput)}`;
   });
 
   return panel;
