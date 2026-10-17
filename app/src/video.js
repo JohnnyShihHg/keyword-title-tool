@@ -653,11 +653,14 @@ function renderBlocks() {
         // 在輸入框裡拖曳是選字，不是搬積木
         if (ev.target.closest("input")) return ev.preventDefault();
         dragFrom = i;
+        ev.dataTransfer.effectAllowed = "move";
+        ev.dataTransfer.setData("text/plain", b.id);
         card.classList.add("dragging");
       });
       card.addEventListener("dragend", () => card.classList.remove("dragging"));
       card.addEventListener("dragover", (ev) => {
         ev.preventDefault();
+        ev.dataTransfer.dropEffect = "move";
         card.classList.add("drop-target");
       });
       card.addEventListener("dragleave", () => card.classList.remove("drop-target"));
