@@ -47,32 +47,22 @@
 
     <!-- name 相同的 details 一次只會展開一個 -->
     <details class="acc" name="video-acc" open>
-      <summary>單集 <span class="muted acc-hint">完整影片 ⚡ YT 影片 ｜ 45 秒 promo</span></summary>
+      <summary>單集 <span class="muted acc-hint">用積木自由拼：影片、YT、promo；兩段中間放「⚡ 閃白」就閃白，沒放就直接接</span></summary>
       <div class="acc-body">
-        <div class="vrow">
-          <span class="vlabel">完整影片</span>
-          <button id="pickMainBtn" class="ghost">選擇檔案…</button>
-          <span id="mainInfo" class="vinfo muted">尚未選擇</span>
+        <div class="block-toolbar">
+          <span class="muted">加入</span>
+          <button class="ghost small" data-add="video">＋ 影片檔</button>
+          <button class="ghost small" data-add="yt">＋ YT 影片</button>
+          <button class="ghost small" data-add="promo20">＋ Promo 20 秒</button>
+          <button class="ghost small" data-add="promo45">＋ Promo 45 秒</button>
+          <button class="ghost small block-add-flash" data-add="flash">＋ ⚡ 閃白</button>
+          <span class="spacer"></span>
+          <span class="muted">常用組合</span>
+          <button class="ghost small" data-preset="basic">影片｜Promo 45</button>
+          <button class="ghost small" data-preset="yt">影片 ⚡ YT｜Promo 45</button>
+          <button class="ghost small danger" id="clearBlocksBtn">全部移除</button>
         </div>
-
-        <div class="vrow">
-          <span class="vlabel">YT 影片</span>
-          <input id="ytUrl" class="grow" placeholder="貼上 YouTube 連結（選填，沒填就只接完整影片＋promo）" />
-          <button id="ytDownloadBtn" class="ghost">下載</button>
-          <button id="ytClearBtn" class="ghost small">移除</button>
-        </div>
-        <div class="vrow sub">
-          <span class="vlabel"></span>
-          <label class="field">開始 <input id="ytStart" class="time" placeholder="00:00:00" /></label>
-          <label class="field">結束 <input id="ytEnd" class="time" placeholder="到結尾" /></label>
-          <span id="ytInfo" class="vinfo muted"></span>
-        </div>
-        <progress id="ytProgress" class="hidden" max="100" value="0"></progress>
-
-        <div class="vrow">
-          <span class="vlabel">Promo</span>
-          <span class="vinfo muted promo45-info"></span>
-        </div>
+        <div id="blockList" class="block-list"></div>
 
         <div class="timeline-head">
           <strong>Timeline</strong>

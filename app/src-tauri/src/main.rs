@@ -70,6 +70,14 @@ fn save_settings(app: tauri::AppHandle, settings: Settings) -> Result<(), String
 
 fn main() {
     tauri::Builder::default()
+        // 必須第一個註冊：再次開啟程式時不開第二個，而是把已開的視窗叫到最前面
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())

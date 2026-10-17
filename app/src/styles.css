@@ -299,3 +299,21 @@ select { font: inherit; color: var(--text); background: var(--input-bg); border:
   h1 { font-size: 15px; }
   .vlabel { width: 56px; }
 }
+
+/* --- 單集積木 --- */
+.block-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.block-list { display: flex; flex-direction: column; gap: 6px; }
+.block-empty { padding: 14px; border: 1px dashed var(--border); border-radius: 8px; text-align: center; }
+.block { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px solid var(--border); border-left: 6px solid var(--border); border-radius: 8px; background: var(--input-bg); }
+.block-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.block-video { border-left-color: #2563eb; }
+.block-yt { border-left-color: #dc2626; }
+.block-promo20, .block-promo45 { border-left-color: #7c3aed; }
+.block-flash { flex-direction: row; align-items: center; gap: 8px; padding: 4px 10px; border-left-color: #fff; box-shadow: inset 0 0 0 1px rgba(255,255,255,.2); background: var(--bg); }
+.block-grip { cursor: grab; color: var(--muted); user-select: none; letter-spacing: -2px; }
+.block-title { white-space: nowrap; }
+.block-warn { color: var(--warn); font-size: 12px; }
+.block.dragging { opacity: .4; }
+.block.drop-target { outline: 2px dashed var(--accent); }
+.block .yt-url { min-width: 160px; }
+.block-add-flash { border-color: var(--text); }

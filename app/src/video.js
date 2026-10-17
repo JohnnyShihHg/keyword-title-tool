@@ -403,100 +403,311 @@ function createPanel(prefix, buildSequence, defaultName) {
   return panel;
 }
 
-// --- 單集 ---
+// --- 單集：積木 ---
+//
+// blocks 依序排列；type 為 video / yt / promo20 / promo45 / flash。
+// 兩個影片積木中間有閃白積木就閃白，沒有就直接接。積木的影片資料放在 store[block.id]。
 
-const single = createPanel(
-  "single",
-  () => [
-    { key: "main", label: "完整影片", kind: "main" },
-    { key: "yt", label: "YT 影片", kind: "yt", join: "flash" },
-    { key: "promo45", label: "Promo 45 秒", kind: "promo", join: "cut" },
-  ],
-  () => $("partSelect").value,
-);
+const BLOCKS_KEY = "keyword-title-blocks-v1";
+const BLOCK_TYPES = {
+  video: { label: "影片檔", kind: "main" },
+  yt: { label: "YT 影片", kind: "yt" },
+  promo20: { label: "Promo 20 秒", kind: "promo" },
+  promo45: { label: "Promo 45 秒", kind: "promo" },
+  flash: { label: "⚡ 閃白", kind: "flash" },
+};
+const PRESETS = {
+  basic: ["video", "promo45"],
+  yt: ["video", "flash", "yt", "promo45"],
+};
 
-$("pickMainBtn").addEventListener("click", async () => {
-  const path = await pickVideo();
-  if (!path) return;
-  $("mainInfo").textContent = "讀取中…";
+/** @type {{id: string, type: string, path?: string, url?: string, startText?: string, endText?: string, status?: string}[]} */
+let blocks = [];
+let blockSeq = 0;
+const newId = () => `b${Date.now().toString(36)}${blockSeq++}`;
+
+function saveBlocks() {
   try {
-    const c = await setClip("main", path);
-    $("mainInfo").textContent = `${baseName(path)} · ${describe(c.info)}`;
-  } catch (e) {
-    $("mainInfo").textContent = `⚠ ${e}`;
+    const plain = blocks.map(({ id, type, path, url, startText, endText }) => ({ id, type, path, url, startText, endText }));
+    localStorage.setItem(BLOCKS_KEY, JSON.stringify(plain));
+  } catch (_) {
+    /* 存不了不影響使用 */
   }
-});
-
-$("ytDownloadBtn").addEventListener("click", async () => {
-  const url = $("ytUrl").value.trim();
-  if (!url) return ($("ytInfo").textContent = "請先貼上 YouTube 連結");
-  const btn = $("ytDownloadBtn");
-  const progress = $("ytProgress");
-  btn.disabled = true;
-  progress.classList.remove("hidden");
-  progress.value = 0;
-  $("ytInfo").textContent = "下載中…";
-  const unlisten = await listen("yt-progress", ({ payload }) => {
-    progress.value = payload.percent;
-    $("ytInfo").textContent = `下載中 ${payload.percent.toFixed(0)}%`;
-  });
-  try {
-    const path = await invoke("download_youtube", { url });
-    const trim = await readYtTrim();
-    await setClip("yt", path, { start: trim.start, end: trim.end });
-    $("ytInfo").textContent = `已下載 · ${describe(store.yt.info)}`;
-  } catch (e) {
-    $("ytInfo").textContent = `⚠ ${e}`;
-  } finally {
-    unlisten();
-    btn.disabled = false;
-    progress.classList.add("hidden");
-  }
-});
-
-$("ytClearBtn").addEventListener("click", () => {
-  ["ytUrl", "ytStart", "ytEnd"].forEach((id) => ($(id).value = ""));
-  $("ytInfo").textContent = "";
-  setClip("yt", null);
-});
-
-/** 讀開始／結束欄位；格式錯誤的欄位標紅，ok 為 false。 */
-async function readYtTrim() {
-  const read = async (input) => {
-    try {
-      const v = await invoke("parse_timecode", { input: input.value });
-      input.classList.remove("invalid");
-      return { ok: true, value: v };
-    } catch (e) {
-      input.classList.add("invalid");
-      input.title = String(e);
-      return { ok: false, value: null };
-    }
-  };
-  const [s, e] = await Promise.all([read($("ytStart")), read($("ytEnd"))]);
-  return { ok: s.ok && e.ok, start: s.value, end: e.value };
 }
 
-async function applyYtTrim() {
-  const trim = await readYtTrim();
-  if (!store.yt) return trim.ok;
-  store.yt.start = trim.start;
-  store.yt.end = trim.end;
-  if (trim.ok && usedDuration(store.yt) <= 0) {
-    $("ytInfo").textContent = "⚠ 結束時間要晚於開始時間";
+function promoPath(type) {
+  return type === "promo20" ? settings?.promo_20_path : type === "promo45" ? settings?.promo_45_path : "";
+}
+
+/** 依積木順序組出 timeline / 輸出用的序列。 */
+function blockSequence() {
+  const items = [];
+  let flashPending = false;
+  for (const b of blocks) {
+    if (b.type === "flash") {
+      if (items.length) flashPending = true;
+      continue;
+    }
+    if (!store[b.id]) continue;
+    const t = BLOCK_TYPES[b.type];
+    const label = b.type === "video" && store[b.id] ? baseName(store[b.id].path).replace(/\.[^.]+$/, "") : t.label;
+    items.push({ key: b.id, label, kind: t.kind, join: flashPending ? "flash" : "cut" });
+    flashPending = false;
+  }
+  return items;
+}
+
+/** 閃白積木有沒有作用：前後都要有影片積木（中間不能隔另一個閃白）。 */
+function flashIsEffective(index) {
+  const prev = blocks[index - 1];
+  const next = blocks[index + 1];
+  return !!(prev && next && prev.type !== "flash" && next.type !== "flash");
+}
+
+function addBlock(type, at = blocks.length) {
+  const b = { id: newId(), type, startText: "", endText: "" };
+  blocks.splice(at, 0, b);
+  if (type === "promo20" || type === "promo45") loadPromoBlock(b);
+  renderBlocks();
+  saveBlocks();
+  return b;
+}
+
+async function loadPromoBlock(b) {
+  const path = promoPath(b.type);
+  if (!path) {
+    b.status = `⚠ 還沒指定 ${b.type === "promo20" ? 20 : 45} 秒 promo，請到設定選擇檔案`;
+    await setClip(b.id, null);
+  } else if (store[b.id]?.path !== path) {
+    try {
+      await setClip(b.id, path);
+      b.status = `${baseName(path)} · ${describe(store[b.id].info)}`;
+    } catch (e) {
+      b.status = `⚠ ${e}`;
+    }
+  }
+  renderBlocks();
+}
+
+async function loadFileBlock(b, path) {
+  b.path = path;
+  b.status = "讀取中…";
+  renderBlocks();
+  try {
+    const trim = await readTrim(b);
+    await setClip(b.id, path, { start: trim.start, end: trim.end });
+    b.status = `${baseName(path)} · ${describe(store[b.id].info)}`;
+  } catch (e) {
+    b.status = `⚠ ${e}`;
+    await setClip(b.id, null);
+  }
+  renderBlocks();
+  saveBlocks();
+}
+
+async function downloadYtBlock(b) {
+  if (!b.url?.trim()) {
+    b.status = "請先貼上 YouTube 連結";
+    return renderBlocks();
+  }
+  b.status = "下載中…";
+  b.downloading = true;
+  renderBlocks();
+  const unlisten = await listen("yt-progress", ({ payload }) => {
+    const el = document.querySelector(`[data-block="${b.id}"] .block-status`);
+    if (el) el.textContent = `下載中 ${payload.percent.toFixed(0)}%`;
+  });
+  try {
+    const path = await invoke("download_youtube", { url: b.url });
+    await loadFileBlock(b, path);
+  } catch (e) {
+    b.status = `⚠ ${e}`;
+  } finally {
+    unlisten();
+    b.downloading = false;
+    renderBlocks();
+  }
+}
+
+/** 讀積木的開始／結束時間；格式錯誤時 ok 為 false。 */
+async function readTrim(b) {
+  const parse = async (text) => {
+    try {
+      return { ok: true, value: await invoke("parse_timecode", { input: text || "" }) };
+    } catch (e) {
+      return { ok: false, value: null, error: String(e) };
+    }
+  };
+  const [s, e] = await Promise.all([parse(b.startText), parse(b.endText)]);
+  return { ok: s.ok && e.ok, start: s.value, end: e.value, error: s.error || e.error };
+}
+
+async function applyTrim(b) {
+  const trim = await readTrim(b);
+  const card = document.querySelector(`[data-block="${b.id}"]`);
+  card?.querySelectorAll(".time").forEach((i) => i.classList.toggle("invalid", !trim.ok));
+  if (!trim.ok || !store[b.id]) return trim.ok;
+  store[b.id].start = trim.start;
+  store[b.id].end = trim.end;
+  if (usedDuration(store[b.id]) <= 0) {
+    card?.querySelectorAll(".time").forEach((i) => i.classList.add("invalid"));
     return false;
   }
   single.refresh();
-  return trim.ok;
+  return true;
 }
 
-let trimTimer = null;
-["ytStart", "ytEnd"].forEach((id) =>
-  $(id).addEventListener("input", () => {
-    clearTimeout(trimTimer);
-    trimTimer = setTimeout(applyYtTrim, 500);
+function moveBlock(from, to) {
+  if (to < 0 || to >= blocks.length || from === to) return;
+  const [b] = blocks.splice(from, 1);
+  blocks.splice(to, 0, b);
+  renderBlocks();
+  saveBlocks();
+  single.refresh();
+}
+
+let dragFrom = null;
+
+function renderBlocks() {
+  const list = $("blockList");
+  if (!blocks.length) {
+    list.innerHTML = '<div class="block-empty muted">還沒有積木。用上面的「加入」或「常用組合」開始。</div>';
+    single.refresh();
+    return;
+  }
+  list.replaceChildren(
+    ...blocks.map((b, i) => {
+      const card = document.createElement("div");
+      card.className = `block block-${b.type}`;
+      card.dataset.block = b.id;
+      card.draggable = true;
+      const t = BLOCK_TYPES[b.type];
+      const head = `<span class="block-grip" title="拖拉調整順序">⋮⋮</span><strong class="block-title">${t.label}</strong>`;
+      const tools = `<span class="spacer"></span>
+        <button class="ghost small" data-act="up" title="上移">↑</button>
+        <button class="ghost small" data-act="down" title="下移">↓</button>
+        <button class="ghost small danger" data-act="remove" title="移除">✕</button>`;
+      if (b.type === "flash") {
+        const ok = flashIsEffective(i);
+        card.innerHTML = `${head}<span class="muted">${settings?.transition_secs ?? 0.5} 秒</span>
+          ${ok ? "" : '<span class="block-warn">⚠ 前後都要有影片才有作用</span>'}${tools}`;
+      } else {
+        const trim =
+          b.type === "video" || b.type === "yt"
+            ? `<label class="field">開始 <input class="time" data-field="startText" placeholder="00:00:00" value="${b.startText || ""}"></label>
+               <label class="field">結束 <input class="time" data-field="endText" placeholder="到結尾" value="${b.endText || ""}"></label>`
+            : "";
+        const source =
+          b.type === "video"
+            ? `<button class="ghost small" data-act="pick">${b.path ? "換檔案…" : "選擇檔案…"}</button>`
+            : b.type === "yt"
+              ? `<input class="grow yt-url" data-field="url" placeholder="貼上 YouTube 連結" value="${escapeHtml(b.url || "")}">
+                 <button class="ghost small" data-act="download" ${b.downloading ? "disabled" : ""}>下載</button>`
+              : "";
+        card.innerHTML = `<div class="block-row">${head}${source}${tools}</div>
+          <div class="block-row">${trim}<span class="block-status vinfo muted">${escapeHtml(b.status || (b.type === "video" ? "尚未選擇" : ""))}</span></div>`;
+      }
+
+      card.addEventListener("click", async (ev) => {
+        const act = ev.target.dataset?.act;
+        if (!act) return;
+        if (act === "up") moveBlock(i, i - 1);
+        if (act === "down") moveBlock(i, i + 1);
+        if (act === "remove") {
+          blocks.splice(i, 1);
+          delete store[b.id];
+          renderBlocks();
+          saveBlocks();
+          single.refresh();
+        }
+        if (act === "pick") {
+          const path = await pickVideo();
+          if (path) loadFileBlock(b, path);
+        }
+        if (act === "download") downloadYtBlock(b);
+      });
+      card.querySelectorAll("[data-field]").forEach((input) =>
+        input.addEventListener("input", () => {
+          b[input.dataset.field] = input.value;
+          saveBlocks();
+          if (input.classList.contains("time")) {
+            clearTimeout(b.trimTimer);
+            b.trimTimer = setTimeout(() => applyTrim(b), 500);
+          }
+        }),
+      );
+      card.addEventListener("dragstart", (ev) => {
+        // 在輸入框裡拖曳是選字，不是搬積木
+        if (ev.target.closest("input")) return ev.preventDefault();
+        dragFrom = i;
+        card.classList.add("dragging");
+      });
+      card.addEventListener("dragend", () => card.classList.remove("dragging"));
+      card.addEventListener("dragover", (ev) => {
+        ev.preventDefault();
+        card.classList.add("drop-target");
+      });
+      card.addEventListener("dragleave", () => card.classList.remove("drop-target"));
+      card.addEventListener("drop", (ev) => {
+        ev.preventDefault();
+        card.classList.remove("drop-target");
+        if (dragFrom !== null) moveBlock(dragFrom, i);
+        dragFrom = null;
+      });
+      return card;
+    }),
+  );
+  single.refresh();
+}
+
+const single = createPanel("single", blockSequence, () => $("partSelect").value);
+
+document.querySelectorAll("[data-add]").forEach((btn) =>
+  btn.addEventListener("click", async () => {
+    const b = addBlock(btn.dataset.add);
+    if (b.type === "video") {
+      const path = await pickVideo();
+      if (path) loadFileBlock(b, path);
+    }
   }),
 );
+
+document.querySelectorAll("[data-preset]").forEach((btn) =>
+  btn.addEventListener("click", async () => {
+    blocks.forEach((b) => delete store[b.id]);
+    blocks = [];
+    PRESETS[btn.dataset.preset].forEach((type) => addBlock(type));
+    const first = blocks.find((b) => b.type === "video");
+    const path = first && (await pickVideo());
+    if (path) loadFileBlock(first, path);
+  }),
+);
+
+$("clearBlocksBtn").addEventListener("click", async () => {
+  if (!blocks.length) return;
+  const ok = await dialog.ask("確定要移除單集的所有積木嗎？", { title: "全部移除", kind: "warning", okLabel: "移除", cancelLabel: "取消" });
+  if (!ok) return;
+  blocks.forEach((b) => delete store[b.id]);
+  blocks = [];
+  renderBlocks();
+  saveBlocks();
+});
+
+/** 啟動時還原上次的積木（影片檔重新讀取；找不到的檔案會標示錯誤）。 */
+async function restoreBlocks() {
+  let saved = [];
+  try {
+    saved = JSON.parse(localStorage.getItem(BLOCKS_KEY) || "[]");
+  } catch (_) {
+    saved = [];
+  }
+  blocks = saved.length ? saved : PRESETS.basic.map((type) => ({ id: newId(), type, startText: "", endText: "" }));
+  renderBlocks();
+  for (const b of blocks) {
+    if (b.type === "promo20" || b.type === "promo45") await loadPromoBlock(b);
+    else if (b.path) await loadFileBlock(b, b.path);
+  }
+}
 
 function refreshPartOptions() {
   const select = $("partSelect");
@@ -515,10 +726,14 @@ $("partSelect").addEventListener("change", () => {
 
 $("singleRenderBtn").addEventListener("click", () =>
   single.render($("singleName"), async () => {
-    if (!store.main) return "請先選擇完整影片";
-    if (!store.promo45) return "請先在設定指定 45 秒 promo 檔案";
-    if ($("ytUrl").value.trim() && !store.yt) return "YT 連結還沒下載，請按「下載」或按「移除」";
-    if (store.yt && !(await applyYtTrim())) return "YT 開始／結束時間有誤";
+    if (!blockSequence().length) return "請先加入影片積木並選擇檔案";
+    for (const b of blocks) {
+      const name = BLOCK_TYPES[b.type].label;
+      if (b.type === "video" && !store[b.id]) return `有一塊「${name}」還沒選檔案，請選擇或移除`;
+      if (b.type === "yt" && !store[b.id]) return "有一塊「YT 影片」還沒下載，請按「下載」或移除";
+      if ((b.type === "promo20" || b.type === "promo45") && !store[b.id]) return `請先在設定指定「${name}」的檔案`;
+      if ((b.type === "video" || b.type === "yt") && !(await applyTrim(b))) return `「${name}」的開始／結束時間有誤`;
+    }
     return null;
   }),
 );
@@ -650,6 +865,7 @@ window.onSettingsChanged = async () => {
   if (!settings) return;
   refreshOutDir();
   await refreshPromos();
+  for (const b of blocks) if (b.type === "promo20" || b.type === "promo45") await loadPromoBlock(b);
   panels.forEach((p) => p.refresh());
 };
 
@@ -661,4 +877,5 @@ document.querySelector('.tab[data-page="settings"]').addEventListener("click", r
 
 // app.js 可能已經先載好設定（設定讀取比這個檔案載入還快時），補跑一次
 window.onSettingsChanged();
+restoreBlocks();
 refreshTools();
