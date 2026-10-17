@@ -215,7 +215,8 @@ fn layout(date: &str, parts: &[Part], doc: &DocumentInput) -> String {
         };
         out.push(String::new());
         out.push(format!(
-            "{time_part}Part{}：{}{tag}{date}－{}{host}",
+            // 半形「-」，和各段標題一致；全形「－」字身自帶左右空白，看起來像「 - 」
+            "{time_part}Part{}：{}{tag}{date}-{}{host}",
             p.number, p.title, p.number
         ));
     }
@@ -259,8 +260,8 @@ mod tests {
         assert!(r.text.contains("標題一！【關鍵時刻】20261016-1張炤和"));
         assert!(r.text.contains("=======\n第三段\n\n第三段的標題很長很長【關鍵時刻】"));
         assert!(!r.text.contains("第二段"));
-        assert!(r.text.contains("(00:00:00)Part1：標題一！【關鍵時刻】20261016－1張炤和"));
-        assert!(r.text.contains("(00:44:59)Part3：第三段的標題很長很長【關鍵時刻】20261016－3張炤和"));
+        assert!(r.text.contains("(00:00:00)Part1：標題一！【關鍵時刻】20261016-1張炤和"));
+        assert!(r.text.contains("(00:44:59)Part3：第三段的標題很長很長【關鍵時刻】20261016-3張炤和"));
         assert!(r.warnings.is_empty(), "{:?}", r.warnings);
     }
 
@@ -330,7 +331,7 @@ mod tests {
         let r = render(&d);
         assert!(r.text.starts_with("20261016關鍵標題1-6\n"));
         assert!(r.text.contains("甲標題甲標題甲【別的節目】20261016-1代班主持"));
-        assert!(r.text.contains("(00:00:00)Part1：甲標題甲標題甲【別的節目】20261016－1代班主持"));
+        assert!(r.text.contains("(00:00:00)Part1：甲標題甲標題甲【別的節目】20261016-1代班主持"));
         assert!(!r.text.contains("第一段"));
         assert!(r.text.contains("\nopen\n\n甲標題"));
         assert!(r.text.contains("代班主持\n\n\n1.\n甲標題"));
