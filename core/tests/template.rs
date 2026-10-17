@@ -45,6 +45,7 @@ fn expected() -> String {
 fn reproduces_template_exactly_with_header_and_no_labels() {
     let actual = render_fixture(Settings {
         show_header: true,
+        halfwidth_timestamps: false,
         label_segments: false,
         number_line: true,
         ..Settings::default()
@@ -76,6 +77,9 @@ fn default_output_is_template_from_open_with_segment_labels() {
         want = want.replace(&format!("\r\n\r\n{n}.\r\n"), "\r\n");
     }
 
-    let actual = render_fixture(Settings::default());
+    let actual = render_fixture(Settings {
+        halfwidth_timestamps: false,
+        ..Settings::default()
+    });
     assert_eq!(actual.trim_end(), want);
 }

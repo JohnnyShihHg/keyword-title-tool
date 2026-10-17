@@ -68,9 +68,19 @@ async function setClip(key, path, extra = {}) {
 async function refreshTools() {
   const s = await invoke("tools_status");
   const ok = s.ffmpeg && s.ffprobe;
-  $("toolsWarning").classList.toggle("hidden", !!ok);
   const row = (name, path) => `<div>${path ? "✓" : "✗"} ${name}：<span class="muted">${path || "未安裝"}</span></div>`;
-  $("toolsStatus").innerHTML = row("ffmpeg", s.ffmpeg) + row("ffprobe", s.ffprobe) + row("yt-dlp", s.ytdlp);
+  $("toolsStatus").innerHTML =
+    row("ffmpeg", s.ffmpeg) +
+    row("ffprobe", s.ffprobe) +
+    row("yt-dlp", s.ytdlp) +
+    (s.ffmpeg_outdated
+      ? '<div class="tools-outdated">⚠ ffmpeg 有新的相容版本（支援較舊的 NVIDIA 顯示卡），請按「重新下載全部」</div>'
+      : "");
+  $("toolsWarning").innerHTML = s.ffmpeg_outdated
+    ? '影片工具需要更新（讓舊的 NVIDIA 顯示卡也能硬體加速）。<button id="gotoToolsBtn2" class="small">前往設定下載</button>'
+    : '還沒有影片工具（ffmpeg、yt-dlp）。<button id="gotoToolsBtn2" class="small">前往設定下載</button>';
+  $("toolsWarning").classList.toggle("hidden", !!ok && !s.ffmpeg_outdated);
+  $("gotoToolsBtn2").addEventListener("click", () => document.querySelector('.tab[data-page="settings"]').click());
   $("installToolsBtn").textContent = ok && s.ytdlp ? "重新下載全部" : "下載工具";
   $("installToolsBtn").disabled = !s.can_install;
   $("updateYtdlpBtn").disabled = !s.can_install;
@@ -91,6 +101,10 @@ async function installTools(which) {
   try {
     await invoke("install_tools", { which });
     $("toolsMsg").textContent = "下載完成";
+    if (which !== "ytdlp") {
+      $("encoderReport").textContent = "偵測中…";
+      invoke("detect_encoder", { force: true }).then(showEncoderReport).catch(() => {});
+    }
   } catch (e) {
     $("toolsMsg").textContent = `⚠ ${e}`;
   } finally {
@@ -103,7 +117,6 @@ async function installTools(which) {
 
 $("installToolsBtn").addEventListener("click", () => installTools("all"));
 $("updateYtdlpBtn").addEventListener("click", () => installTools("ytdlp"));
-$("gotoToolsBtn").addEventListener("click", () => document.querySelector('.tab[data-page="settings"]').click());
 
 // 設定頁的檔案／資料夾選擇按鈕
 document.querySelectorAll("[data-pick]").forEach((btn) => {

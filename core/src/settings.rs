@@ -13,6 +13,8 @@ pub struct Settings {
     pub label_segments: bool,
     /// 段標題下方輸出範本的「1.」「2.」編號行。
     pub number_line: bool,
+    /// 全集區的時間點用半形「(00:27:08)」，YouTube 才能點擊跳轉；關掉就是範本的全形寫法。
+    pub halfwidth_timestamps: bool,
     /// 輸出檔頭（日期標題、串一～串六、全集，後面接 YouTube 連結）。
     /// 舊版叫 include_header 且預設關閉；改名讓舊設定檔裡的 false 不會把它蓋掉。
     pub show_header: bool,
@@ -44,6 +46,7 @@ impl Default for Settings {
             label_segments: true,
             number_line: false,
             show_header: true,
+            halfwidth_timestamps: true,
             max_speaker_chars: 6,
             theme: "light".to_string(),
             promo_20_path: String::new(),

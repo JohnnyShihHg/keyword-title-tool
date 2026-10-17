@@ -204,13 +204,18 @@ fn layout(date: &str, parts: &[Part], doc: &DocumentInput) -> String {
 
     out.push("全集".to_string());
     for p in parts {
-        let time = p
-            .time
-            .map(Timecode::to_fullwidth)
-            .unwrap_or_else(|| "--：--：--".to_string());
+        // YouTube 只認半形時間（00:27:08）才能點擊跳轉；前面緊貼全形括號也可能認不出來，
+        // 所以括號一起用半形。關掉設定就回到範本的全形寫法。
+        let time_part = if settings.halfwidth_timestamps {
+            let time = p.time.map(Timecode::to_halfwidth).unwrap_or_else(|| "--:--:--".to_string());
+            format!("({time})")
+        } else {
+            let time = p.time.map(Timecode::to_fullwidth).unwrap_or_else(|| "--：--：--".to_string());
+            format!("（{time}）")
+        };
         out.push(String::new());
         out.push(format!(
-            "（{time}）Part{}：{}{tag}{date}－{}{host}",
+            "{time_part}Part{}：{}{tag}{date}－{}{host}",
             p.number, p.title, p.number
         ));
     }
@@ -254,8 +259,8 @@ mod tests {
         assert!(r.text.contains("標題一！【關鍵時刻】20261016-1張炤和"));
         assert!(r.text.contains("=======\n第三段\n\n第三段的標題很長很長【關鍵時刻】"));
         assert!(!r.text.contains("第二段"));
-        assert!(r.text.contains("（00：00：00）Part1：標題一！【關鍵時刻】20261016－1張炤和"));
-        assert!(r.text.contains("（00：44：59）Part3：第三段的標題很長很長【關鍵時刻】20261016－3張炤和"));
+        assert!(r.text.contains("(00:00:00)Part1：標題一！【關鍵時刻】20261016－1張炤和"));
+        assert!(r.text.contains("(00:44:59)Part3：第三段的標題很長很長【關鍵時刻】20261016－3張炤和"));
         assert!(r.warnings.is_empty(), "{:?}", r.warnings);
     }
 
@@ -270,7 +275,7 @@ mod tests {
     #[test]
     fn missing_time_after_first_segment_warns_and_shows_placeholder() {
         let r = render(&doc(vec![seg("甲標題甲標題甲", ""), seg("乙標題乙標題乙", "")]));
-        assert!(r.text.contains("（--：--：--）Part2："));
+        assert!(r.text.contains("(--:--:--)Part2："));
         assert_eq!(r.warnings.len(), 1);
         assert_eq!(r.warnings[0].segment, Some(2));
     }
@@ -325,10 +330,17 @@ mod tests {
         let r = render(&d);
         assert!(r.text.starts_with("20261016關鍵標題1-6\n"));
         assert!(r.text.contains("甲標題甲標題甲【別的節目】20261016-1代班主持"));
-        assert!(r.text.contains("（00：00：00）Part1：甲標題甲標題甲【別的節目】20261016－1代班主持"));
+        assert!(r.text.contains("(00:00:00)Part1：甲標題甲標題甲【別的節目】20261016－1代班主持"));
         assert!(!r.text.contains("第一段"));
         assert!(r.text.contains("\nopen\n\n甲標題"));
         assert!(r.text.contains("代班主持\n\n\n1.\n甲標題"));
+    }
+
+    #[test]
+    fn fullwidth_timestamps_when_setting_off() {
+        let mut d = doc(vec![seg("甲標題甲標題甲", "1:02:03")]);
+        d.settings.halfwidth_timestamps = false;
+        assert!(render(&d).text.contains("（01：02：03）Part1："));
     }
 
     #[test]

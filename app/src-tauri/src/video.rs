@@ -24,6 +24,11 @@ pub struct VideoState {
 // --- 工具位置 ---
 
 const FFMPEG: &str = "ffmpeg";
+/// Windows 版 ffmpeg 鎖定 7.1.1：9.0 的 NVENC 要求 NVIDIA 驅動 610 以上，但 Pascal 世代
+/// （Quadro P2000/P5000、GTX 10 系列）的驅動最新只到 580，用 9.0 就永遠用不了 N 卡編碼。
+/// 換版本時改這裡，已安裝的會被提示重新下載。
+const FFMPEG_BUILD: &str = "7.1.1-essentials";
+const FFMPEG_BUILD_MARKER: &str = "ffmpeg-build.txt";
 const FFPROBE: &str = "ffprobe";
 const YTDLP: &str = "yt-dlp";
 
@@ -78,15 +83,23 @@ pub struct ToolsStatus {
     ytdlp: Option<String>,
     /// 這個平台能不能自動下載（Windows、Apple Silicon Mac）
     can_install: bool,
+    /// 程式資料夾裡的 ffmpeg 不是目前指定的版本，建議重新下載
+    ffmpeg_outdated: bool,
 }
 
 fn status(app: &AppHandle) -> ToolsStatus {
     let show = |t: &str| find_tool(app, t).map(|p| p.display().to_string());
+    let ffmpeg_outdated = cfg!(windows)
+        && tools_dir(app).is_ok_and(|dir| {
+            dir.join(exe_name(FFMPEG)).is_file()
+                && std::fs::read_to_string(dir.join(FFMPEG_BUILD_MARKER)).map_or(true, |v| v.trim() != FFMPEG_BUILD)
+        });
     ToolsStatus {
         ffmpeg: show(FFMPEG),
         ffprobe: show(FFPROBE),
         ytdlp: show(YTDLP),
         can_install: !downloads_for(true, true).is_empty(),
+        ffmpeg_outdated,
     }
 }
 
@@ -116,7 +129,7 @@ fn downloads_for(ffmpeg: bool, ytdlp: bool) -> Vec<Download> {
         if ffmpeg {
             list.push(Download {
                 label: "ffmpeg",
-                url: "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+                url: "https://github.com/GyanD/codexffmpeg/releases/download/7.1.1/ffmpeg-7.1.1-essentials_build.zip",
                 payload: Payload::Zip(&[("bin/ffmpeg.exe", "ffmpeg.exe"), ("bin/ffprobe.exe", "ffprobe.exe")]),
             });
         }
@@ -195,6 +208,9 @@ fn install_one(dir: &Path, d: &Download, on_progress: &dyn Fn(ToolsProgress)) ->
         Payload::Zip(entries) => extract(&tmp, dir, entries),
     };
     let _ = std::fs::remove_file(&tmp);
+    if result.is_ok() && d.label == "ffmpeg" {
+        std::fs::write(dir.join(FFMPEG_BUILD_MARKER), FFMPEG_BUILD).map_err(|e| e.to_string())?;
+    }
     result
 }
 

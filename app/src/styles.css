@@ -317,3 +317,5 @@ select { font: inherit; color: var(--text); background: var(--input-bg); border:
 .block.drop-target { outline: 2px dashed var(--accent); }
 .block .yt-url { min-width: 160px; }
 .block-add-flash { border-color: var(--text); }
+
+.tools-outdated { color: var(--warn); font-weight: bold; margin-top: 4px; }

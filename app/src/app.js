@@ -260,6 +260,7 @@ function readSettingsForm() {
     label_segments: f.label_segments.checked,
     number_line: f.number_line.checked,
     show_header: f.show_header.checked,
+    halfwidth_timestamps: f.halfwidth_timestamps.checked,
     max_speaker_chars: Number.isFinite(max) && max > 0 ? max : settings.max_speaker_chars,
     theme: f.theme.value || settings.theme,
     promo_20_path: f.promo_20_path.value,
