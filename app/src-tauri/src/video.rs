@@ -647,6 +647,44 @@ pub fn path_exists(path: String) -> bool {
     Path::new(&path).exists()
 }
 
+/// 掃描 `from` 秒之後每格的平均亮度，找出閃白（給全集第三、六段自動抓切點）。
+/// 畫面縮到 64×36 只算亮度，8 分鐘的尾段通常十幾秒到半分鐘。
+#[tauri::command]
+pub async fn detect_flash(
+    app: AppHandle,
+    path: String,
+    from: f64,
+) -> Result<Vec<keyword_title_core::flash::FlashCandidate>, String> {
+    use keyword_title_core::flash;
+    let ffmpeg = require_tool(&app, FFMPEG)?;
+    let from = from.max(0.0);
+    tauri::async_runtime::spawn_blocking(move || {
+        let run = |hwaccel: bool| -> Result<String, String> {
+            let mut cmd = command(&ffmpeg);
+            cmd.args(["-hide_banner", "-nostats", "-loglevel", "error"]);
+            if hwaccel {
+                cmd.args(["-hwaccel", "auto"]);
+            }
+            let out = cmd
+                .args(["-ss", &format!("{from:.3}"), "-i", &path, "-an", "-sn", "-dn", "-vf"])
+                .arg("scale=64:36,signalstats,metadata=print:key=lavfi.signalstats.YAVG:file=-")
+                .args(["-f", "null", "-"])
+                .stdin(Stdio::null())
+                .output()
+                .map_err(|e| format!("無法執行 ffmpeg：{e}"))?;
+            if !out.status.success() {
+                return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+            }
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        };
+        // 硬體解碼較快；有些顯卡／驅動開不起來就改用 CPU
+        let text = run(true).or_else(|_| run(false)).map_err(|e| format!("偵測閃白失敗：{e}"))?;
+        Ok(flash::find_flashes(&flash::parse_yavg(&text, from)))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub fn parse_timecode(input: String) -> Result<Option<f64>, String> {
     keyword_title_core::timecode::parse(&input).map(|t| t.map(|t| t.total_seconds as f64))

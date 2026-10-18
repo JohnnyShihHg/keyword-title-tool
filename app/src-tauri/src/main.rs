@@ -99,7 +99,8 @@ fn main() {
             video::plan_video,
             video::output_path,
             video::path_exists,
-            video::parse_timecode
+            video::parse_timecode,
+            video::detect_flash
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -498,7 +498,8 @@ function createPanel(prefix, buildSequence, defaultName) {
       `播放時間軸（尚未輸出，閃白與音量為近似）：${item.label}。播放器自己的進度條是原始檔長度，請看上面的「成品」進度條`;
     showOutPos(outAt);
 
-    if (t >= end - 0.03 || player.ended) {
+    // 播放中提早一點換段（偵測有延遲）；暫停時停在切點前最後一格要能看，不換段
+    if (t >= end - (player.paused ? 0 : 0.03) || player.ended) {
       if (next) tlGoto(tl.idx + 1, clipRange(next).start, playing);
       else {
         player.pause();
@@ -516,6 +517,12 @@ function createPanel(prefix, buildSequence, defaultName) {
     player.addEventListener("timeupdate", () => tl.idx >= 0 && tlTick());
     player.addEventListener("seeked", () => tl.idx >= 0 && tlTick());
   }
+
+  /** 讓播放器停在 key 那段原始檔的第幾秒（時間軸播放模式）。 */
+  panel.seekTo = (key, seconds) => {
+    const idx = tl.seq.findIndex((item) => item.key === key);
+    if (idx >= 0) tlGoto(idx, seconds, false);
+  };
 
   /** 播放器目前停在 key 那個檔案的第幾秒（原始檔時間）；播放器不在那個檔案就回傳 null。 */
   panel.playerTimeIn = (key) => {
@@ -841,7 +848,36 @@ function moveBlock(from, to) {
   single.refresh();
 }
 
-let dragFrom = null;
+// 積木排序用滑鼠事件自己做：Tauri 的原生拖放要開著才能從檔案總管拖影片進來，
+// 開著時 WebView 收不到 HTML5 的 dragover/drop，原本的 draggable 排序就會失效。
+let reorder = null;
+
+function blockIndexAt(x, y) {
+  const card = document.elementFromPoint(x, y)?.closest?.("#blockList .block");
+  return card ? blocks.findIndex((b) => b.id === card.dataset.block) : -1;
+}
+
+document.addEventListener("pointermove", (ev) => {
+  if (!reorder) return;
+  if (!reorder.moving && Math.hypot(ev.clientX - reorder.x, ev.clientY - reorder.y) < 6) return;
+  reorder.moving = true;
+  reorder.card.classList.add("dragging");
+  document.querySelectorAll("#blockList .drop-target").forEach((c) => c.classList.remove("drop-target"));
+  const to = blockIndexAt(ev.clientX, ev.clientY);
+  if (to >= 0 && to !== reorder.from) $("blockList").children[to]?.classList.add("drop-target");
+});
+
+document.addEventListener("pointerup", (ev) => {
+  if (!reorder) return;
+  const { from, moving, card } = reorder;
+  reorder = null;
+  card.classList.remove("dragging");
+  document.querySelectorAll("#blockList .drop-target").forEach((c) => c.classList.remove("drop-target"));
+  if (moving) {
+    const to = blockIndexAt(ev.clientX, ev.clientY);
+    if (to >= 0) moveBlock(from, to);
+  }
+});
 
 function renderBlocks() {
   const list = $("blockList");
@@ -855,9 +891,8 @@ function renderBlocks() {
       const card = document.createElement("div");
       card.className = `block block-${b.type}`;
       card.dataset.block = b.id;
-      card.draggable = true;
       const t = BLOCK_TYPES[b.type];
-      const head = `<span class="block-grip" title="拖拉調整順序">⋮⋮</span><strong class="block-title">${t.label}</strong>`;
+      const head = `<span class="block-grip" title="按住拖拉調整順序">⋮⋮</span><strong class="block-title">${t.label}</strong>`;
       const tools = `<span class="spacer"></span>
         <button class="ghost small" data-act="up" title="上移">↑</button>
         <button class="ghost small" data-act="down" title="下移">↓</button>
@@ -911,26 +946,10 @@ function renderBlocks() {
           }
         }),
       );
-      card.addEventListener("dragstart", (ev) => {
-        // 在輸入框裡拖曳是選字，不是搬積木
-        if (ev.target.closest("input")) return ev.preventDefault();
-        dragFrom = i;
-        ev.dataTransfer.effectAllowed = "move";
-        ev.dataTransfer.setData("text/plain", b.id);
-        card.classList.add("dragging");
-      });
-      card.addEventListener("dragend", () => card.classList.remove("dragging"));
-      card.addEventListener("dragover", (ev) => {
-        ev.preventDefault();
-        ev.dataTransfer.dropEffect = "move";
-        card.classList.add("drop-target");
-      });
-      card.addEventListener("dragleave", () => card.classList.remove("drop-target"));
-      card.addEventListener("drop", (ev) => {
-        ev.preventDefault();
-        card.classList.remove("drop-target");
-        if (dragFrom !== null) moveBlock(dragFrom, i);
-        dragFrom = null;
+      card.addEventListener("pointerdown", (ev) => {
+        // 在輸入框、按鈕上按下是操作它們，不是搬積木
+        if (ev.button !== 0 || ev.target.closest("input, button, a, select, textarea")) return;
+        reorder = { from: i, card, x: ev.clientX, y: ev.clientY, moving: false };
       });
       return card;
     }),
@@ -1063,7 +1082,8 @@ async function applySegTrim(n) {
         t.ok = false;
         t.error = "請填入從哪個時間點以後不要";
       } else {
-        end = parsePreciseTime(t.text);
+        // 自動偵測的切點用精確值；畫面上的文字只到小數兩位
+        end = t.auto && t.auto.text === t.text ? t.auto.end : parsePreciseTime(t.text);
         if (end == null) {
           t.ok = false;
           t.error = "時間格式不對，例如 0456（4 分 56 秒）、015620（1 小時 56 分 20 秒）或 04:56.43";
@@ -1106,6 +1126,93 @@ async function applyAllSegTrims() {
   for (const n of [1, 2, 3, 4, 5, 6]) await applySegTrim(n);
 }
 
+// 第三、六段自動抓閃白：完整單片是「帶子 ⚡ YT ｜ promo」，閃白之後都不要。
+// YT 約三到五分鐘，加上 promo 和餘裕，預設只掃最後 8 分鐘；找不到可以改掃整支。
+const FLASH_SCAN_SECS = 8 * 60;
+const segFlash = {};
+
+function renderFlashUi(n) {
+  const box = segRows[n]?.flashBox;
+  if (!box) return;
+  const f = segFlash[n];
+  const clip = store[`s${n}`];
+  if (!clip || !segTrim[n].on || !f) return (box.innerHTML = "");
+  const btn = (act, label, title = "") => `<button class="ghost small" data-flash="${act}" title="${title}">${label}</button>`;
+  if (f.state === "running") {
+    box.innerHTML = `<span class="muted">偵測閃白中…（${f.whole ? "整支" : "最後 8 分鐘"}）</span>`;
+    return;
+  }
+  if (f.state === "error") {
+    box.innerHTML = `<span class="warn">⚠ ${escapeHtml(f.error)}</span> ${btn("retry", "重新偵測")}`;
+    return;
+  }
+  if (f.state === "none") {
+    box.innerHTML = `<span class="warn">⚠ ${f.whole ? "整支" : "最後 8 分鐘"}找不到閃白，請手動輸入時間</span> ${
+      f.whole ? btn("retry", "重新偵測") : btn("whole", "掃描整支", "YT 比較長時用，會比較久")
+    }`;
+    return;
+  }
+  const c = f.list[f.pick];
+  box.innerHTML = `<span class="muted">偵測到閃白 ${fmtPrecise(c.peak)}（${f.pick + 1}/${f.list.length}），切在前一格乾淨畫面</span>
+    ${btn("show", "跳到切點", "播放器停在閃白前最後一格，可用 ← → 逐格確認")}
+    ${f.list.length > 1 ? `${btn("prev", "◀ 上一個")}${btn("next", "下一個 ▶")}` : ""}
+    ${f.whole ? "" : btn("whole", "掃描整支")}`;
+}
+
+function useFlashCandidate(n, i) {
+  const f = segFlash[n];
+  const c = f?.list[i];
+  if (!c) return;
+  f.pick = i;
+  // 切點落在乾淨那格和第一格變亮的畫面之間，乾淨那格是最後一格
+  const end = c.cut - 0.005;
+  const text = fmtPrecise(end);
+  segTrim[n].text = text;
+  segTrim[n].auto = { text, end };
+  if (segRows[n].timeInput) segRows[n].timeInput.value = text;
+  renderFlashUi(n);
+  return applySegTrim(n);
+}
+
+async function detectSegFlash(n, whole = false) {
+  const clip = store[`s${n}`];
+  if (!clip || !CUT_AT_SEGMENTS.has(n) || !segTrim[n].on) return;
+  const f = (segFlash[n] = { state: "running", list: [], pick: 0, whole, error: "" });
+  renderFlashUi(n);
+  const from = whole ? 0 : Math.max(0, clip.info.duration - FLASH_SCAN_SECS);
+  try {
+    const list = await invoke("detect_flash", { path: clip.path, from });
+    if (store[`s${n}`] !== clip || segFlash[n] !== f) return; // 偵測途中換了檔案
+    f.list = list;
+    f.state = list.length ? "found" : "none";
+    // 帶子本身不會有閃白，YT 裡面可能有，所以最早的那個就是帶子接 YT 的閃白
+    if (list.length) return useFlashCandidate(n, 0);
+  } catch (e) {
+    f.state = "error";
+    f.error = String(e);
+  }
+  renderFlashUi(n);
+}
+
+/** 第 n 段放入影片（選擇檔案和拖曳共用），接著套用砍片尾；第三、六段自動抓閃白。 */
+async function loadSegment(n, path) {
+  const row = segRows[n];
+  row.info.textContent = "讀取中…";
+  segTrim[n].text = "";
+  segTrim[n].auto = null;
+  delete segFlash[n];
+  if (row.timeInput) row.timeInput.value = "";
+  try {
+    const c = await setClip(`s${n}`, path);
+    row.info.textContent = `${baseName(path)} · ${describe(c.info)}`;
+  } catch (e) {
+    row.info.textContent = `⚠ ${e}`;
+  }
+  await applySegTrim(n);
+  renderFlashUi(n);
+  detectSegFlash(n);
+}
+
 $("fullSegments").replaceChildren(
   ...SEGMENT_NAMES.map((name, i) => {
     const n = i + 1;
@@ -1115,45 +1222,52 @@ $("fullSegments").replaceChildren(
     row.innerHTML = `<span class="vlabel">第${name}段</span>
       <button class="ghost">選擇檔案…</button>
       <button class="ghost small">移除</button>
-      <label class="seg-trim" title="${cutAt ? "從指定時間點以後都不要（YT 與片尾 promo）" : "砍掉檔案最後的片尾 promo，秒數在設定裡調整"}">
+      <label class="seg-trim" title="${cutAt ? "從閃白（或指定時間點）以後都不要（YT 與片尾 promo）" : "砍掉檔案最後的片尾 promo，秒數在設定裡調整"}">
         <input type="checkbox" class="seg-trim-on" checked /> 砍掉片尾
       </label>
-      ${cutAt ? `<span class="seg-cut-at">從 <input class="time seg-trim-time" placeholder="例 0456" title="只打數字即可：0456＝4 分 56 秒、015620＝1 小時 56 分 20 秒；要更準可加小數，如 0456.43" /> 以後都不要
+      ${cutAt ? `<span class="seg-cut-at">從 <input class="time seg-trim-time" placeholder="例 0456" title="自動抓閃白，也可手動輸入：0456＝4 分 56 秒、015620＝1 小時 56 分 20 秒；要更準可加小數，如 0456.43" /> 以後都不要
         <button class="ghost small seg-use-pos" title="用「播放時間軸」播到要切的地方暫停，再按這顆">用目前播放位置</button></span>` : ""}
       <span class="vinfo muted seg-info">尚未選擇</span>
-      <span class="vinfo muted seg-trim-info"></span>`;
+      <span class="vinfo muted seg-trim-info"></span>
+      ${cutAt ? '<span class="seg-flash"></span>' : ""}`;
     const [pick, clear] = row.querySelectorAll("button");
     const info = row.querySelector(".seg-info");
     const onBox = row.querySelector(".seg-trim-on");
     const cutAtBox = row.querySelector(".seg-cut-at");
     const timeInput = row.querySelector(".seg-trim-time");
-    segRows[n] = { timeInput, trimInfo: row.querySelector(".seg-trim-info") };
+    const flashBox = row.querySelector(".seg-flash");
+    segRows[n] = { info, timeInput, flashBox, trimInfo: row.querySelector(".seg-trim-info") };
 
     pick.addEventListener("click", async () => {
       const path = await pickVideo();
-      if (!path) return;
-      info.textContent = "讀取中…";
-      try {
-        const c = await setClip(`s${n}`, path);
-        info.textContent = `${baseName(path)} · ${describe(c.info)}`;
-      } catch (e) {
-        info.textContent = `⚠ ${e}`;
-      }
-      await applySegTrim(n);
+      if (path) loadSegment(n, path);
     });
     clear.addEventListener("click", async () => {
       info.textContent = "尚未選擇";
+      delete segFlash[n];
       await setClip(`s${n}`, null);
       await applySegTrim(n);
+      renderFlashUi(n);
     });
     onBox.addEventListener("change", () => {
       segTrim[n].on = onBox.checked;
       cutAtBox?.classList.toggle("hidden", !onBox.checked);
       applySegTrim(n);
+      if (cutAt && onBox.checked && !segFlash[n] && !segTrim[n].text) detectSegFlash(n);
+      renderFlashUi(n);
     });
     timeInput?.addEventListener("input", () => {
       segTrim[n].text = timeInput.value;
       applySegTrim(n);
+    });
+    flashBox?.addEventListener("click", (ev) => {
+      const act = ev.target.dataset?.flash;
+      const f = segFlash[n];
+      if (act === "retry") detectSegFlash(n, !!f?.whole);
+      if (act === "whole") detectSegFlash(n, true);
+      if (act === "prev" && f) useFlashCandidate(n, (f.pick - 1 + f.list.length) % f.list.length);
+      if (act === "next" && f) useFlashCandidate(n, (f.pick + 1) % f.list.length);
+      if (act === "show" && f) full.seekTo(`s${n}`, f.list[f.pick].clean_frame);
     });
     row.querySelector(".seg-use-pos")?.addEventListener("click", async () => {
       const t = full.playerTimeIn(`s${n}`);
@@ -1168,6 +1282,84 @@ $("fullSegments").replaceChildren(
     return row;
   }),
 );
+
+// --- 從檔案總管拖影片進來 ---
+//
+// 放進目前展開的那一邊：單集放一支，全集一次六支、依檔名「4 碼日期-段號」排進對應段落
+// （例：1017-1、(new)1018-5、1017-3new）。
+
+const VIDEO_EXT_RE = new RegExp(`\\.(${VIDEO_EXTENSIONS.join("|")})$`, "i");
+
+/** 從檔名判斷第幾段；判斷不出來回傳 null。 */
+function segmentFromName(path) {
+  const name = baseName(path).replace(/\.[^.]+$/, "");
+  const m = [...name.matchAll(/(?:^|\D)(?:\d{4})?\d{4}[-－_](\d)(?!\d)/g)].pop();
+  const n = m ? Number(m[1]) : NaN;
+  return n >= 1 && n <= 6 ? n : null;
+}
+
+function openAccordion() {
+  const acc = [...document.querySelectorAll("#page-video details.acc")];
+  return acc.find((d) => d.open && d.querySelector("#fullSegments"))
+    ? "full"
+    : acc.find((d) => d.open && d.querySelector("#blockList"))
+      ? "single"
+      : null;
+}
+
+async function dropIntoSingle(paths) {
+  const status = $("singleStatus");
+  let b = blocks.find((x) => x.type === "video" && !store[x.id]);
+  if (!b) b = addBlock("video", blocks.findIndex((x) => x.type !== "video") >= 0 ? 0 : blocks.length);
+  await loadFileBlock(b, paths[0]);
+  status.textContent = paths.length > 1 ? `⚠ 單集一次只放一支，已放入 ${baseName(paths[0])}，其他 ${paths.length - 1} 支沒有放` : "";
+}
+
+async function dropIntoFull(paths) {
+  const status = $("fullStatus");
+  const bySeg = new Map();
+  const unknown = [];
+  const clash = new Set();
+  for (const p of paths) {
+    const n = segmentFromName(p);
+    if (n == null) unknown.push(baseName(p));
+    else if (bySeg.has(n)) clash.add(n);
+    else bySeg.set(n, p);
+  }
+  clash.forEach((n) => bySeg.delete(n));
+  const placed = [...bySeg.keys()].sort((a, b) => a - b);
+  const msgs = [];
+  if (placed.length) msgs.push(`已放入：${placed.map((n) => `第${SEGMENT_NAMES[n - 1]}段 ${baseName(bySeg.get(n))}`).join("、")}`);
+  if (unknown.length) msgs.push(`⚠ 看不出第幾段（檔名要有「日期-段號」，如 1017-3）：${unknown.join("、")}`);
+  if (clash.size) msgs.push(`⚠ 好幾支都是同一段，沒有放入：${[...clash].map((n) => `第${SEGMENT_NAMES[n - 1]}段`).join("、")}`);
+  status.textContent = msgs.join("　");
+  await Promise.all(placed.map((n) => loadSegment(n, bySeg.get(n))));
+}
+
+{
+  const page = $("page-video");
+  window.__TAURI__.webview.getCurrentWebview().onDragDropEvent(async ({ payload: p }) => {
+    if (page.classList.contains("hidden")) return;
+    const target = openAccordion();
+    if (p.type === "enter" || p.type === "over") {
+      page.classList.add("drop-hover");
+      return;
+    }
+    page.classList.remove("drop-hover");
+    if (p.type !== "drop") return;
+    const paths = (p.paths || []).filter((x) => VIDEO_EXT_RE.test(x));
+    if (!paths.length) return;
+    if (target === "single") await dropIntoSingle(paths);
+    else if (target === "full") await dropIntoFull(paths);
+    else {
+      // 兩邊都收合時：一支當單集、多支當全集
+      const want = paths.length > 1 ? "#fullSegments" : "#blockList";
+      const acc = [...document.querySelectorAll("#page-video details.acc")].find((d) => d.querySelector(want));
+      if (acc) acc.open = true;
+      await (paths.length > 1 ? dropIntoFull(paths) : dropIntoSingle(paths));
+    }
+  });
+}
 
 /** 章節時間＝閃白結束、該段完全出現的那一秒（無條件進位，確保已經完全出現）。 */
 $("fillChaptersBtn").addEventListener("click", async () => {

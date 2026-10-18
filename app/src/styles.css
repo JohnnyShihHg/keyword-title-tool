@@ -349,3 +349,10 @@ select { font: inherit; color: var(--text); background: var(--input-bg); border:
 .out-bar { display: flex; align-items: center; gap: 8px; width: 100%; max-width: 720px; font-size: 13px; }
 .out-bar.hidden { display: none; }
 .out-bar input[type=range] { flex: 1; }
+
+/* 全集：自動抓閃白 */
+.seg-flash { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; }
+.seg-flash .warn { color: var(--warn); }
+/* 從檔案總管拖影片進來時，提示可以放 */
+.video-page.drop-hover { outline: 3px dashed var(--accent); outline-offset: -6px; }
+.block-grip, .block { touch-action: none; }
