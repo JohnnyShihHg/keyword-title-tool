@@ -159,30 +159,32 @@ pub struct Placement {
 
 /// 依序算出每段在成品上的位置與成品總長。
 ///
-/// 閃白接法兩段重疊 `transition` 秒：過場從「目前長度 − transition」開始，
-/// 結束時這段才完全出現；直接接就是接在目前長度。
+/// 閃白和剪輯軟體一樣「置中在切點上」：前半段蓋在前一段的尾巴（邊播邊變白），後半段
+/// 蓋在下一段的開頭（從白色裡浮出來），兩段內容都不會被推開或吃掉一整段，成品總長就是
+/// 各段相加。過場從「切點 − transition/2」開始，到「切點 + transition/2」結束，
+/// 結束時這段完全出現（章節時間）。
+///
+/// （以前整個閃白放在前一段的尾巴，等於往前偏了 transition/2：前一段最後那段畫面
+/// 整個被白色蓋掉、聲音也淡掉，切點抓在最後一格乾淨畫面時最後一個字會被吃掉。）
 pub fn plan(spec: &RenderSpec) -> (Vec<Placement>, f64) {
-    let t = spec.transition;
+    let half = spec.transition / 2.0;
     let mut length = 0.0;
     let mut placements = Vec::with_capacity(spec.clips.len());
     for (i, clip) in spec.clips.iter().enumerate() {
         let d = clip.used_duration();
         if i == 0 {
             placements.push(Placement { transition_at: None, visible_at: 0.0 });
-            length = d;
         } else if clip.join == Join::Flash {
-            let at = length - t;
-            placements.push(Placement { transition_at: Some(at), visible_at: at + t });
-            length += d - t;
+            placements.push(Placement { transition_at: Some(length - half), visible_at: length + half });
         } else {
             placements.push(Placement { transition_at: None, visible_at: length });
-            length += d;
         }
+        length += d;
     }
     (placements, length)
 }
 
-/// 輸出影片總長：各段相加，再扣掉閃白重疊的部分。
+/// 輸出影片總長：各段相加（閃白置中在切點上，不增不減）。
 pub fn output_duration(spec: &RenderSpec) -> f64 {
     plan(spec).1
 }
@@ -240,7 +242,9 @@ pub fn build_render_args(spec: &RenderSpec) -> Result<Vec<String>, String> {
         }
     }
 
-    // 逐段往後接：閃白用 xfade + acrossfade（重疊），直接接用 concat。
+    // 逐段往後接。閃白：畫面用 xfade 置中在切點上——前一條尾巴、下一段開頭各補 t/2 秒
+    // 定格（被白色蓋住，看不到），讓過場能從「切點 − t/2」做到「切點 + t/2」；聲音不淡入
+    // 淡出，前一段完整播到切點、下一段從切點開始，直接接起來。直接接：畫面聲音都 concat。
     // xfade 的 offset 是相對於「目前已接好的那條」的長度，所以邊接邊累計。
     let (placements, _) = plan(spec);
     let (mut v_last, mut a_last) = ("v0".to_string(), "a0".to_string());
@@ -248,12 +252,15 @@ pub fn build_render_args(spec: &RenderSpec) -> Result<Vec<String>, String> {
         let (v_out, a_out) = (format!("vx{k}"), format!("ax{k}"));
         match (clip.join, place.transition_at) {
             (Join::Flash, Some(at)) => {
+                let hs = secs(t / 2.0);
+                graph.push(format!("[{v_last}]tpad=stop_mode=clone:stop_duration={hs}[vt{k}]"));
+                graph.push(format!("[v{k}]tpad=start_mode=clone:start_duration={hs}[vh{k}]"));
                 graph.push(format!(
-                    "[{v_last}][v{k}]xfade=transition=fadewhite:duration={}:offset={}[{v_out}]",
+                    "[vt{k}][vh{k}]xfade=transition=fadewhite:duration={}:offset={}[{v_out}]",
                     secs(t),
                     secs(at)
                 ));
-                graph.push(format!("[{a_last}][a{k}]acrossfade=d={}[{a_out}]", secs(t)));
+                graph.push(format!("[{a_last}][a{k}]concat=n=2:v=0:a=1[{a_out}]"));
             }
             _ => {
                 graph.push(format!("[{v_last}][v{k}]concat=n=2:v=1:a=0[{v_out}]"));
@@ -653,16 +660,17 @@ mod tests {
         clips[4].join = Join::Cut;
         let (places, total) = plan(&spec(clips));
         let visible: Vec<f64> = places.iter().map(|p| p.visible_at).collect();
-        assert_eq!(visible, vec![0.0, 600.0, 620.0, 919.5, 1319.0]);
-        assert_eq!(places[2].transition_at, Some(619.5));
+        // 閃白置中在切點：第二段的切點在 620，過場 619.75–620.25
+        assert_eq!(visible, vec![0.0, 600.0, 620.25, 920.25, 1320.0]);
+        assert_eq!(places[2].transition_at, Some(619.75));
         assert_eq!(places[1].transition_at, None);
-        assert_eq!(total, 1364.0);
+        assert_eq!(total, 1365.0);
     }
 
     #[test]
-    fn output_duration_subtracts_transitions() {
+    fn output_duration_is_the_sum_of_clips() {
         let s = spec(vec![clip("a", 60.0), clip("b", 20.0), clip("c", 45.0)]);
-        assert_eq!(output_duration(&s), 124.0);
+        assert_eq!(output_duration(&s), 125.0);
     }
 
     #[test]
@@ -670,10 +678,14 @@ mod tests {
         let s = spec(vec![clip("main.mp4", 60.0), clip("yt.mp4", 20.0), clip("promo.mp4", 45.0)]);
         let args = build_render_args(&s).unwrap();
         let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
-        assert!(graph.contains("[v0][v1]xfade=transition=fadewhite:duration=0.5:offset=59.5[vx1]"));
-        assert!(graph.contains("[vx1][v2]xfade=transition=fadewhite:duration=0.5:offset=79[vx2]"));
-        assert!(graph.contains("[a0][a1]acrossfade=d=0.5[ax1]"));
-        assert!(graph.contains("[ax1][a2]acrossfade=d=0.5[ax2]"));
+        assert!(graph.contains("[v0]tpad=stop_mode=clone:stop_duration=0.25[vt1]"));
+        assert!(graph.contains("[v1]tpad=start_mode=clone:start_duration=0.25[vh1]"));
+        assert!(graph.contains("[vt1][vh1]xfade=transition=fadewhite:duration=0.5:offset=59.75[vx1]"));
+        assert!(graph.contains("[vx1]tpad=stop_mode=clone:stop_duration=0.25[vt2]"));
+        assert!(graph.contains("[vt2][vh2]xfade=transition=fadewhite:duration=0.5:offset=79.75[vx2]"));
+        assert!(graph.contains("[a0][a1]concat=n=2:v=0:a=1[ax1]"));
+        assert!(graph.contains("[ax1][a2]concat=n=2:v=0:a=1[ax2]"));
+        assert!(!graph.contains("acrossfade"), "audio is not faded at a flash");
         assert!(graph.contains("fps=30000/1001"));
         assert!(args.windows(2).any(|w| w == ["-map", "[vx2]"]));
         assert!(args.windows(2).any(|w| w == ["-map", "[ax2]"]));
@@ -689,10 +701,10 @@ mod tests {
         let s = spec(vec![clip("main.mp4", 60.0), clip("yt.mp4", 20.0), promo]);
         let args = build_render_args(&s).unwrap();
         let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
-        assert!(graph.contains("[v0][v1]xfade=transition=fadewhite:duration=0.5:offset=59.5[vx1]"));
+        assert!(graph.contains("[vt1][vh1]xfade=transition=fadewhite:duration=0.5:offset=59.75[vx1]"));
         assert!(graph.contains("[vx1][v2]concat=n=2:v=1:a=0[vx2]"));
         assert!(graph.contains("[ax1][a2]concat=n=2:v=0:a=1[ax2]"));
-        assert_eq!(output_duration(&s), 124.5);
+        assert_eq!(output_duration(&s), 125.0);
     }
 
     #[test]
@@ -726,7 +738,7 @@ mod tests {
         let i = args.iter().position(|a| a == "yt.mp4").unwrap();
         assert_eq!(&args[i - 5..i], ["-ss", "30", "-t", "60", "-i"]);
         let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
-        assert!(graph.contains("offset=119[vx2]"), "{graph}");
+        assert!(graph.contains("offset=119.75[vx2]"), "{graph}"); // 切點在 60 + 60，過場置中
     }
 
     #[test]

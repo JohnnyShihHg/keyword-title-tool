@@ -510,17 +510,22 @@ function createPanel(prefix, buildSequence, defaultName, hooks = {}) {
     tlTick();
   }
 
+  /** 這段原始畫面在成品上從第幾秒開始：閃白置中在切點上，所以是過場的正中間。 */
+  function contentAt(p) {
+    return p.transition_at != null ? p.transition_at + (settings?.transition_secs ?? 0.5) / 2 : p.visible_at;
+  }
+
   /** 成品時間 → 第幾段、該段原始檔的第幾秒 */
   function locateOut(out) {
     let idx = 0;
     tl.placements.forEach((p, i) => {
-      if ((p.transition_at ?? p.visible_at) <= out) idx = i;
+      if (contentAt(p) <= out) idx = i;
     });
     const p = tl.placements[idx];
     const item = tl.seq[idx];
     if (!p || !item) return null;
     const { start, end } = clipRange(item);
-    return { idx, seconds: Math.min(end - 0.04, start + Math.max(0, out - (p.transition_at ?? p.visible_at))) };
+    return { idx, seconds: Math.min(end - 0.04, start + Math.max(0, out - contentAt(p))) };
   }
 
   let outDragging = false;
@@ -577,6 +582,7 @@ function createPanel(prefix, buildSequence, defaultName, hooks = {}) {
       return;
     }
 
+    // 預覽的閃白和輸出一樣置中在切點：前一段最後半個過場淡到白，下一段開頭半個過場從白淡出
     const half = (settings?.transition_secs ?? 0.5) / 2;
     const next = tl.seq[tl.idx + 1];
     let white = 0;
@@ -592,7 +598,7 @@ function createPanel(prefix, buildSequence, defaultName, hooks = {}) {
       if (i === tl.idx) head.style.left = `${Math.min(100, Math.max(0, ((t - start) / Math.max(used, 0.001)) * 100))}%`;
     });
     const place = tl.placements[tl.idx];
-    const outAt = place ? (place.transition_at ?? place.visible_at) + Math.max(0, t - start) : 0;
+    const outAt = place ? contentAt(place) + Math.max(0, t - start) : 0;
     el("PlayerLabel").textContent =
       `播放時間軸（尚未輸出，閃白與音量為近似）：${item.label}。播放器自己的進度條是原始檔長度，請看上面的「成品」進度條`;
     showOutPos(outAt);
@@ -843,13 +849,22 @@ function createPanel(prefix, buildSequence, defaultName, hooks = {}) {
     const encoderName = ENCODER_NAMES[encoder] || encoder;
     status.textContent = `輸出中（${encoderName}）…`;
     const startedAt = Date.now();
+    // ffmpeg 只回報編碼到第幾秒；最後一格編完後還要寫結尾、把整個檔案重寫成可以
+    // 邊下載邊播的格式（faststart），這段沒有進度可看。所以編碼最多顯示到 99%，
+    // 之後改成「收尾中」，真的寫完才算 100%。
     const unlisten = await listen("render-progress", ({ payload: p }) => {
       const frac = p.total ? Math.min(1, p.seconds / p.total) : 0;
-      progress.value = frac;
+      if (frac >= 0.999) {
+        progress.value = 0.99;
+        status.textContent = `收尾中：正在整理檔案，請稍候（長片可能要幾十秒）…`;
+        return;
+      }
+      progress.value = Math.min(frac, 0.99);
       const elapsed = (Date.now() - startedAt) / 1000;
       const remain = frac > 0.02 ? (elapsed / frac) * (1 - frac) : null;
       status.textContent =
-        `輸出中（${encoderName}）${Math.round(frac * 100)}%` + (remain != null ? ` · 剩約 ${fmtTime(remain)}` : "");
+        `輸出中（${encoderName}）${Math.min(99, Math.floor(frac * 100))}%` +
+        (remain != null ? ` · 編碼剩約 ${fmtTime(remain)}（之後還要收尾）` : "");
     });
     try {
       const result = await invoke("render_video", { spec });
