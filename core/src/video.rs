@@ -246,6 +246,8 @@ pub fn build_render_args(spec: &RenderSpec) -> Result<Vec<String>, String> {
     // 定格（被白色蓋住，看不到），讓過場能從「切點 − t/2」做到「切點 + t/2」；聲音不淡入
     // 淡出，前一段完整播到切點、下一段從切點開始，直接接起來。直接接：畫面聲音都 concat。
     // xfade 的 offset 是相對於「目前已接好的那條」的長度，所以邊接邊累計。
+    // xfade 輸出後要再過 fps＋settb 把時間戳整理回固定幀率：不然下一個閃白的 tpad 接在
+    // xfade 後面時，補出來的定格時間戳會往回跳而被丟掉，連續閃白從第二個起每個都斷 7 格。
     let (placements, _) = plan(spec);
     let (mut v_last, mut a_last) = ("v0".to_string(), "a0".to_string());
     for (k, (clip, place)) in spec.clips.iter().zip(&placements).enumerate().skip(1) {
@@ -256,7 +258,7 @@ pub fn build_render_args(spec: &RenderSpec) -> Result<Vec<String>, String> {
                 graph.push(format!("[{v_last}]tpad=stop_mode=clone:stop_duration={hs}[vt{k}]"));
                 graph.push(format!("[v{k}]tpad=start_mode=clone:start_duration={hs}[vh{k}]"));
                 graph.push(format!(
-                    "[vt{k}][vh{k}]xfade=transition=fadewhite:duration={}:offset={}[{v_out}]",
+                    "[vt{k}][vh{k}]xfade=transition=fadewhite:duration={}:offset={},fps={fps},settb=AVTB[{v_out}]",
                     secs(t),
                     secs(at)
                 ));
@@ -680,9 +682,10 @@ mod tests {
         let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
         assert!(graph.contains("[v0]tpad=stop_mode=clone:stop_duration=0.25[vt1]"));
         assert!(graph.contains("[v1]tpad=start_mode=clone:start_duration=0.25[vh1]"));
-        assert!(graph.contains("[vt1][vh1]xfade=transition=fadewhite:duration=0.5:offset=59.75[vx1]"));
+        assert!(graph.contains("[vt1][vh1]xfade=transition=fadewhite:duration=0.5:offset=59.75,fps=30000/1001,settb=AVTB[vx1]"));
+        // 第二個閃白的 tpad 接的是已經整理過時間戳的 xfade 輸出（上面 [vx1] 結尾是 settb）
         assert!(graph.contains("[vx1]tpad=stop_mode=clone:stop_duration=0.25[vt2]"));
-        assert!(graph.contains("[vt2][vh2]xfade=transition=fadewhite:duration=0.5:offset=79.75[vx2]"));
+        assert!(graph.contains("[vt2][vh2]xfade=transition=fadewhite:duration=0.5:offset=79.75,fps=30000/1001,settb=AVTB[vx2]"));
         assert!(graph.contains("[a0][a1]concat=n=2:v=0:a=1[ax1]"));
         assert!(graph.contains("[ax1][a2]concat=n=2:v=0:a=1[ax2]"));
         assert!(!graph.contains("acrossfade"), "audio is not faded at a flash");
@@ -701,7 +704,7 @@ mod tests {
         let s = spec(vec![clip("main.mp4", 60.0), clip("yt.mp4", 20.0), promo]);
         let args = build_render_args(&s).unwrap();
         let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
-        assert!(graph.contains("[vt1][vh1]xfade=transition=fadewhite:duration=0.5:offset=59.75[vx1]"));
+        assert!(graph.contains("[vt1][vh1]xfade=transition=fadewhite:duration=0.5:offset=59.75,fps=30000/1001,settb=AVTB[vx1]"));
         assert!(graph.contains("[vx1][v2]concat=n=2:v=1:a=0[vx2]"));
         assert!(graph.contains("[ax1][a2]concat=n=2:v=0:a=1[ax2]"));
         assert_eq!(output_duration(&s), 125.0);
@@ -738,7 +741,7 @@ mod tests {
         let i = args.iter().position(|a| a == "yt.mp4").unwrap();
         assert_eq!(&args[i - 5..i], ["-ss", "30", "-t", "60", "-i"]);
         let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
-        assert!(graph.contains("offset=119.75[vx2]"), "{graph}"); // 切點在 60 + 60，過場置中
+        assert!(graph.contains("offset=119.75,fps=30000/1001,settb=AVTB[vx2]"), "{graph}"); // 切點在 60 + 60，過場置中
     }
 
     #[test]
