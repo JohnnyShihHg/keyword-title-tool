@@ -57,10 +57,8 @@ pub struct Settings {
     pub sync_folder_format: String,
     /// 開啟時、別人改過時自動載入
     pub sync_auto_load: bool,
-    /// 修改後自動寫回
+    /// 修改後自動寫回（txt 已經存在時；第一次要使用者自己按寫入或存成 txt）
     pub sync_auto_write: bool,
-    /// 當天資料夾不存在時自動建立
-    pub sync_create_folder: bool,
 }
 
 impl Default for Settings {
@@ -90,7 +88,6 @@ impl Default for Settings {
             sync_folder_format: "{MMDD}關鍵".to_string(),
             sync_auto_load: true,
             sync_auto_write: true,
-            sync_create_folder: true,
         }
     }
 }

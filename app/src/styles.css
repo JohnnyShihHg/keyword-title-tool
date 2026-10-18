@@ -255,6 +255,8 @@ input.invalid { border-color: var(--warn); background: var(--warn-bg); }
 .batch-result { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
 .batch-result.hidden { display: none; }
 .sync-status { font-size: 13px; }
+.sync-btns { display: inline-flex; gap: 6px; }
+.sync-btns.hidden { display: none; }
 .sync-status.ok { color: var(--accent); }
 .sync-status.bad { color: var(--warn); }
 .batch-panel { border: 2px dashed var(--accent); }

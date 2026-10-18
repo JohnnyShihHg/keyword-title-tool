@@ -15,8 +15,8 @@ use std::time::UNIX_EPOCH;
 
 #[derive(Debug, Serialize)]
 pub struct SyncError {
-    /// unreachable（連不上根目錄）／permission（沒有權限）／nofolder（當天資料夾不存在且不自動建立）
-    /// ／conflict（別人改過）／verify（讀回來不一致）／other
+    /// unreachable（連不上根目錄）／permission（沒有權限）／nofolder（當天資料夾還沒建立）
+    /// ／nofile（txt 還沒建立，要使用者自己按寫入）／conflict（別人改過）／verify（讀回來不一致）／other
     kind: &'static str,
     message: String,
 }
@@ -34,6 +34,8 @@ fn io_err(e: std::io::Error, what: &str) -> SyncError {
 
 #[derive(Debug, Serialize)]
 pub struct SyncFile {
+    /// 當天資料夾在不在（工具不會自己建資料夾）
+    pub folder: bool,
     pub exists: bool,
     /// 檔案原文（CRLF，去掉 BOM）
     pub text: String,
@@ -82,21 +84,23 @@ fn read_text(path: &Path) -> Result<Option<String>, SyncError> {
 
 pub fn read(path: &Path) -> Result<SyncFile, SyncError> {
     check_root(path)?;
+    let folder = path.parent().is_some_and(Path::is_dir);
     match read_text(path)? {
-        Some(text) => Ok(SyncFile { exists: true, text, mtime: mtime(path)?.unwrap_or(0) }),
-        None => Ok(SyncFile { exists: false, text: String::new(), mtime: 0 }),
+        Some(text) => Ok(SyncFile { folder, exists: true, text, mtime: mtime(path)?.unwrap_or(0) }),
+        None => Ok(SyncFile { folder, exists: false, text: String::new(), mtime: 0 }),
     }
 }
 
 /// known：上次讀到／寫入的內容（None＝以為檔案還不存在）。force：不管別人改過，直接蓋掉。
-pub fn write(path: &Path, content: &str, known: Option<&str>, force: bool, create_folder: bool) -> Result<Written, SyncError> {
+/// create：txt 還不存在時建立（只有使用者按「寫入」才建，自動同步不建）。資料夾一律不建。
+pub fn write(path: &Path, content: &str, known: Option<&str>, force: bool, create: bool) -> Result<Written, SyncError> {
     check_root(path)?;
     let dir = path.parent().ok_or_else(|| err("other", "路徑不完整"))?;
     if !dir.is_dir() {
-        if !create_folder {
-            return Err(err("nofolder", format!("當天資料夾 {} 不存在", dir.display())));
-        }
-        std::fs::create_dir_all(dir).map_err(|e| io_err(e, "建立當天資料夾"))?;
+        return Err(err("nofolder", format!("當天資料夾 {} 還沒建立", dir.display())));
+    }
+    if !create && !path.exists() {
+        return Err(err("nofile", "共用資料夾裡還沒有今天的 txt"));
     }
 
     let text = to_crlf(content);
@@ -148,8 +152,8 @@ pub fn sync_stat(path: String) -> Result<Option<u64>, SyncError> {
 }
 
 #[tauri::command]
-pub fn sync_write(path: String, content: String, known: Option<String>, force: bool, create_folder: bool) -> Result<Written, SyncError> {
-    write(Path::new(&path), &content, known.as_deref(), force, create_folder)
+pub fn sync_write(path: String, content: String, known: Option<String>, force: bool, create: bool) -> Result<Written, SyncError> {
+    write(Path::new(&path), &content, known.as_deref(), force, create)
 }
 
 /// 共用資料夾的 txt 拆回六段。和「匯入 txt」不同，空檔（第一個人剛建的）也照樣回傳。
@@ -170,19 +174,24 @@ mod tests {
     }
 
     #[test]
-    fn first_write_creates_folder_then_conflicts_are_detected() {
+    fn never_creates_folder_and_creates_file_only_when_asked() {
         let r = root("flow");
         let path = r.join("1016關鍵").join("20261016關鍵標題1-6.txt");
-        assert!(!read(&path).unwrap().exists);
-        assert_eq!(write(&path, "a", None, false, false).unwrap_err().kind, "nofolder");
+        let f = read(&path).unwrap();
+        assert!(!f.folder && !f.exists);
+        assert_eq!(write(&path, "a", None, false, true).unwrap_err().kind, "nofolder");
+        assert!(!path.parent().unwrap().exists(), "folder is never created");
 
+        std::fs::create_dir(path.parent().unwrap()).unwrap();
+        assert!(read(&path).unwrap().folder);
+        assert_eq!(write(&path, "a", None, false, false).unwrap_err().kind, "nofile");
         let w = write(&path, "甲\n乙", None, false, true).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "甲\r\n乙");
         let f = read(&path).unwrap();
         assert_eq!((f.exists, f.text.as_str(), f.mtime), (true, "甲\r\n乙", w.mtime));
 
         // 自己接著改：沒問題
-        let w2 = write(&path, "甲\n乙\n丙", Some(&w.text), false, true).unwrap();
+        let w2 = write(&path, "甲\n乙\n丙", Some(&w.text), false, false).unwrap();
         // 不知道已經有檔案（第一次開、以為沒有）→ conflict
         assert_eq!(write(&path, "我的", None, false, true).unwrap_err().kind, "conflict");
         // 別人在中間改過 → conflict；force 才蓋

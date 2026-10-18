@@ -69,8 +69,8 @@ function collect() {
 function saveDraft() {
   try {
     // 同步狀態也存著：重開後知道上次同步到哪個版本，不會把自己寫的誤認成別人改的
-    const { path, mtime, text, dirty } = sync;
-    localStorage.setItem(DRAFT_KEY, JSON.stringify({ ...collect(), sync: { path, mtime, text, dirty } }));
+    const { path, mtime, text, dirty, detached } = sync;
+    localStorage.setItem(DRAFT_KEY, JSON.stringify({ ...collect(), sync: { path, mtime, text, dirty, detached } }));
   } catch (_) {
     /* 存不了就算了，不影響轉換 */
   }
@@ -91,7 +91,7 @@ function loadDraft() {
     segments[i].link.value = s.link || "";
   });
   fullLinkInput.value = draft?.full_link || "";
-  Object.assign(sync, { path: null, mtime: null, text: null, dirty: false }, draft?.sync);
+  Object.assign(sync, { path: null, mtime: null, text: null, dirty: false, detached: null }, draft?.sync);
 }
 
 function hasContent() {
@@ -120,6 +120,7 @@ function changed() {
   sync.rev++;
   sync.dirty = true;
   scheduleSyncWrite();
+  updateSyncButtons();
   saveDraft();
   clearTimeout(renderTimer);
   renderTimer = setTimeout(refresh, 120);
@@ -190,8 +191,13 @@ $("copyBtn").addEventListener("click", async () => {
 
 $("saveBtn").addEventListener("click", async () => {
   try {
-    const saved = await invoke("save_text_file", { date: dateInput.value.trim(), content: output.value });
-    if (saved) flash("已存檔");
+    // 開了同步就預設開在共用資料夾的當天資料夾；存到那裡就等於建立了今天的 txt，開始自動同步
+    const dir = syncOn() && sync.path ? sync.path.replace(/[\\/][^\\/]*$/, "") : null;
+    const saved = await invoke("save_text_file", { date: dateInput.value.trim(), content: output.value, dir });
+    if (saved) {
+      flash("已存檔");
+      if (syncOn() && sync.path) await syncAfterSave(saved);
+    }
   } catch (e) {
     flash(`存檔失敗：${e}`);
   }
@@ -239,7 +245,7 @@ $("importBtn").addEventListener("click", async () => {
 $("clearAllBtn").addEventListener("click", async () => {
   // 在影片頁按：清空目前這邊（單集或全集）的影片，不動文稿
   if (!$("page-video").classList.contains("hidden") && window.onClearVideo) return window.onClearVideo();
-  const shared = syncWrites() && sync.path ? "\n\n共用資料夾裡今天的 txt 也會一起清空，其他人也會看到。" : "";
+  const shared = syncOn() ? "\n\n只清空這台電腦畫面上的卡片，共用資料夾的 txt 不會動；之後要按「載入」才會再同步。" : "";
   const ok = await window.__TAURI__.dialog.ask(`確定要清空六段的內容、時間和 YT 連結嗎？${shared}`, {
     title: "清空全部",
     kind: "warning",
@@ -255,6 +261,7 @@ $("clearAllBtn").addEventListener("click", async () => {
   fullLinkInput.value = "";
   dateInput.value = today();
   changed();
+  await syncDetach();
 });
 
 // --- 一次貼上：整批文稿依序放進還空著的段落 ---
@@ -320,14 +327,17 @@ $("batchUndoBtn").addEventListener("click", () => {
 });
 
 // --- 共用資料夾同步 ---
-// 當天資料夾的 txt（路徑見設定）：開啟時載入、修改後約 2 秒寫回、每 10 秒看別人有沒有改。
-// 寫入前比對修改時間，別人在我修改時也改過就跳出詢問，不會自動蓋掉別人的。
+// 當天資料夾的 txt（路徑見設定）。工具不建資料夾、也不自己建 txt：第一個人按「寫入」或
+// 「存成 txt」存到當天資料夾後，大家才開始自動同步。開啟時、開始編輯前看一次有沒有人改過；
+// 修改後約 2 秒寫回，寫入前比對內容，別人在我修改時也改過就詢問，不會自動蓋掉別人的。
 
 const sync = {
   path: null, // 目前同步的檔案；null＝關閉或日期不完整
-  mtime: null, // 上次讀到／寫入時的修改時間；null＝以為檔案不存在
-  text: null, // 上次讀到／寫入的內容，用來判斷別人有沒有改
+  mtime: null, // 上次讀到／寫入時的修改時間（只用來判斷要不要重讀）
+  text: null, // 上次讀到／寫入的內容；null＝還不知道有這個檔案（不會自動寫）
+  folder: false, // 當天資料夾在不在
   dirty: false, // 有修改還沒寫回
+  detached: null, // 清空全部後暫停同步的檔案路徑（只能按載入恢復）
   rev: 0, // 每次修改 +1，寫入途中又改了就再寫一次
   busy: false,
   conflict: false, // 衝突對話框開著，或選了「先不要」
@@ -338,6 +348,7 @@ const sync = {
 const syncOn = () => !!settings?.sync_enabled;
 const syncWrites = () => syncOn() && settings.sync_auto_write;
 const syncLoads = () => syncOn() && settings.sync_auto_load;
+const syncPaused = () => !!sync.path && sync.detached === sync.path;
 const clock = () => new Date().toLocaleTimeString("zh-TW", { hour12: false });
 
 function setSyncStatus(text, kind = "") {
@@ -345,17 +356,29 @@ function setSyncStatus(text, kind = "") {
   el.textContent = text;
   el.className = `sync-status muted ${kind}`;
   el.title = sync.path || "";
-  $("syncNowBtn").classList.toggle("hidden", !syncOn() || kind !== "bad");
+  updateSyncButtons();
+}
+
+/** 資料夾還沒建立、畫面是空的、清空後暫停中都不能寫（清空後只能載入）；還沒有 txt 就沒東西可載入。 */
+function updateSyncButtons() {
+  $("syncBtns").classList.toggle("hidden", !syncOn() || !sync.path);
+  const write = $("syncWriteBtn");
+  const why = !sync.folder ? "當天資料夾尚未建立" : syncPaused() ? "已清空畫面，只能載入" : !hasContent() ? "畫面上沒有內容可以寫入" : "";
+  write.disabled = !!why;
+  write.title = why || "把畫面上的內容寫進共用資料夾（還沒有 txt 時會建立）";
+  $("syncLoadBtn").disabled = sync.text === null && !sync.conflict;
 }
 
 function syncFailed(e, doing) {
+  if (e?.kind === "nofolder") sync.folder = false;
   const msg = {
-    unreachable: "⚠ 連不上共用資料夾，先存在這台電腦，稍後自動重試",
+    unreachable: "⚠ 連不上共用資料夾，先存在這台電腦",
     permission: "⚠ 沒有共用資料夾的權限" + (doing === "write" ? "，無法寫入（仍可載入）" : ""),
-    nofolder: "⚠ 當天資料夾還沒建立（設定裡可開啟自動建立）",
+    nofolder: "⚠ 當天資料夾尚未建立",
+    nofile: "☁ 共用資料夾還沒有今天的 txt，按「寫入」或「存成 txt」建立後開始同步",
     verify: "⚠ 寫入後比對不一致，請檢查網路或手動「存成 txt」",
   }[e?.kind];
-  setSyncStatus(msg || `⚠ 同步失敗：${e?.message ?? e}`, "bad");
+  setSyncStatus(msg || `⚠ 同步失敗：${e?.message ?? e}`, e?.kind === "nofile" ? "" : "bad");
 }
 
 /** 日期或同步設定改了：換到對應的檔案再讀一次。 */
@@ -371,36 +394,39 @@ async function syncOpen() {
   }
   const path = await invoke("sync_path", { settings, date: dateInput.value.trim() });
   if (path !== sync.path) {
-    sync.path = path;
-    sync.mtime = null;
-    sync.text = null;
-    sync.conflict = false;
+    Object.assign(sync, { path, mtime: null, text: null, folder: false, conflict: false });
   }
   if (!path) return setSyncStatus("⚠ 日期不完整，暫停同步", "bad");
-  if (syncLoads()) await syncPull();
-  else if (sync.dirty) scheduleSyncWrite();
-  else setSyncStatus("☁ 共用資料夾同步（不自動載入）");
+  await syncPull({ load: syncLoads() });
 }
 
-/** 讀共用資料夾：沒有檔案就建一個（第一個打開的人），別人改過就載入，雙方都改過就詢問。 */
-async function syncPull() {
+/** 讀共用資料夾。load：別人改過且自己沒在改就載入（雙方都改過就詢問）；false 只更新狀態。 */
+async function syncPull({ load = true } = {}) {
   if (!sync.path || sync.busy) return;
   sync.busy = true;
   const rev = sync.rev;
   try {
     const f = await invoke("sync_read", { path: sync.path });
+    sync.folder = f.folder;
     if (!f.exists) {
       sync.mtime = null;
       sync.text = null;
-      sync.busy = false;
-      if (syncWrites()) return await syncPush();
-      return setSyncStatus("☁ 共用資料夾還沒有今天的 txt");
+      return syncFailed({ kind: f.folder ? "nofile" : "nofolder" });
     }
-    if (f.text === sync.text) {
+    if (syncPaused()) return setSyncStatus("⏸ 已清空畫面，自動同步暫停（按「載入」恢復）");
+    // 檔案內容就是畫面上這份（例如剛「存成 txt」存到這裡）：直接接上
+    const mine = (await invoke("render_document", { doc: collect() })).text.replace(/\r?\n/g, "\r\n");
+    if (f.text === sync.text || f.text === mine) {
+      sync.text = f.text;
       sync.mtime = f.mtime;
-      if (sync.dirty && syncWrites()) scheduleSyncWrite();
+      if (f.text === mine && rev === sync.rev) sync.dirty = false;
+      if (sync.dirty) scheduleSyncWrite();
+      else setSyncStatus(`☁ 已同步 ${clock()}`, "ok");
+      saveDraft();
+    } else if (!load) {
+      setSyncStatus("☁ 共用資料夾有更新的版本（自動載入已關閉，可按「載入」）");
     } else if ((!sync.dirty || !hasContent()) && rev === sync.rev) {
-      loadSynced(f);
+      await loadSynced(f);
     } else {
       showConflict(f);
     }
@@ -414,10 +440,7 @@ async function syncPull() {
 async function loadSynced(f) {
   const doc = await invoke("import_text", { text: f.text, settings });
   applyDoc(doc);
-  sync.text = f.text;
-  sync.mtime = f.mtime;
-  sync.dirty = false;
-  sync.conflict = false;
+  Object.assign(sync, { text: f.text, mtime: f.mtime, dirty: false, conflict: false, detached: null });
   saveDraft();
   refresh();
   const count = doc.segments.filter((s) => s.text).length;
@@ -429,15 +452,17 @@ function cancelSyncWrite() {
   sync.writeTimer = null;
 }
 
+/** 自動寫回：只在已經有今天的 txt、沒有暫停、沒有衝突時。 */
 function scheduleSyncWrite() {
   cancelSyncWrite();
-  if (!syncWrites() || sync.conflict) return;
+  if (!syncWrites() || !sync.path || sync.text === null || sync.conflict || syncPaused()) return;
   sync.writeTimer = setTimeout(() => syncPush(), 2000);
 }
 
-async function syncPush({ force = false } = {}) {
+/** create：還沒有 txt 時建立（只有按「寫入」才會）。force：衝突時選了用自己的蓋過去。 */
+async function syncPush({ force = false, create = false } = {}) {
   cancelSyncWrite();
-  if (!sync.path || !syncWrites()) return false;
+  if (!sync.path || !hasContent()) return false; // 空白不寫，免得把共用資料夾的稿子洗掉
   if (sync.busy) {
     scheduleSyncWrite();
     return false;
@@ -447,16 +472,8 @@ async function syncPush({ force = false } = {}) {
   setSyncStatus("☁ 寫入中…");
   try {
     const rendered = await invoke("render_document", { doc: collect() });
-    const w = await invoke("sync_write", {
-      path: sync.path,
-      content: rendered.text,
-      known: sync.text,
-      force,
-      createFolder: !!settings.sync_create_folder,
-    });
-    sync.mtime = w.mtime;
-    sync.text = w.text;
-    sync.conflict = false;
+    const w = await invoke("sync_write", { path: sync.path, content: rendered.text, known: sync.text, force, create });
+    Object.assign(sync, { mtime: w.mtime, text: w.text, conflict: false, detached: null, folder: true });
     if (rev === sync.rev) sync.dirty = false;
     else scheduleSyncWrite();
     saveDraft();
@@ -476,16 +493,36 @@ async function syncPush({ force = false } = {}) {
   }
 }
 
+/** 「存成 txt」剛好存到共用資料夾的今天的檔案：就當作建立了，開始同步。 */
+async function syncAfterSave(savedPath) {
+  const norm = (p) => p.replace(/\\/g, "/").toLowerCase();
+  if (norm(savedPath) !== norm(sync.path)) return;
+  sync.detached = null;
+  sync.rev++;
+  await syncPull({ load: false });
+}
+
+/** 清空全部：只清畫面，這個檔案暫停同步，不會把空白寫回共用資料夾。 */
+async function syncDetach() {
+  cancelSyncWrite();
+  if (!syncOn()) return;
+  const path = await invoke("sync_path", { settings, date: dateInput.value.trim() });
+  if (path !== sync.path) Object.assign(sync, { path, mtime: null, text: null, conflict: false });
+  Object.assign(sync, { detached: path, dirty: false });
+  saveDraft();
+  if (sync.path) setSyncStatus("⏸ 已清空畫面，自動同步暫停（按「載入」恢復）");
+}
+
 let conflictFile = null;
 function showConflict(f) {
   conflictFile = f;
   sync.conflict = true;
   cancelSyncWrite();
   $("syncConflictMessage").textContent =
-    `你修改的同時，別人也改了 ${sync.path.split(/[\\/]/).pop()}。` +
+    `共用資料夾的 ${sync.path.split(/[\\/]/).pop()} 和你畫面上的內容不一樣（有人改過）。` +
     "「載入對方的版本」會丟掉你這次的修改；「用我的蓋過去」會丟掉對方的修改。";
   $("syncConflict").classList.remove("hidden");
-  setSyncStatus("⚠ 和共用資料夾的版本衝突，尚未同步", "bad");
+  setSyncStatus("⚠ 和共用資料夾的版本不一樣，尚未同步", "bad");
 }
 
 function closeConflict() {
@@ -502,34 +539,55 @@ $("conflictMineBtn").addEventListener("click", async () => {
   await syncPush({ force: true });
 });
 $("conflictLaterBtn").addEventListener("click", () => {
-  // 保持暫停寫入；按「立即同步」會再問一次
+  // 保持暫停寫入；按「載入」或「寫入」再處理
   closeConflict();
 });
 
-$("syncNowBtn").addEventListener("click", async () => {
-  sync.conflict = false;
-  if (sync.dirty && !syncLoads()) await syncPush();
-  else await syncOpen();
-});
-
-// 每 10 秒看別人有沒有改；連不上時也靠這個重試
-setInterval(async () => {
-  if (!syncOn() || !sync.path || sync.busy || sync.conflict) return;
+$("syncLoadBtn").addEventListener("click", async () => {
+  if (sync.busy) return;
   try {
-    const m = await invoke("sync_stat", { path: sync.path });
-    if ((m ?? null) !== sync.mtime && syncLoads()) await syncPull();
-    else if (sync.dirty && syncWrites() && !sync.writeTimer) await syncPush();
-    else if (syncLoads() && $("syncStatus").classList.contains("bad")) await syncPull();
+    const f = await invoke("sync_read", { path: sync.path });
+    sync.folder = f.folder;
+    if (!f.exists) return syncFailed({ kind: f.folder ? "nofile" : "nofolder" });
+    if (hasContent() && f.text !== sync.text) {
+      const ok = await window.__TAURI__.dialog.ask("用共用資料夾裡的 txt 取代畫面上的內容嗎？", {
+        title: "載入",
+        okLabel: "載入",
+        cancelLabel: "取消",
+      });
+      if (!ok) return;
+    }
+    await loadSynced(f);
   } catch (e) {
     syncFailed(e, "read");
   }
-}, 10000);
+});
 
-/** 開啟時：開了自動載入就換成今天的檔案（前一天還沒寫回的先寫回去）。 */
+$("syncWriteBtn").addEventListener("click", async () => {
+  if (syncPaused() || !hasContent()) return;
+  sync.conflict = false;
+  await syncPush({ create: true });
+});
+
+// 開始編輯前（點進任何一段）看一次別人有沒有改過，自己沒在改就先載入，避免之後衝突
+let lastFocusCheck = 0;
+segmentsEl.addEventListener("focusin", async () => {
+  if (!syncLoads() || !sync.path || sync.busy || sync.conflict || sync.dirty || syncPaused()) return;
+  if (Date.now() - lastFocusCheck < 5000) return;
+  lastFocusCheck = Date.now();
+  try {
+    const m = await invoke("sync_stat", { path: sync.path });
+    if ((m ?? null) !== sync.mtime) await syncPull();
+  } catch (e) {
+    syncFailed(e, "read");
+  }
+});
+
+/** 開啟時：開了自動載入就換成今天的檔案（前一天還沒寫回的先寫回）。 */
 async function syncStartup() {
   if (!syncOn()) return;
   if (syncLoads() && dateInput.value.trim() !== today()) {
-    if (sync.dirty && hasContent()) {
+    if (sync.dirty && hasContent() && sync.text !== null && !syncPaused()) {
       sync.path = await invoke("sync_path", { settings, date: dateInput.value.trim() });
       if (!(await syncPush())) {
         // 寫不回去就保留前一天的內容，免得遺失
@@ -548,7 +606,7 @@ async function syncStartup() {
 // 關視窗前把還沒寫回的修改寫完（Rust 端最多等 5 秒）
 window.__TAURI__.event.listen("app-close-requested", async () => {
   try {
-    if (sync.dirty && syncWrites() && !sync.conflict) {
+    if (sync.dirty && sync.writeTimer) {
       await Promise.race([syncPush(), new Promise((r) => setTimeout(r, 4000))]);
     }
   } finally {
@@ -607,7 +665,7 @@ function fillSettingsForm() {
 }
 
 function syncSettingsKey(s) {
-  return JSON.stringify([s.sync_enabled, s.sync_root, s.sync_folder_format, s.sync_auto_load, s.sync_auto_write, s.sync_create_folder]);
+  return JSON.stringify([s.sync_enabled, s.sync_root, s.sync_folder_format, s.sync_auto_load, s.sync_auto_write]);
 }
 
 function readSettingsForm() {
@@ -642,7 +700,6 @@ function readSettingsForm() {
     sync_folder_format: f.sync_folder_format.value.trim() || settings.sync_folder_format,
     sync_auto_load: f.sync_auto_load.checked,
     sync_auto_write: f.sync_auto_write.checked,
-    sync_create_folder: f.sync_create_folder.checked,
   };
 }
 

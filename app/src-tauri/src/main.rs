@@ -34,23 +34,24 @@ fn split_batch(text: String) -> Vec<String> {
 }
 
 /// 另存成 txt。內容一律轉成 CRLF，跟範本（Windows 記事本）一致。
+/// dir：預設開在哪個資料夾（共用資料夾的當天資料夾），回傳存到的路徑。
 #[tauri::command]
-async fn save_text_file(app: tauri::AppHandle, date: String, content: String) -> Result<bool, String> {
+async fn save_text_file(app: tauri::AppHandle, date: String, content: String, dir: Option<String>) -> Result<Option<String>, String> {
     let (tx, rx) = std::sync::mpsc::channel();
-    app.dialog()
-        .file()
-        .set_file_name(render::file_name(&date))
-        .add_filter("Text", &["txt"])
-        .save_file(move |path| {
-            let _ = tx.send(path);
-        });
+    let mut dialog = app.dialog().file().set_file_name(render::file_name(&date)).add_filter("Text", &["txt"]);
+    if let Some(dir) = dir.filter(|d| std::path::Path::new(d).is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.save_file(move |path| {
+        let _ = tx.send(path);
+    });
     match rx.recv().map_err(|e| e.to_string())? {
         Some(p) => {
             let path = p.into_path().map_err(|e| e.to_string())?;
-            std::fs::write(path, render::to_crlf(&content)).map_err(|e| e.to_string())?;
-            Ok(true)
+            std::fs::write(&path, render::to_crlf(&content)).map_err(|e| e.to_string())?;
+            Ok(Some(path.to_string_lossy().into_owned()))
         }
-        None => Ok(false),
+        None => Ok(None),
     }
 }
 
