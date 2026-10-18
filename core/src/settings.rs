@@ -83,7 +83,7 @@ impl Default for Settings {
             notify_volume: 60.0,
             output_dir: String::new(),
             encoder: "auto".to_string(),
-            sync_enabled: true,
+            sync_enabled: false,
             sync_root: r"\\數媒yt上傳\yt上傳".to_string(),
             sync_folder_format: "{MMDD}關鍵".to_string(),
             sync_auto_load: true,
