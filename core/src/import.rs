@@ -105,13 +105,16 @@ pub fn import(text: &str, settings: &Settings) -> ImportedDocument {
     let mut doc = ImportedDocument { segments: vec![ImportedSegment::default(); SEGMENT_COUNT], ..Default::default() };
 
     // 檔頭：日期標題、串一～串六、全集（連結空白就留空）
+    // 檔頭（第一個 ======= 之前）：日期標題、串一～串六、全集。同事手改時常把日期標題刪掉，
+    // 所以只要這塊裡有日期標題或串N／拆N 連結行，就當成檔頭；不然（沒開檔頭）就是第一段的內容。
     let mut body_start = 0;
     if let Some(first) = lines.iter().position(|l| !l.trim().is_empty()) {
-        let head = lines[first].trim();
-        if let Some(date) = head.split("關鍵標題").next().filter(|d| head.contains("關鍵標題") && d.len() == 8) {
-            doc.date = date.to_string();
-            let end = lines[first..].iter().position(|l| l.trim() == DIVIDER).map_or(first + 1, |p| first + p + 1);
-            let header: Vec<&str> = lines[first + 1..end].iter().map(|l| l.trim()).collect();
+        let end = lines[first..].iter().position(|l| l.trim() == DIVIDER).map_or(lines.len(), |p| first + p + 1);
+        let header: Vec<&str> = lines[first..end].iter().map(|l| l.trim()).collect();
+        let head = header[0];
+        let date = head.split("關鍵標題").next().filter(|d| head.contains("關鍵標題") && d.len() == 8);
+        if date.is_some() || header.iter().any(|l| header_link(l).is_some()) {
+            doc.date = date.unwrap_or_default().to_string();
             for (k, line) in header.iter().enumerate() {
                 // 連結換到下一行貼的也算：下一行是網址、不是另一個串N／全集
                 let next_url = header.get(k + 1).filter(|l| looks_like_url(l)).copied();
@@ -242,6 +245,21 @@ mod tests {
         let links: Vec<&str> = doc.segments.iter().map(|s| s.link.as_str()).collect();
         assert_eq!(links, ["https://youtu.be/a", "https://youtu.be/b", "https://youtu.be/c", "", "", ""]);
         assert_eq!(doc.full_link, "https://youtu.be/full");
+    }
+
+    #[test]
+    fn header_without_date_title_still_gives_links() {
+        // 實際檔案：同事把「20261016關鍵標題1-6」那行刪了，檔頭直接從「拆1」開始
+        let input = original();
+        let exported = render(&input).text;
+        let body = &exported[exported.find("=======").unwrap()..];
+        let header = "拆1 https://youtu.be/a\n拆2 https://youtu.be/b\n拆3\n拆4\n拆5\n拆6\n\n全集 https://youtu.be/full\n\n";
+        let doc = import(&format!("{header}{body}"), &input.settings);
+        assert_eq!(doc.segments[0].link, "https://youtu.be/a");
+        assert_eq!(doc.segments[1].link, "https://youtu.be/b");
+        assert_eq!(doc.full_link, "https://youtu.be/full");
+        assert_eq!(doc.date, "20261014", "date comes from the title lines");
+        assert!(doc.segments.iter().all(|s| !s.text.is_empty()));
     }
 
     #[test]
