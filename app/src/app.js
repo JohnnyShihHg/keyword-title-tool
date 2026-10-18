@@ -182,6 +182,40 @@ $("todayBtn").addEventListener("click", () => {
 
 dateInput.addEventListener("input", changed);
 
+// 匯入之前匯出的 txt：日期、六段（由上往下 1–6）、時間、YT 連結；檔案裡空的就留空
+$("importBtn").addEventListener("click", async () => {
+  const path = await window.__TAURI__.dialog.open({ multiple: false, filters: [{ name: "文字檔", extensions: ["txt"] }] });
+  if (!path) return;
+  let doc;
+  try {
+    doc = await invoke("import_text_file", { path, settings });
+  } catch (e) {
+    $("status").textContent = `⚠ ${e}`;
+    return;
+  }
+  const hasContent = segments.some((s) => s.text.value.trim() || s.time.value.trim() || s.link.value.trim()) || fullLinkInput.value.trim();
+  if (hasContent) {
+    const ok = await window.__TAURI__.dialog.ask("匯入會覆蓋目前六段的內容、時間和 YT 連結，確定嗎？", {
+      title: "匯入 txt",
+      kind: "warning",
+      okLabel: "匯入",
+      cancelLabel: "取消",
+    });
+    if (!ok) return;
+  }
+  segments.forEach((s, i) => {
+    const seg = doc.segments[i] ?? { text: "", time: "", link: "" };
+    s.text.value = seg.text;
+    s.time.value = seg.time;
+    s.link.value = seg.link;
+  });
+  fullLinkInput.value = doc.full_link;
+  if (doc.date) dateInput.value = doc.date;
+  changed();
+  const count = doc.segments.filter((s) => s.text).length;
+  $("status").textContent = `已匯入 ${count} 段：${path.split(/[\\/]/).pop()}`;
+});
+
 // 清空全部前用系統對話框確認（不用 window.confirm()，它在 WebView 裡會卡住）
 $("clearAllBtn").addEventListener("click", async () => {
   // 在影片頁按：清空目前這邊（單集或全集）的影片，不動文稿

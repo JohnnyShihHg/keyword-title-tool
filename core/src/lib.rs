@@ -4,6 +4,7 @@
 
 pub mod flash;
 pub mod fullwidth;
+pub mod import;
 pub mod parse;
 pub mod render;
 pub mod settings;

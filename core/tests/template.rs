@@ -83,3 +83,29 @@ fn default_output_is_template_from_open_with_segment_labels() {
     });
     assert_eq!(actual.trim_end(), want);
 }
+
+/// 使用者真正手做的範本檔（不是我們產生的）匯入後，用同一組設定再產生，要和原檔一樣。
+#[test]
+fn importing_the_real_template_reproduces_it() {
+    let settings = Settings {
+        show_header: true,
+        halfwidth_timestamps: false,
+        label_segments: false,
+        number_line: true,
+        ..Settings::default()
+    };
+    let doc = keyword_title_core::import::import(&read("expected.txt"), &settings);
+    assert_eq!(doc.date, "20261014");
+    assert_eq!(doc.segments[1].time, "00:27:08");
+    let r = render(&DocumentInput {
+        date: doc.date.clone(),
+        segments: doc
+            .segments
+            .iter()
+            .map(|s| SegmentInput { text: s.text.clone(), time: s.time.clone(), link: s.link.clone() })
+            .collect(),
+        full_link: doc.full_link.clone(),
+        settings,
+    });
+    assert_eq!(to_crlf(&r.text).trim_end(), expected());
+}
