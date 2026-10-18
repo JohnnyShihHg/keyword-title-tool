@@ -1995,7 +1995,7 @@ dependencies = [
 
 [[package]]
 name = "keyword-title-tool"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "base64 0.22.1",
  "keyword-title-core",
