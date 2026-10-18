@@ -68,7 +68,9 @@ function collect() {
 
 function saveDraft() {
   try {
-    localStorage.setItem(DRAFT_KEY, JSON.stringify(collect()));
+    // 同步狀態也存著：重開後知道上次同步到哪個版本，不會把自己寫的誤認成別人改的
+    const { path, mtime, text, dirty } = sync;
+    localStorage.setItem(DRAFT_KEY, JSON.stringify({ ...collect(), sync: { path, mtime, text, dirty } }));
   } catch (_) {
     /* 存不了就算了，不影響轉換 */
   }
@@ -89,6 +91,22 @@ function loadDraft() {
     segments[i].link.value = s.link || "";
   });
   fullLinkInput.value = draft?.full_link || "";
+  Object.assign(sync, { path: null, mtime: null, text: null, dirty: false }, draft?.sync);
+}
+
+function hasContent() {
+  return segments.some((s) => s.text.value.trim() || s.time.value.trim() || s.link.value.trim()) || !!fullLinkInput.value.trim();
+}
+
+/** 把匯入／共用資料夾讀到的內容放進六段（空的就清空）。 */
+function applyDoc(doc) {
+  segments.forEach((s, i) => {
+    const seg = doc.segments[i] ?? { text: "", time: "", link: "" };
+    s.text.value = seg.text;
+    s.time.value = seg.time;
+    s.link.value = seg.link;
+  });
+  fullLinkInput.value = doc.full_link;
 }
 
 // --- 轉換 ---
@@ -97,7 +115,11 @@ let lastRendered = null;
 let renderTimer = null;
 let renderSeq = 0;
 
+/** 使用者改了內容（打字、貼上、匯入、設定）：記成還沒同步，稍後寫回共用資料夾。 */
 function changed() {
+  sync.rev++;
+  sync.dirty = true;
+  scheduleSyncWrite();
   saveDraft();
   clearTimeout(renderTimer);
   renderTimer = setTimeout(refresh, 120);
@@ -178,9 +200,13 @@ $("saveBtn").addEventListener("click", async () => {
 $("todayBtn").addEventListener("click", () => {
   dateInput.value = today();
   changed();
+  syncOpenSoon();
 });
 
-dateInput.addEventListener("input", changed);
+dateInput.addEventListener("input", () => {
+  changed();
+  syncOpenSoon();
+});
 
 // 匯入之前匯出的 txt：日期、六段（由上往下 1–6）、時間、YT 連結；檔案裡空的就留空
 $("importBtn").addEventListener("click", async () => {
@@ -193,8 +219,7 @@ $("importBtn").addEventListener("click", async () => {
     $("status").textContent = `⚠ ${e}`;
     return;
   }
-  const hasContent = segments.some((s) => s.text.value.trim() || s.time.value.trim() || s.link.value.trim()) || fullLinkInput.value.trim();
-  if (hasContent) {
+  if (hasContent()) {
     const ok = await window.__TAURI__.dialog.ask("匯入會覆蓋目前六段的內容、時間和 YT 連結，確定嗎？", {
       title: "匯入 txt",
       kind: "warning",
@@ -203,13 +228,7 @@ $("importBtn").addEventListener("click", async () => {
     });
     if (!ok) return;
   }
-  segments.forEach((s, i) => {
-    const seg = doc.segments[i] ?? { text: "", time: "", link: "" };
-    s.text.value = seg.text;
-    s.time.value = seg.time;
-    s.link.value = seg.link;
-  });
-  fullLinkInput.value = doc.full_link;
+  applyDoc(doc);
   if (doc.date) dateInput.value = doc.date;
   changed();
   const count = doc.segments.filter((s) => s.text).length;
@@ -220,7 +239,8 @@ $("importBtn").addEventListener("click", async () => {
 $("clearAllBtn").addEventListener("click", async () => {
   // 在影片頁按：清空目前這邊（單集或全集）的影片，不動文稿
   if (!$("page-video").classList.contains("hidden") && window.onClearVideo) return window.onClearVideo();
-  const ok = await window.__TAURI__.dialog.ask("確定要清空六段的內容、時間和 YT 連結嗎？", {
+  const shared = syncWrites() && sync.path ? "\n\n共用資料夾裡今天的 txt 也會一起清空，其他人也會看到。" : "";
+  const ok = await window.__TAURI__.dialog.ask(`確定要清空六段的內容、時間和 YT 連結嗎？${shared}`, {
     title: "清空全部",
     kind: "warning",
     okLabel: "清空",
@@ -235,6 +255,305 @@ $("clearAllBtn").addEventListener("click", async () => {
   fullLinkInput.value = "";
   dateInput.value = today();
   changed();
+});
+
+// --- 一次貼上：整批文稿依序放進還空著的段落 ---
+// 製作單位 10 點、11 點各給一批，每批都從「一段」開始編號，所以不看段號、只看哪幾段還空著。
+
+const batchPanel = $("batchPanel");
+const batchText = $("batchText");
+let batchUndo = null;
+
+function openBatch(open) {
+  batchPanel.classList.toggle("hidden", !open);
+  batchText.value = "";
+  if (open) {
+    segmentsEl.scrollTop = 0;
+    batchText.focus();
+  }
+}
+
+function showBatchResult(text, undoable) {
+  $("batchResultText").textContent = text;
+  $("batchUndoBtn").classList.toggle("hidden", !undoable);
+  $("batchResult").classList.remove("hidden");
+  clearTimeout(showBatchResult.timer);
+  showBatchResult.timer = setTimeout(() => {
+    $("batchResult").classList.add("hidden");
+    batchUndo = null;
+  }, 30000);
+}
+
+async function applyBatch() {
+  const parts = await invoke("split_batch", { text: batchText.value });
+  if (!parts.length) return batchText.focus();
+  const empty = segments.map((s, i) => (s.text.value.trim() ? -1 : i)).filter((i) => i >= 0);
+  if (!empty.length) {
+    openBatch(false);
+    return showBatchResult("⚠ 六段都已經有內容，沒有空的段落可以放", false);
+  }
+  batchUndo = segments.map((s) => s.text.value);
+  const used = empty.slice(0, parts.length);
+  used.forEach((seg, k) => (segments[seg].text.value = parts[k]));
+  openBatch(false);
+  changed();
+  const names = used.map((i) => SEGMENT_NAMES[i]).join("、");
+  const extra = parts.length - used.length;
+  showBatchResult(`已帶入第${names}段` + (extra > 0 ? `，⚠ 還有 ${extra} 段沒有空位放` : ""), true);
+}
+
+$("batchBtn").addEventListener("click", () => openBatch(batchPanel.classList.contains("hidden")));
+$("batchCancelBtn").addEventListener("click", () => openBatch(false));
+$("batchApplyBtn").addEventListener("click", applyBatch);
+// 貼上就自動帶入（等貼上的文字進到輸入框再處理）
+batchText.addEventListener("paste", () => setTimeout(applyBatch, 0));
+batchText.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") openBatch(false);
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) applyBatch();
+});
+$("batchUndoBtn").addEventListener("click", () => {
+  if (!batchUndo) return;
+  batchUndo.forEach((text, i) => (segments[i].text.value = text));
+  batchUndo = null;
+  changed();
+  showBatchResult("已復原", false);
+});
+
+// --- 共用資料夾同步 ---
+// 當天資料夾的 txt（路徑見設定）：開啟時載入、修改後約 2 秒寫回、每 10 秒看別人有沒有改。
+// 寫入前比對修改時間，別人在我修改時也改過就跳出詢問，不會自動蓋掉別人的。
+
+const sync = {
+  path: null, // 目前同步的檔案；null＝關閉或日期不完整
+  mtime: null, // 上次讀到／寫入時的修改時間；null＝以為檔案不存在
+  text: null, // 上次讀到／寫入的內容，用來判斷別人有沒有改
+  dirty: false, // 有修改還沒寫回
+  rev: 0, // 每次修改 +1，寫入途中又改了就再寫一次
+  busy: false,
+  conflict: false, // 衝突對話框開著，或選了「先不要」
+  writeTimer: null,
+  openTimer: null,
+};
+
+const syncOn = () => !!settings?.sync_enabled;
+const syncWrites = () => syncOn() && settings.sync_auto_write;
+const syncLoads = () => syncOn() && settings.sync_auto_load;
+const clock = () => new Date().toLocaleTimeString("zh-TW", { hour12: false });
+
+function setSyncStatus(text, kind = "") {
+  const el = $("syncStatus");
+  el.textContent = text;
+  el.className = `sync-status muted ${kind}`;
+  el.title = sync.path || "";
+  $("syncNowBtn").classList.toggle("hidden", !syncOn() || kind !== "bad");
+}
+
+function syncFailed(e, doing) {
+  const msg = {
+    unreachable: "⚠ 連不上共用資料夾，先存在這台電腦，稍後自動重試",
+    permission: "⚠ 沒有共用資料夾的權限" + (doing === "write" ? "，無法寫入（仍可載入）" : ""),
+    nofolder: "⚠ 當天資料夾還沒建立（設定裡可開啟自動建立）",
+    verify: "⚠ 寫入後比對不一致，請檢查網路或手動「存成 txt」",
+  }[e?.kind];
+  setSyncStatus(msg || `⚠ 同步失敗：${e?.message ?? e}`, "bad");
+}
+
+/** 日期或同步設定改了：換到對應的檔案再讀一次。 */
+function syncOpenSoon() {
+  clearTimeout(sync.openTimer);
+  sync.openTimer = setTimeout(syncOpen, 600);
+}
+
+async function syncOpen() {
+  if (!syncOn()) {
+    sync.path = null;
+    return setSyncStatus("");
+  }
+  const path = await invoke("sync_path", { settings, date: dateInput.value.trim() });
+  if (path !== sync.path) {
+    sync.path = path;
+    sync.mtime = null;
+    sync.text = null;
+    sync.conflict = false;
+  }
+  if (!path) return setSyncStatus("⚠ 日期不完整，暫停同步", "bad");
+  if (syncLoads()) await syncPull();
+  else if (sync.dirty) scheduleSyncWrite();
+  else setSyncStatus("☁ 共用資料夾同步（不自動載入）");
+}
+
+/** 讀共用資料夾：沒有檔案就建一個（第一個打開的人），別人改過就載入，雙方都改過就詢問。 */
+async function syncPull() {
+  if (!sync.path || sync.busy) return;
+  sync.busy = true;
+  const rev = sync.rev;
+  try {
+    const f = await invoke("sync_read", { path: sync.path });
+    if (!f.exists) {
+      sync.mtime = null;
+      sync.text = null;
+      sync.busy = false;
+      if (syncWrites()) return await syncPush();
+      return setSyncStatus("☁ 共用資料夾還沒有今天的 txt");
+    }
+    if (f.text === sync.text) {
+      sync.mtime = f.mtime;
+      if (sync.dirty && syncWrites()) scheduleSyncWrite();
+    } else if ((!sync.dirty || !hasContent()) && rev === sync.rev) {
+      loadSynced(f);
+    } else {
+      showConflict(f);
+    }
+  } catch (e) {
+    syncFailed(e, "read");
+  } finally {
+    sync.busy = false;
+  }
+}
+
+async function loadSynced(f) {
+  const doc = await invoke("import_text", { text: f.text, settings });
+  applyDoc(doc);
+  sync.text = f.text;
+  sync.mtime = f.mtime;
+  sync.dirty = false;
+  sync.conflict = false;
+  saveDraft();
+  refresh();
+  const count = doc.segments.filter((s) => s.text).length;
+  setSyncStatus(`☁ 已載入共用資料夾的版本（${count} 段）${clock()}`, "ok");
+}
+
+function cancelSyncWrite() {
+  clearTimeout(sync.writeTimer);
+  sync.writeTimer = null;
+}
+
+function scheduleSyncWrite() {
+  cancelSyncWrite();
+  if (!syncWrites() || sync.conflict) return;
+  sync.writeTimer = setTimeout(() => syncPush(), 2000);
+}
+
+async function syncPush({ force = false } = {}) {
+  cancelSyncWrite();
+  if (!sync.path || !syncWrites()) return false;
+  if (sync.busy) {
+    scheduleSyncWrite();
+    return false;
+  }
+  sync.busy = true;
+  const rev = sync.rev;
+  setSyncStatus("☁ 寫入中…");
+  try {
+    const rendered = await invoke("render_document", { doc: collect() });
+    const w = await invoke("sync_write", {
+      path: sync.path,
+      content: rendered.text,
+      known: sync.text,
+      force,
+      createFolder: !!settings.sync_create_folder,
+    });
+    sync.mtime = w.mtime;
+    sync.text = w.text;
+    sync.conflict = false;
+    if (rev === sync.rev) sync.dirty = false;
+    else scheduleSyncWrite();
+    saveDraft();
+    setSyncStatus(`☁ 已同步 ${clock()}（已讀回確認）`, "ok");
+    return true;
+  } catch (e) {
+    if (e?.kind === "conflict") {
+      sync.busy = false;
+      const f = await invoke("sync_read", { path: sync.path }).catch(() => null);
+      if (f?.exists) showConflict(f);
+      return false;
+    }
+    syncFailed(e, "write");
+    return false;
+  } finally {
+    sync.busy = false;
+  }
+}
+
+let conflictFile = null;
+function showConflict(f) {
+  conflictFile = f;
+  sync.conflict = true;
+  cancelSyncWrite();
+  $("syncConflictMessage").textContent =
+    `你修改的同時，別人也改了 ${sync.path.split(/[\\/]/).pop()}。` +
+    "「載入對方的版本」會丟掉你這次的修改；「用我的蓋過去」會丟掉對方的修改。";
+  $("syncConflict").classList.remove("hidden");
+  setSyncStatus("⚠ 和共用資料夾的版本衝突，尚未同步", "bad");
+}
+
+function closeConflict() {
+  $("syncConflict").classList.add("hidden");
+}
+
+$("conflictTheirsBtn").addEventListener("click", async () => {
+  closeConflict();
+  await loadSynced(conflictFile);
+});
+$("conflictMineBtn").addEventListener("click", async () => {
+  closeConflict();
+  sync.conflict = false;
+  await syncPush({ force: true });
+});
+$("conflictLaterBtn").addEventListener("click", () => {
+  // 保持暫停寫入；按「立即同步」會再問一次
+  closeConflict();
+});
+
+$("syncNowBtn").addEventListener("click", async () => {
+  sync.conflict = false;
+  if (sync.dirty && !syncLoads()) await syncPush();
+  else await syncOpen();
+});
+
+// 每 10 秒看別人有沒有改；連不上時也靠這個重試
+setInterval(async () => {
+  if (!syncOn() || !sync.path || sync.busy || sync.conflict) return;
+  try {
+    const m = await invoke("sync_stat", { path: sync.path });
+    if ((m ?? null) !== sync.mtime && syncLoads()) await syncPull();
+    else if (sync.dirty && syncWrites() && !sync.writeTimer) await syncPush();
+    else if (syncLoads() && $("syncStatus").classList.contains("bad")) await syncPull();
+  } catch (e) {
+    syncFailed(e, "read");
+  }
+}, 10000);
+
+/** 開啟時：開了自動載入就換成今天的檔案（前一天還沒寫回的先寫回去）。 */
+async function syncStartup() {
+  if (!syncOn()) return;
+  if (syncLoads() && dateInput.value.trim() !== today()) {
+    if (sync.dirty && hasContent()) {
+      sync.path = await invoke("sync_path", { settings, date: dateInput.value.trim() });
+      if (!(await syncPush())) {
+        // 寫不回去就保留前一天的內容，免得遺失
+        return setSyncStatus(`⚠ ${dateInput.value} 的修改還沒寫回共用資料夾，先保留在這裡`, "bad");
+      }
+    }
+    applyDoc({ segments: [], full_link: "" });
+    dateInput.value = today();
+    sync.dirty = false;
+    saveDraft();
+    refresh();
+  }
+  await syncOpen();
+}
+
+// 關視窗前把還沒寫回的修改寫完（Rust 端最多等 5 秒）
+window.__TAURI__.event.listen("app-close-requested", async () => {
+  try {
+    if (sync.dirty && syncWrites() && !sync.conflict) {
+      await Promise.race([syncPush(), new Promise((r) => setTimeout(r, 4000))]);
+    }
+  } finally {
+    invoke("finish_close");
+  }
 });
 
 // --- 分頁 ---
@@ -287,6 +606,10 @@ function fillSettingsForm() {
   showSettingsExample();
 }
 
+function syncSettingsKey(s) {
+  return JSON.stringify([s.sync_enabled, s.sync_root, s.sync_folder_format, s.sync_auto_load, s.sync_auto_write, s.sync_create_folder]);
+}
+
 function readSettingsForm() {
   const f = settingsForm.elements;
   const max = parseInt(f.max_speaker_chars.value, 10);
@@ -314,17 +637,29 @@ function readSettingsForm() {
     notify_volume: Math.min(100, Math.max(0, parseFloat(f.notify_volume.value))) || 0,
     output_dir: f.output_dir.value,
     encoder: f.encoder.value || settings.encoder,
+    sync_enabled: f.sync_enabled.checked,
+    sync_root: f.sync_root.value.trim(),
+    sync_folder_format: f.sync_folder_format.value.trim() || settings.sync_folder_format,
+    sync_auto_load: f.sync_auto_load.checked,
+    sync_auto_write: f.sync_auto_write.checked,
+    sync_create_folder: f.sync_create_folder.checked,
   };
 }
 
-function showSettingsExample() {
+async function showSettingsExample() {
   const date = dateInput.value.trim() || today();
   $("settingsExample").textContent = `範例：段標題${settings.program_tag}${date}-1${settings.host}`;
+  // 關閉同步時下面的選項變灰、不能改
+  $("syncOpts").disabled = !settings.sync_enabled;
+  const path = await invoke("sync_path", { settings, date });
+  $("syncExample").textContent = path ? `今天的檔案：${path}` : "⚠ 根目錄或資料夾格式不完整";
 }
 
 let settingsTimer = null;
 settingsForm.addEventListener("input", () => {
+  const before = syncSettingsKey(settings);
   settings = readSettingsForm();
+  if (syncSettingsKey(settings) !== before) syncOpenSoon();
   applyTheme(settings.theme);
   showSettingsExample();
   window.onSettingsChanged?.();
@@ -351,6 +686,7 @@ $("resetSettingsBtn").addEventListener("click", async () => {
   settings = await invoke("default_settings");
   fillSettingsForm();
   changed();
+  syncOpenSoon();
   await persistSettings();
   $("settingsStatus").textContent = "已還原預設";
 });
@@ -452,4 +788,5 @@ $("updateBadge").addEventListener("click", () => {
   loadDraft();
   refresh();
   window.onSettingsChanged?.();
+  syncStartup();
 })();

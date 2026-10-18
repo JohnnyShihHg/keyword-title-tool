@@ -23,18 +23,43 @@
   </header>
 
   <main id="page-script" class="page split">
-    <section class="editor" id="segments" aria-label="各段輸入"></section>
+    <!-- 上面一整行工具列：左邊（第一段上方）一次貼上＋同步狀態，右邊預覽的按鈕 -->
+    <div class="script-bar script-bar-left">
+      <button id="batchBtn" title="整批文稿一次貼上，自動放進還空著的段落">📋 一次貼上</button>
+      <span id="batchResult" class="batch-result hidden">
+        <span id="batchResultText"></span>
+        <button id="batchUndoBtn" class="ghost small">復原</button>
+      </span>
+      <span class="spacer"></span>
+      <span id="syncStatus" class="sync-status muted"></span>
+      <button id="syncNowBtn" class="ghost small hidden" title="馬上重新讀取／寫入共用資料夾">立即同步</button>
+    </div>
+    <div class="script-bar preview-bar">
+      <span class="muted">預覽</span>
+      <span id="warnSummary" class="warn-summary"></span>
+      <span class="spacer"></span>
+      <span id="status" class="muted"></span>
+      <button id="copyBtn">全部複製</button>
+      <button id="importBtn" class="ghost" title="匯入之前「存成 txt」的檔案，自動排回六段">匯入 txt</button>
+      <button id="saveBtn" class="ghost">存成 txt</button>
+    </div>
+
+    <section class="editor" id="segments" aria-label="各段輸入">
+      <div id="batchPanel" class="segment batch-panel hidden">
+        <div class="segment-head">
+          <strong>一次貼上</strong>
+          <span class="muted batch-hint">整批貼進來（用「一段」「二段」分開），會依序放進還空著的段落</span>
+        </div>
+        <textarea id="batchText" spellcheck="false" placeholder="在這裡按 Ctrl+V 貼上整批文稿，貼上後自動帶入"></textarea>
+        <div class="batch-actions">
+          <span class="spacer"></span>
+          <button id="batchCancelBtn" class="ghost small">取消</button>
+          <button id="batchApplyBtn" class="small">帶入</button>
+        </div>
+      </div>
+    </section>
 
     <section class="preview">
-      <div class="preview-bar">
-        <span class="muted">預覽</span>
-        <span id="warnSummary" class="warn-summary"></span>
-        <span class="spacer"></span>
-        <span id="status" class="muted"></span>
-        <button id="copyBtn">全部複製</button>
-        <button id="importBtn" class="ghost" title="匯入之前「存成 txt」的檔案，自動排回六段">匯入 txt</button>
-        <button id="saveBtn" class="ghost">存成 txt</button>
-      </div>
       <ul id="warnings" class="warnings"></ul>
       <textarea id="output" readonly spellcheck="false"></textarea>
     </section>
@@ -340,6 +365,26 @@
       </fieldset>
 
       <fieldset>
+        <legend>共用資料夾同步</legend>
+        <label class="check"><input name="sync_enabled" type="checkbox" /> 自動同步當天資料夾裡的 txt</label>
+        <fieldset id="syncOpts" class="sub">
+          <label>根目錄
+            <input name="sync_root" spellcheck="false" placeholder="\\數媒yt上傳\yt上傳" />
+            <button type="button" class="ghost small" data-pick-dir="sync_root">選擇</button>
+          </label>
+          <label>當天資料夾
+            <input name="sync_folder_format" spellcheck="false" placeholder="{MMDD}關鍵" />
+          </label>
+          <p class="muted example" id="syncExample"></p>
+          <p class="muted">{MMDD}＝月日（1016）、{YYYY}＝年、{MM}＝月、{DD}＝日、{YYYYMMDD}＝完整日期。檔名和「存成 txt」相同。</p>
+          <label class="check"><input name="sync_auto_load" type="checkbox" /> 開啟時、別人改過時自動載入</label>
+          <label class="check"><input name="sync_auto_write" type="checkbox" /> 修改後自動寫回（寫完會讀回來比對確認）</label>
+          <label class="check"><input name="sync_create_folder" type="checkbox" /> 當天資料夾不存在時自動建立</label>
+          <p class="muted">開啟自動載入時，每天第一次打開會換成當天的檔案；第一個打開的人會先建立空白的 txt。你修改的同時別人也改過的話，會詢問要用哪一份。</p>
+        </fieldset>
+      </fieldset>
+
+      <fieldset>
         <legend>畫面配色</legend>
         <div class="theme-list" id="themeList"></div>
       </fieldset>
@@ -423,6 +468,17 @@
       <div class="notice-actions">
         <button id="noticeCancel" class="ghost"></button>
         <button id="noticeOk"></button>
+      </div>
+    </div>
+  </div>
+  <div id="syncConflict" class="notice hidden" role="dialog" aria-modal="true">
+    <div class="notice-card">
+      <div class="notice-title">共用資料夾的稿子被別人改過了</div>
+      <div id="syncConflictMessage" class="notice-message"></div>
+      <div class="notice-actions conflict-actions">
+        <button id="conflictLaterBtn" class="ghost">先不要</button>
+        <button id="conflictMineBtn" class="ghost danger">用我的蓋過去</button>
+        <button id="conflictTheirsBtn">載入對方的版本</button>
       </div>
     </div>
   </div>

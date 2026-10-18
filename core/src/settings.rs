@@ -47,6 +47,20 @@ pub struct Settings {
     pub output_dir: String,
     /// `auto`（自動偵測硬體編碼）或指定 `x264` / `nvenc` / `qsv` / `amf`
     pub encoder: String,
+
+    // --- 共用資料夾同步 ---
+    /// 總開關：開著才會自動載入／寫入當天資料夾的 txt
+    pub sync_enabled: bool,
+    /// 共用資料夾根目錄，例如 `\\數媒yt上傳\yt上傳`
+    pub sync_root: String,
+    /// 當天資料夾名稱，`{MMDD}` 等代入日期（見 `sync::folder_name`），例如 `{MMDD}關鍵` → `1016關鍵`
+    pub sync_folder_format: String,
+    /// 開啟時、別人改過時自動載入
+    pub sync_auto_load: bool,
+    /// 修改後自動寫回
+    pub sync_auto_write: bool,
+    /// 當天資料夾不存在時自動建立
+    pub sync_create_folder: bool,
 }
 
 impl Default for Settings {
@@ -71,6 +85,12 @@ impl Default for Settings {
             notify_volume: 60.0,
             output_dir: String::new(),
             encoder: "auto".to_string(),
+            sync_enabled: true,
+            sync_root: r"\\數媒yt上傳\yt上傳".to_string(),
+            sync_folder_format: "{MMDD}關鍵".to_string(),
+            sync_auto_load: true,
+            sync_auto_write: true,
+            sync_create_folder: true,
         }
     }
 }

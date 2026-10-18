@@ -2,12 +2,14 @@
 //!
 //! 全部是純函式，不碰檔案也不碰 UI，方便用範本做逐字比對測試。
 
+pub mod batch;
 pub mod flash;
 pub mod fullwidth;
 pub mod import;
 pub mod parse;
 pub mod render;
 pub mod settings;
+pub mod sync;
 pub mod timecode;
 pub mod video;
 

@@ -1,11 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod sync;
 mod video;
 
 use keyword_title_core::render::{self, DocumentInput, Rendered};
 use keyword_title_core::Settings;
 use std::path::PathBuf;
-use tauri::Manager;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 
 #[tauri::command]
@@ -23,6 +25,12 @@ fn import_text_file(path: String, settings: keyword_title_core::settings::Settin
         return Err("這個檔案裡找不到任何一段標題，請確認是本工具匯出的 txt".into());
     }
     Ok(doc)
+}
+
+/// 一次貼上：整批文稿依「一段」「二段」…拆開（放進哪幾段由畫面決定）。
+#[tauri::command]
+fn split_batch(text: String) -> Vec<String> {
+    keyword_title_core::batch::split_batch(&text)
 }
 
 /// 另存成 txt。內容一律轉成 CRLF，跟範本（Windows 記事本）一致。
@@ -80,6 +88,15 @@ fn save_settings(app: tauri::AppHandle, settings: Settings) -> Result<(), String
     std::fs::write(path, json).map_err(|e| e.to_string())
 }
 
+/// 關視窗前讓畫面先把還沒寫回共用資料夾的修改寫完（見 app.js 的 app-close-requested）。
+static CLOSING: AtomicBool = AtomicBool::new(false);
+
+#[tauri::command]
+fn finish_close(app: tauri::AppHandle) {
+    CLOSING.store(true, Ordering::SeqCst);
+    app.exit(0);
+}
+
 fn main() {
     tauri::Builder::default()
         // 必須第一個註冊：再次開啟程式時不開第二個，而是把已開的視窗叫到最前面
@@ -94,13 +111,35 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(video::VideoState::default())
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if CLOSING.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                api.prevent_close();
+                let _ = window.emit("app-close-requested", ());
+                // 畫面沒回應（卡住或出錯）也不能讓視窗關不掉：最多等 5 秒
+                let app = window.app_handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    app.exit(0);
+                });
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             render_document,
             import_text_file,
+            split_batch,
             save_text_file,
             get_settings,
             default_settings,
             save_settings,
+            finish_close,
+            sync::sync_path,
+            sync::sync_read,
+            sync::sync_stat,
+            sync::sync_write,
+            sync::import_text,
             video::tools_status,
             video::install_tools,
             video::probe_video,

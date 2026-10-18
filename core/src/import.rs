@@ -43,6 +43,30 @@ fn segment_index(name: &str) -> Option<usize> {
     SEGMENT_NAMES.iter().position(|n| *n == name)
 }
 
+/// 段號：一～六或 1～6（含全形）
+fn segment_number(c: char) -> Option<usize> {
+    segment_index(&c.to_string()).or_else(|| {
+        let d = fold_digits(&c.to_string()).chars().next()?.to_digit(10)? as usize;
+        (1..=SEGMENT_COUNT).contains(&d).then(|| d - 1)
+    })
+}
+
+fn strip_separator(s: &str) -> &str {
+    s.trim().trim_start_matches([':', '：']).trim()
+}
+
+fn looks_like_url(s: &str) -> bool {
+    s.starts_with("http://") || s.starts_with("https://") || s.starts_with("youtu") || s.starts_with("www.")
+}
+
+/// 檔頭的 `串一 https://…` → (段的索引, 連結)。同事手寫時會打成「拆一」、「串1」、「串一：」，都認。
+fn header_link(line: &str) -> Option<(usize, &str)> {
+    let rest = line.strip_prefix('串').or_else(|| line.strip_prefix('拆'))?;
+    let mut chars = rest.chars();
+    let i = segment_number(chars.next()?)?;
+    Some((i, strip_separator(chars.as_str())))
+}
+
 /// `段標題【關鍵時刻】20261014-1張炤和` → (段標題, 日期, 段號)。全集行（`(…)Part1：`）不算。
 fn split_title_line<'a>(line: &'a str, settings: &Settings) -> Option<(&'a str, String, usize)> {
     let tag = settings.program_tag.trim();
@@ -87,15 +111,15 @@ pub fn import(text: &str, settings: &Settings) -> ImportedDocument {
         if let Some(date) = head.split("關鍵標題").next().filter(|d| head.contains("關鍵標題") && d.len() == 8) {
             doc.date = date.to_string();
             let end = lines[first..].iter().position(|l| l.trim() == DIVIDER).map_or(first + 1, |p| first + p + 1);
-            for line in &lines[first + 1..end] {
-                let line = line.trim();
-                if let Some(rest) = line.strip_prefix('串') {
-                    let mut chars = rest.chars();
-                    if let Some(i) = chars.next().and_then(|c| segment_index(&c.to_string())) {
-                        doc.segments[i].link = chars.as_str().trim().to_string();
-                    }
+            let header: Vec<&str> = lines[first + 1..end].iter().map(|l| l.trim()).collect();
+            for (k, line) in header.iter().enumerate() {
+                // 連結換到下一行貼的也算：下一行是網址、不是另一個串N／全集
+                let next_url = header.get(k + 1).filter(|l| looks_like_url(l)).copied();
+                if let Some((i, link)) = header_link(line) {
+                    doc.segments[i].link = if link.is_empty() { next_url.unwrap_or("") } else { link }.to_string();
                 } else if let Some(rest) = line.strip_prefix("全集") {
-                    doc.full_link = rest.trim().to_string();
+                    let link = strip_separator(rest);
+                    doc.full_link = if link.is_empty() { next_url.unwrap_or("") } else { link }.to_string();
                 }
             }
             body_start = end;
@@ -206,6 +230,18 @@ mod tests {
         assert_eq!(imported.segments[1].time, "00:27:08");
         let again = render(&back_to_input(&imported, &input.settings)).text;
         assert_eq!(again, exported);
+    }
+
+    #[test]
+    fn hand_written_header_links_are_recognised() {
+        let input = original();
+        let body = render(&input).text;
+        let body = &body[body.find("=======").unwrap()..];
+        let header = "20261014關鍵標題1-6\n\n拆一 https://youtu.be/a\n串2：https://youtu.be/b\n串三\nhttps://youtu.be/c\n串四 \n串五\n串六\n\n全集：https://youtu.be/full\n";
+        let doc = import(&format!("{header}{body}"), &input.settings);
+        let links: Vec<&str> = doc.segments.iter().map(|s| s.link.as_str()).collect();
+        assert_eq!(links, ["https://youtu.be/a", "https://youtu.be/b", "https://youtu.be/c", "", "", ""]);
+        assert_eq!(doc.full_link, "https://youtu.be/full");
     }
 
     #[test]
