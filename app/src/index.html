@@ -45,10 +45,18 @@
       <button id="gotoToolsBtn" class="small">前往設定下載</button>
     </div>
 
-    <!-- name 相同的 details 一次只會展開一個 -->
+    <div class="mode-switch" role="tablist" aria-label="單集或全集">
+      <span class="mode-pill">
+        <button type="button" class="mode-btn active" data-mode="single" role="tab">單集</button>
+        <button type="button" class="mode-btn" data-mode="full" role="tab">全集</button>
+      </span>
+      <span id="modeHint" class="muted mode-hint"></span>
+    </div>
+    <!-- name 相同的 details 一次只會展開一個；摘要列隱藏，用上面的切換鈕開關 -->
     <details class="acc" name="video-acc" open>
       <summary>單集 <span class="muted acc-hint">用積木自由拼：影片、YT、promo；兩段中間放「⚡ 閃白」就閃白，沒放就直接接</span></summary>
       <div class="acc-body">
+        <div class="v-src card">
         <div class="block-toolbar">
           <span class="muted">加入</span>
           <button class="ghost small" data-add="video">＋ 影片檔</button>
@@ -64,6 +72,9 @@
         </div>
         <div id="blockList" class="block-list"></div>
 
+        </div>
+
+        <div class="v-timeline card">
         <div class="timeline-head">
           <strong>Timeline</strong>
           <span id="singleTotal" class="muted"></span>
@@ -75,7 +86,10 @@
         <div id="singleRuler" class="ruler"></div>
         <div id="singleFastInfo" class="fast-info muted"></div>
 
-        <div class="preview-wrap">
+        </div>
+
+        <div class="v-side">
+        <div class="preview-wrap v-player card">
           <div class="player-box">
             <video id="singlePlayer" class="hidden" controls preload="metadata"></video>
             <div id="singleFlash" class="flash-overlay"></div>
@@ -96,6 +110,7 @@
           <div id="singlePlayerLabel" class="muted"></div>
         </div>
 
+        <div class="v-out out-dock">
         <div class="vrow">
           <span class="vlabel">檔名</span>
           <select id="partSelect"></select>
@@ -116,18 +131,24 @@
           <span id="singleStatus" class="vinfo"></span>
         </div>
         <progress id="singleProgress" class="hidden" max="1" value="0"></progress>
+        </div>
+        </div>
       </div>
     </details>
 
     <details class="acc" name="video-acc">
       <summary>全集 <span class="muted acc-hint">第一段 ｜ 20 秒 promo ⚡ 第二段 ⚡ … ⚡ 第六段 ｜ 45 秒 promo</span></summary>
       <div class="acc-body">
+        <div class="v-src card">
         <div id="fullSegments" class="full-segments"></div>
         <div class="vrow">
           <span class="vlabel">Promo</span>
           <span class="vinfo muted"><span class="promo20-info"></span>　／　<span class="promo45-info"></span></span>
         </div>
 
+        </div>
+
+        <div class="v-timeline card">
         <div class="timeline-head">
           <strong>Timeline</strong>
           <span id="fullTotal" class="muted"></span>
@@ -137,8 +158,16 @@
         </div>
         <div id="fullTimeline" class="timeline"></div>
         <div id="fullRuler" class="ruler"></div>
+        <div class="vrow">
+          <span class="vlabel">章節</span>
+          <button id="fillChaptersBtn" class="ghost">把各段時間填回文稿</button>
+          <span id="chapterInfo" class="vinfo muted">時間點＝閃白結束、該段完全出現的那一秒</span>
+        </div>
 
-        <div class="preview-wrap">
+        </div>
+
+        <div class="v-side">
+        <div class="preview-wrap v-player card">
           <div class="player-box">
             <video id="fullPlayer" class="hidden" controls preload="metadata"></video>
             <div id="fullFlash" class="flash-overlay"></div>
@@ -159,11 +188,7 @@
           <div id="fullPlayerLabel" class="muted"></div>
         </div>
 
-        <div class="vrow">
-          <span class="vlabel">章節</span>
-          <button id="fillChaptersBtn" class="ghost">把各段時間填回文稿</button>
-          <span id="chapterInfo" class="vinfo muted">時間點＝閃白結束、該段完全出現的那一秒</span>
-        </div>
+        <div class="v-out out-dock">
         <div class="vrow">
           <span class="vlabel">檔名</span>
           <input id="fullName" class="grow" placeholder="輸出檔名" />
@@ -183,6 +208,8 @@
           <span id="fullStatus" class="vinfo"></span>
         </div>
         <progress id="fullProgress" class="hidden" max="1" value="0"></progress>
+        </div>
+        </div>
       </div>
     </details>
   </main>
@@ -260,6 +287,20 @@
       </fieldset>
 
       <fieldset>
+        <legend>完成提示</legend>
+        <label class="check"><input name="notify_popup" type="checkbox" /> 閃白判斷完成、轉檔完成時跳出提示框</label>
+        <label class="check"><input name="notify_sound" type="checkbox" /> 播放提示音</label>
+        <label>提示音
+          <select name="notify_sound_id" id="notifySoundSelect"></select>
+          <button type="button" id="notifySoundTest" class="ghost small">試聽</button>
+        </label>
+        <label>音量
+          <input name="notify_volume" type="range" min="0" max="100" step="5" />
+        </label>
+        <p class="muted">提示音是程式即時合成的，不使用任何音效檔，沒有版權問題。</p>
+      </fieldset>
+
+      <fieldset>
         <legend>畫面配色</legend>
         <div class="theme-list" id="themeList"></div>
       </fieldset>
@@ -328,6 +369,20 @@
     </div>
   </template>
 
+  <div id="notice" class="notice hidden" role="dialog" aria-modal="true">
+    <div class="notice-card">
+      <svg class="notice-check" viewBox="0 0 52 52" aria-hidden="true">
+        <circle cx="26" cy="26" r="24" />
+        <path d="M15 27 l7 7 l15 -15" />
+      </svg>
+      <div id="noticeTitle" class="notice-title"></div>
+      <div id="noticeMessage" class="notice-message"></div>
+      <div class="notice-actions">
+        <button id="noticeCancel" class="ghost"></button>
+        <button id="noticeOk"></button>
+      </div>
+    </div>
+  </div>
   <script src="app.js"></script>
   <script src="video.js"></script>
 </body>

@@ -216,8 +216,8 @@ const settingsForm = $("settingsForm");
 
 // 配色主題：id 對應 styles.css 的 [data-theme]
 const THEMES = [
-  { id: "light", name: "白底黑字" },
-  { id: "dark", name: "黑底白字" },
+  { id: "light", name: "淺色（預設）" },
+  { id: "dark", name: "深色剪輯風" },
   { id: "paper", name: "護眼米色" },
   { id: "green", name: "豆沙綠" },
   { id: "slate", name: "深藍灰" },
@@ -272,6 +272,10 @@ function readSettingsForm() {
     promo_tail_adjust_secs: Number.isFinite(parseFloat(f.promo_tail_adjust_secs.value))
       ? Math.min(10, Math.max(-10, parseFloat(f.promo_tail_adjust_secs.value)))
       : settings.promo_tail_adjust_secs,
+    notify_popup: f.notify_popup.checked,
+    notify_sound: f.notify_sound.checked,
+    notify_sound_id: f.notify_sound_id.value || settings.notify_sound_id,
+    notify_volume: Math.min(100, Math.max(0, parseFloat(f.notify_volume.value))) || 0,
     output_dir: f.output_dir.value,
     encoder: f.encoder.value || settings.encoder,
   };

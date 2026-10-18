@@ -67,6 +67,88 @@ function parsePreciseTime(text) {
   return parts.reduce((acc, n) => acc * 60 + n, 0) + frac;
 }
 
+// --- 完成提示：提示框＋提示音 ---
+//
+// 提示音用 Web Audio 即時合成（幾個正弦／三角波加上音量包絡），不用音效檔，沒有版權問題。
+// 每個音：[相對開始秒數, 頻率 Hz, 長度秒, 波形]
+
+const CHIMES = {
+  chime: { name: "叮咚", notes: [[0, 1046.5, 0.5, "sine"], [0.16, 784, 0.7, "sine"]] },
+  bell: { name: "清脆鈴聲", notes: [[0, 1318.5, 0.9, "sine"], [0, 2637, 0.5, "sine"]] },
+  rise: { name: "上揚三音", notes: [[0, 523.3, 0.25, "triangle"], [0.11, 659.3, 0.25, "triangle"], [0.22, 784, 0.5, "triangle"]] },
+  pop: { name: "柔和泡泡", notes: [[0, 587.3, 0.18, "sine"], [0.09, 880, 0.3, "sine"]] },
+  done: { name: "完成小號", notes: [[0, 523.3, 0.14, "triangle"], [0.14, 523.3, 0.14, "triangle"], [0.28, 784, 0.6, "triangle"]] },
+};
+
+let audioCtx = null;
+
+function playChime(id = settings?.notify_sound_id, volume = settings?.notify_volume ?? 60) {
+  const chime = CHIMES[id] || CHIMES.chime;
+  try {
+    audioCtx ||= new AudioContext();
+    const now = audioCtx.currentTime + 0.02;
+    const peak = Math.max(0, Math.min(1, volume / 100)) * 0.35;
+    for (const [at, freq, len, type] of chime.notes) {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = type;
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, now + at);
+      gain.gain.exponentialRampToValueAtTime(Math.max(peak, 0.0001), now + at + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + at + len);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(now + at);
+      osc.stop(now + at + len + 0.05);
+    }
+  } catch (_) {
+    /* 沒有音效裝置也不影響 */
+  }
+}
+
+/**
+ * 跳出完成提示框（設定關掉時不跳，回傳 false）。有 okText 就是詢問框，回傳使用者是否按了確定。
+ * 提示音和提示框分開設定：只開提示音時照樣會響。
+ */
+function showNotice({ title, message, okText = "好", cancelText = null }) {
+  if (settings?.notify_sound) playChime();
+  if (!settings?.notify_popup) return Promise.resolve(false);
+  const box = $("notice");
+  $("noticeTitle").textContent = title;
+  $("noticeMessage").textContent = message;
+  const ok = $("noticeOk");
+  const cancel = $("noticeCancel");
+  ok.textContent = okText;
+  cancel.textContent = cancelText || "";
+  cancel.classList.toggle("hidden", !cancelText);
+  // 重播勾勾動畫
+  const check = box.querySelector(".notice-check");
+  check.replaceWith(check.cloneNode(true));
+  box.classList.remove("hidden");
+  ok.focus();
+  return new Promise((resolve) => {
+    const close = (answer) => {
+      box.classList.add("hidden");
+      ok.onclick = cancel.onclick = box.onclick = document.onkeydown = null;
+      resolve(answer);
+    };
+    ok.onclick = () => close(true);
+    cancel.onclick = () => close(false);
+    box.onclick = (e) => e.target === box && close(false);
+    document.onkeydown = (e) => {
+      if (e.key === "Escape") close(false);
+    };
+  });
+}
+
+{
+  const select = $("notifySoundSelect");
+  select.replaceChildren(...Object.entries(CHIMES).map(([id, c]) => new Option(c.name, id)));
+  select.addEventListener("change", () => playChime(select.value, +settingsForm.elements.notify_volume.value));
+  $("notifySoundTest").addEventListener("click", () =>
+    playChime(select.value, +settingsForm.elements.notify_volume.value),
+  );
+}
+
 function baseName(path) {
   return path.split(/[\\/]/).pop();
 }
@@ -658,6 +740,13 @@ function createPanel(prefix, buildSequence, defaultName) {
       status.textContent = `✓ 完成（${mode}，花了 ${fmtTime((Date.now() - startedAt) / 1000)}）：${lastOutput}`;
       el("PreviewBtn").classList.remove("hidden");
       updatePreviewBtn();
+      // 不等提示框關掉：按鈕要先在 finally 解鎖
+      showNotice({
+        title: "轉檔完成",
+        message: `${prefix === "full" ? "全集" : "單集"} ${baseName(lastOutput)} 轉檔完成`,
+        okText: "觀看成品",
+        cancelText: "關閉",
+      }).then((watch) => watch && el("PreviewBtn").click());
     } catch (e) {
       status.textContent = `⚠ ${e}`;
     } finally {
@@ -1155,7 +1244,7 @@ function renderFlashUi(n) {
     return;
   }
   const c = f.list[f.pick];
-  box.innerHTML = `<span class="muted">偵測到閃白 ${fmtPrecise(c.peak)}${f.list.length > 1 ? `（第 ${f.pick + 1} 個）` : ""}，切在前一格乾淨畫面</span>
+  box.innerHTML = `<span class="flash-pill">偵測到閃白 ${fmtPrecise(c.peak)}${f.list.length > 1 ? `（第 ${f.pick + 1} 個）` : ""}，切在前一格乾淨畫面</span>
     ${btn("show", "跳到切點", "播放器停在閃白前最後一格，可用 ← → 逐格確認")}
     ${prev}${btn("next", "下一個 ▶", "抓錯了：從這個閃白之後繼續往後找")}`;
 }
@@ -1180,6 +1269,24 @@ function useFlashCandidate(n, i) {
  * 從 from 秒往後找第一個閃白。沒給 from：重新偵測，從開頭 2 分半之後找（片子比這還
  * 還短就從頭）。next：接著目前這個往後找，找到的排在後面，可以用「上一個」退回。
  */
+/** 放入影片後自動偵測的那一輪：第三、六段（有放的）都抓到閃白時，問要不要開始轉檔。 */
+let flashAnnounce = false;
+
+async function announceFlashDone() {
+  if (!flashAnnounce) return;
+  const segs = [...CUT_AT_SEGMENTS].filter((n) => store[`s${n}`] && segTrim[n].on);
+  if (!segs.length || segs.some((n) => segFlash[n]?.state !== "found")) return;
+  flashAnnounce = false;
+  const where = segs.map((n) => `第${SEGMENT_NAMES[n - 1]}段 ${fmtPrecise(segTrim[n].auto?.end ?? 0)}`).join("、");
+  const go = await showNotice({
+    title: "閃白判斷完成",
+    message: `${where}，請問開始轉檔嗎？`,
+    okText: "開始轉檔",
+    cancelText: "稍後",
+  });
+  if (go) $("fullRenderBtn").click();
+}
+
 async function detectSegFlash(n, { from, next = false } = {}) {
   const clip = store[`s${n}`];
   if (!clip || !CUT_AT_SEGMENTS.has(n) || !segTrim[n].on) return;
@@ -1193,7 +1300,9 @@ async function detectSegFlash(n, { from, next = false } = {}) {
     if (store[`s${n}`] !== clip || segFlash[n] !== f) return; // 偵測途中換了檔案
     if (hit) {
       f.list.push(hit);
-      return useFlashCandidate(n, f.list.length - 1);
+      await useFlashCandidate(n, f.list.length - 1);
+      if (!next) announceFlashDone();
+      return;
     }
     f.state = "none";
   } catch (e) {
@@ -1219,6 +1328,7 @@ async function loadSegment(n, path) {
   }
   await applySegTrim(n);
   renderFlashUi(n);
+  if (CUT_AT_SEGMENTS.has(n)) flashAnnounce = true;
   detectSegFlash(n);
 }
 
@@ -1245,7 +1355,7 @@ $("fullSegments").replaceChildren(
     const cutAtBox = row.querySelector(".seg-cut-at");
     const timeInput = row.querySelector(".seg-trim-time");
     const flashBox = row.querySelector(".seg-flash");
-    segRows[n] = { info, timeInput, flashBox, trimInfo: row.querySelector(".seg-trim-info") };
+    segRows[n] = { el: row, info, timeInput, flashBox, trimInfo: row.querySelector(".seg-trim-info") };
 
     pick.addEventListener("click", async () => {
       const path = await pickVideo();
@@ -1292,6 +1402,27 @@ $("fullSegments").replaceChildren(
   }),
 );
 
+// --- 單集／全集切換鈕（取代折疊區塊的摘要列） ---
+{
+  const accs = [...document.querySelectorAll("#page-video details.acc")];
+  const accOf = (mode) => accs.find((d) => d.querySelector(mode === "full" ? "#fullSegments" : "#blockList"));
+  const sync = () => {
+    const open = accs.find((d) => d.open) || accs[0];
+    if (!open.open) open.open = true;
+    const mode = open.querySelector("#fullSegments") ? "full" : "single";
+    document.querySelectorAll(".mode-btn").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
+    $("modeHint").textContent = open.querySelector(".acc-hint")?.textContent ?? "";
+  };
+  document.querySelectorAll(".mode-btn").forEach((b) =>
+    b.addEventListener("click", () => {
+      accOf(b.dataset.mode).open = true;
+      sync();
+    }),
+  );
+  accs.forEach((d) => d.addEventListener("toggle", sync));
+  sync();
+}
+
 // --- 從檔案總管拖影片進來 ---
 //
 // 放進目前展開的那一邊：單集放一支，全集一次六支、依檔名「4 碼日期-段號」排進對應段落
@@ -1316,15 +1447,53 @@ function openAccordion() {
       : null;
 }
 
-async function dropIntoSingle(paths) {
+/**
+ * 拖曳放入的動畫：每支檔名從放開的位置飛進它的欄位，一支接一支由上往下，落地時欄位亮一下。
+ * 純視覺效果，檔案在背後照常載入；系統設定「減少動態效果」時不播。
+ */
+function flyInto(items, from) {
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  items.forEach(({ name, target }, i) => {
+    if (!target) return;
+    const chip = document.createElement("div");
+    chip.className = "fly-chip";
+    chip.textContent = name;
+    chip.style.left = "0px";
+    chip.style.top = "0px";
+    document.body.appendChild(chip);
+    const r = target.getBoundingClientRect();
+    const w = chip.offsetWidth;
+    const h = chip.offsetHeight;
+    const start = `translate(${from.x - w / 2}px, ${from.y - h / 2}px)`;
+    const end = `translate(${r.left + 90}px, ${r.top + r.height / 2 - h / 2}px)`;
+    const anim = chip.animate(
+      [
+        { transform: `${start} scale(.8)`, opacity: 0 },
+        { transform: `${start} scale(1.05)`, opacity: 1, offset: 0.18 },
+        { transform: `${end} scale(.55)`, opacity: 0.15 },
+      ],
+      { duration: 560, delay: i * 90, easing: "cubic-bezier(.55, 0, .2, 1)", fill: "both" },
+    );
+    anim.onfinish = () => {
+      chip.remove();
+      target.classList.remove("landed");
+      void target.offsetWidth; // 重播落地閃一下
+      target.classList.add("landed");
+    };
+  });
+}
+
+async function dropIntoSingle(paths, from) {
   const status = $("singleStatus");
   let b = blocks.find((x) => x.type === "video" && !store[x.id]);
   if (!b) b = addBlock("video", blocks.findIndex((x) => x.type !== "video") >= 0 ? 0 : blocks.length);
+  const card = () => document.querySelector(`[data-block="${b.id}"]`);
+  flyInto([{ name: baseName(paths[0]), target: card() }], from);
   await loadFileBlock(b, paths[0]);
   status.textContent = paths.length > 1 ? `⚠ 單集一次只放一支，已放入 ${baseName(paths[0])}，其他 ${paths.length - 1} 支沒有放` : "";
 }
 
-async function dropIntoFull(paths) {
+async function dropIntoFull(paths, from) {
   const status = $("fullStatus");
   const bySeg = new Map();
   const unknown = [];
@@ -1342,6 +1511,7 @@ async function dropIntoFull(paths) {
   if (unknown.length) msgs.push(`⚠ 看不出第幾段（檔名要有「日期-段號」，如 1017-3）：${unknown.join("、")}`);
   if (clash.size) msgs.push(`⚠ 好幾支都是同一段，沒有放入：${[...clash].map((n) => `第${SEGMENT_NAMES[n - 1]}段`).join("、")}`);
   status.textContent = msgs.join("　");
+  flyInto(placed.map((n) => ({ name: baseName(bySeg.get(n)), target: segRows[n].el })), from);
   await Promise.all(placed.map((n) => loadSegment(n, bySeg.get(n))));
 }
 
@@ -1358,14 +1528,17 @@ async function dropIntoFull(paths) {
     if (p.type !== "drop") return;
     const paths = (p.paths || []).filter((x) => VIDEO_EXT_RE.test(x));
     if (!paths.length) return;
-    if (target === "single") await dropIntoSingle(paths);
-    else if (target === "full") await dropIntoFull(paths);
+    // Tauri 給的是實體像素，換成 CSS 像素
+    const dpr = window.devicePixelRatio || 1;
+    const from = p.position ? { x: p.position.x / dpr, y: p.position.y / dpr } : { x: innerWidth / 2, y: innerHeight / 2 };
+    if (target === "single") await dropIntoSingle(paths, from);
+    else if (target === "full") await dropIntoFull(paths, from);
     else {
       // 兩邊都收合時：一支當單集、多支當全集
       const want = paths.length > 1 ? "#fullSegments" : "#blockList";
       const acc = [...document.querySelectorAll("#page-video details.acc")].find((d) => d.querySelector(want));
       if (acc) acc.open = true;
-      await (paths.length > 1 ? dropIntoFull(paths) : dropIntoSingle(paths));
+      await (paths.length > 1 ? dropIntoFull(paths, from) : dropIntoSingle(paths, from));
     }
   });
 }
