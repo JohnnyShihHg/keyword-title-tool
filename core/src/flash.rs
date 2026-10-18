@@ -12,6 +12,8 @@ const WHITE_MIN: f64 = 200.0;
 const MIN_RISE: f64 = 50.0;
 /// 每格亮度增加超過這個值才算還在變亮（畫面本身的雜訊遠小於閃白每格的變化）
 const STEP_EPS: f64 = 0.25;
+/// 全白停留時，相鄰兩格亮度差在這以內算同一段全白
+const PLATEAU_EPS: f64 = 1.0;
 /// 往回找乾淨畫面最多退幾格（約 2 秒），避免一路退進一般畫面
 const MAX_RAMP_FRAMES: usize = 60;
 /// 兩個頂峰相距不到這麼多秒算同一個閃白
@@ -119,11 +121,17 @@ pub fn find_flashes(frames: &[(f64, f64)]) -> Vec<FlashCandidate> {
         if y(i) < WHITE_MIN || y(i) < y(i - 1) || y(i) < y(i + 1) {
             continue;
         }
-        let mut j = i;
-        while j > 0 && i - j < MAX_RAMP_FRAMES && y(j) - y(j - 1) > STEP_EPS {
+        // 有些閃白會在全白停一陣子（剪映：頂端連續十幾格 235，彼此只差 0.00x），
+        // 先退到全白開始的那格，再往回找變亮的過程
+        let mut k = i;
+        while k > 0 && i - k < MAX_RAMP_FRAMES && y(k - 1) >= WHITE_MIN && (y(k) - y(k - 1)).abs() <= PLATEAU_EPS {
+            k -= 1;
+        }
+        let mut j = k;
+        while j > 0 && k - j < MAX_RAMP_FRAMES && y(j) - y(j - 1) > STEP_EPS {
             j -= 1;
         }
-        if i - j < 2 || y(i) - y(j) < MIN_RISE {
+        if k - j < 2 || y(i) - y(j) < MIN_RISE {
             continue;
         }
         let peak = frames[i].0;
@@ -168,6 +176,22 @@ mod tests {
         assert!((r[0].clean_frame - 89.0 / FPS).abs() < 1e-9, "{r:?}");
         assert!((r[0].cut - 90.0 / FPS).abs() < 1e-9, "{r:?}");
         assert!((r[0].peak - 96.0 / FPS).abs() < 1e-9, "{r:?}");
+    }
+
+    #[test]
+    fn a_flash_that_holds_on_white_is_still_found() {
+        // 實際剪映的閃白（2026-10-18 樣本 4:55）：10 格線性變亮、全白停 14 格、再淡出
+        let mut v = content(90, 87.0);
+        v.extend((1..=10).map(|k| 87.0 + 14.8 * k as f64));
+        v.push(234.996);
+        v.extend(std::iter::repeat_n(235.0, 12));
+        v.push(234.999);
+        v.extend((1..=10).map(|k| 235.0 - 10.5 * k as f64));
+        v.extend(content(60, 130.0));
+        let r = find_flashes(&frames(&v));
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert!((r[0].clean_frame - 89.0 / FPS).abs() < 1e-9, "{r:?}");
+        assert!((r[0].cut - 90.0 / FPS).abs() < 1e-9, "{r:?}");
     }
 
     #[test]
