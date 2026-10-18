@@ -27,21 +27,85 @@ pub struct FlashCandidate {
     pub cut: f64,
 }
 
-/// 解析 ffmpeg `metadata=print:key=lavfi.signalstats.YAVG` 的輸出，回傳 (秒, 亮度)。
+/// 一行一行解析 ffmpeg `metadata=print:key=lavfi.signalstats.YAVG` 的輸出。
 /// `offset` 加在每格時間上（`-ss` 放在 `-i` 前時，時間從 0 開始算）。
-pub fn parse_yavg(output: &str, offset: f64) -> Vec<(f64, f64)> {
-    let mut frames = Vec::new();
-    let mut time = None;
-    for line in output.lines() {
+pub struct YavgParser {
+    offset: f64,
+    time: Option<f64>,
+}
+
+impl YavgParser {
+    pub fn new(offset: f64) -> Self {
+        Self { offset, time: None }
+    }
+
+    /// 讀到一格完整的（時間, 亮度）就回傳。
+    pub fn push_line(&mut self, line: &str) -> Option<(f64, f64)> {
         if let Some(rest) = line.split("pts_time:").nth(1) {
-            time = rest.split_whitespace().next().and_then(|t| t.parse::<f64>().ok());
+            self.time = rest.split_whitespace().next().and_then(|t| t.parse::<f64>().ok());
         } else if let Some(v) = line.trim().strip_prefix("lavfi.signalstats.YAVG=") {
-            if let (Some(t), Ok(y)) = (time.take(), v.trim().parse::<f64>()) {
-                frames.push((t + offset, y));
+            if let (Some(t), Ok(y)) = (self.time.take(), v.trim().parse::<f64>()) {
+                return Some((t + self.offset, y));
             }
         }
+        None
     }
-    frames
+}
+
+/// 解析整段輸出，回傳 (秒, 亮度)。
+pub fn parse_yavg(output: &str, offset: f64) -> Vec<(f64, f64)> {
+    let mut parser = YavgParser::new(offset);
+    output.lines().filter_map(|l| parser.push_line(l)).collect()
+}
+
+/// 邊讀邊找第一個閃白，找到就可以停掉 ffmpeg，不用把整支解碼完。
+///
+/// 每讀 `CHECK_EVERY` 格，在最近 `WINDOW` 格裡找一次；視窗彼此重疊，一個閃白（不到 2 秒）
+/// 一定會完整落在某個視窗裡。頂峰之後還要再讀滿 `CONFIRM_SECS`，確定它真的是頂峰。
+pub struct FlashScanner {
+    frames: Vec<(f64, f64)>,
+    since_check: usize,
+}
+
+const WINDOW: usize = 300;
+const CHECK_EVERY: usize = 30;
+const CONFIRM_SECS: f64 = 0.5;
+
+impl Default for FlashScanner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FlashScanner {
+    pub fn new() -> Self {
+        Self { frames: Vec::new(), since_check: 0 }
+    }
+
+    pub fn push(&mut self, frame: (f64, f64)) -> Option<FlashCandidate> {
+        self.frames.push(frame);
+        self.since_check += 1;
+        if self.since_check < CHECK_EVERY {
+            return None;
+        }
+        self.since_check = 0;
+        let found = self.check(frame.0 - CONFIRM_SECS);
+        // 只留最近一個視窗，長片也不會一直吃記憶體
+        if self.frames.len() > WINDOW * 2 {
+            self.frames.drain(..self.frames.len() - WINDOW);
+        }
+        found
+    }
+
+    /// 讀完了還沒停：用剩下的畫面最後找一次。
+    pub fn finish(&mut self) -> Option<FlashCandidate> {
+        self.check(f64::INFINITY)
+    }
+
+    fn check(&self, confirmed_before: f64) -> Option<FlashCandidate> {
+        let start = self.frames.len().saturating_sub(WINDOW);
+        find_flashes(&self.frames[start..]).into_iter().find(|c| c.peak <= confirmed_before)
+    }
 }
 
 /// 依時間順序列出所有像閃白的位置。
@@ -133,6 +197,42 @@ mod tests {
         assert_eq!(r.len(), 2);
         assert!(r[0].peak < r[1].peak);
         assert!((r[0].cut - 60.0 / FPS).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_scanner_stops_at_the_first_flash() {
+        let mut v = content(400, 100.0);
+        v.extend(flash(100.0, 80.0));
+        v.extend(content(400, 80.0));
+        v.extend(flash(80.0, 130.0));
+        v.extend(content(100, 130.0));
+        let mut scanner = FlashScanner::new();
+        let mut hit = None;
+        let mut read = 0;
+        for f in frames(&v) {
+            read += 1;
+            if let Some(c) = scanner.push(f) {
+                hit = Some(c);
+                break;
+            }
+        }
+        let c = hit.expect("found a flash");
+        assert!((c.cut - 400.0 / FPS).abs() < 1e-9, "{c:?}");
+        assert!(read < 500, "stopped soon after the first flash, read {read}");
+    }
+
+    #[test]
+    fn the_scanner_finds_a_flash_right_at_the_end() {
+        let mut v = content(50, 100.0);
+        v.extend(flash(100.0, 80.0));
+        v.extend(content(3, 80.0));
+        let mut scanner = FlashScanner::new();
+        let mut hit = None;
+        for f in frames(&v) {
+            hit = hit.or(scanner.push(f));
+        }
+        let c = hit.or(scanner.finish()).expect("found a flash");
+        assert!((c.cut - 50.0 / FPS).abs() < 1e-9, "{c:?}");
     }
 
     #[test]

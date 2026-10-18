@@ -1127,8 +1127,9 @@ async function applyAllSegTrims() {
 }
 
 // 第三、六段自動抓閃白：完整單片是「帶子 ⚡ YT ｜ promo」，閃白之後都不要。
-// YT 約三到五分鐘，加上 promo 和餘裕，預設只掃最後 8 分鐘；找不到可以改掃整支。
-const FLASH_SCAN_SECS = 8 * 60;
+// 帶子本身三到五分鐘、不會有閃白；YT 長短每次不同（可能十幾分鐘），所以從開頭
+// 2 分半之後往後找，第一個閃白就是帶子接 YT 的那個，找到就停。
+const FLASH_SKIP_SECS = 150; // 帶子最短約 3 分鐘，提早 30 秒開始找，剛好 3 分鐘的也不會漏
 const segFlash = {};
 
 function renderFlashUi(n) {
@@ -1138,8 +1139,10 @@ function renderFlashUi(n) {
   const clip = store[`s${n}`];
   if (!clip || !segTrim[n].on || !f) return (box.innerHTML = "");
   const btn = (act, label, title = "") => `<button class="ghost small" data-flash="${act}" title="${title}">${label}</button>`;
+  // 往後找不到時，「上一個」退回剛剛那個
+  const prev = f.pick > 0 || (f.state === "none" && f.list.length) ? btn("prev", "◀ 上一個") : "";
   if (f.state === "running") {
-    box.innerHTML = `<span class="muted">偵測閃白中…（${f.whole ? "整支" : "最後 8 分鐘"}）</span>`;
+    box.innerHTML = `<span class="muted">偵測閃白中…（從 ${fmtTime(f.from)} 往後找）</span>`;
     return;
   }
   if (f.state === "error") {
@@ -1147,16 +1150,14 @@ function renderFlashUi(n) {
     return;
   }
   if (f.state === "none") {
-    box.innerHTML = `<span class="warn">⚠ ${f.whole ? "整支" : "最後 8 分鐘"}找不到閃白，請手動輸入時間</span> ${
-      f.whole ? btn("retry", "重新偵測") : btn("whole", "掃描整支", "YT 比較長時用，會比較久")
-    }`;
+    const fromStart = f.from > 0 ? btn("start", "從頭找", "帶子比 2 分半短時用") : "";
+    box.innerHTML = `<span class="warn">⚠ ${fmtTime(f.from)} 之後找不到${f.list.length ? "下一個" : ""}閃白，請手動輸入時間</span> ${prev}${fromStart}`;
     return;
   }
   const c = f.list[f.pick];
-  box.innerHTML = `<span class="muted">偵測到閃白 ${fmtPrecise(c.peak)}（${f.pick + 1}/${f.list.length}），切在前一格乾淨畫面</span>
+  box.innerHTML = `<span class="muted">偵測到閃白 ${fmtPrecise(c.peak)}${f.list.length > 1 ? `（第 ${f.pick + 1} 個）` : ""}，切在前一格乾淨畫面</span>
     ${btn("show", "跳到切點", "播放器停在閃白前最後一格，可用 ← → 逐格確認")}
-    ${f.list.length > 1 ? `${btn("prev", "◀ 上一個")}${btn("next", "下一個 ▶")}` : ""}
-    ${f.whole ? "" : btn("whole", "掃描整支")}`;
+    ${prev}${btn("next", "下一個 ▶", "抓錯了：從這個閃白之後繼續往後找")}`;
 }
 
 function useFlashCandidate(n, i) {
@@ -1164,6 +1165,7 @@ function useFlashCandidate(n, i) {
   const c = f?.list[i];
   if (!c) return;
   f.pick = i;
+  f.state = "found";
   // 切點落在乾淨那格和第一格變亮的畫面之間，乾淨那格是最後一格
   const end = c.cut - 0.005;
   const text = fmtPrecise(end);
@@ -1174,19 +1176,26 @@ function useFlashCandidate(n, i) {
   return applySegTrim(n);
 }
 
-async function detectSegFlash(n, whole = false) {
+/**
+ * 從 from 秒往後找第一個閃白。沒給 from：重新偵測，從開頭 2 分半之後找（片子比這還
+ * 還短就從頭）。next：接著目前這個往後找，找到的排在後面，可以用「上一個」退回。
+ */
+async function detectSegFlash(n, { from, next = false } = {}) {
   const clip = store[`s${n}`];
   if (!clip || !CUT_AT_SEGMENTS.has(n) || !segTrim[n].on) return;
-  const f = (segFlash[n] = { state: "running", list: [], pick: 0, whole, error: "" });
+  const prev = segFlash[n];
+  const list = next && prev ? prev.list.slice(0, prev.pick + 1) : [];
+  if (from == null) from = clip.info.duration > FLASH_SKIP_SECS + 30 ? FLASH_SKIP_SECS : 0;
+  const f = (segFlash[n] = { state: "running", list, pick: list.length - 1, from, error: "" });
   renderFlashUi(n);
-  const from = whole ? 0 : Math.max(0, clip.info.duration - FLASH_SCAN_SECS);
   try {
-    const list = await invoke("detect_flash", { path: clip.path, from });
+    const hit = await invoke("detect_flash", { path: clip.path, from });
     if (store[`s${n}`] !== clip || segFlash[n] !== f) return; // 偵測途中換了檔案
-    f.list = list;
-    f.state = list.length ? "found" : "none";
-    // 帶子本身不會有閃白，YT 裡面可能有，所以最早的那個就是帶子接 YT 的閃白
-    if (list.length) return useFlashCandidate(n, 0);
+    if (hit) {
+      f.list.push(hit);
+      return useFlashCandidate(n, f.list.length - 1);
+    }
+    f.state = "none";
   } catch (e) {
     f.state = "error";
     f.error = String(e);
@@ -1263,10 +1272,10 @@ $("fullSegments").replaceChildren(
     flashBox?.addEventListener("click", (ev) => {
       const act = ev.target.dataset?.flash;
       const f = segFlash[n];
-      if (act === "retry") detectSegFlash(n, !!f?.whole);
-      if (act === "whole") detectSegFlash(n, true);
-      if (act === "prev" && f) useFlashCandidate(n, (f.pick - 1 + f.list.length) % f.list.length);
-      if (act === "next" && f) useFlashCandidate(n, (f.pick + 1) % f.list.length);
+      if (act === "retry") detectSegFlash(n);
+      if (act === "start") detectSegFlash(n, { from: 0 });
+      if (act === "prev" && f) useFlashCandidate(n, f.state === "none" ? f.pick : f.pick - 1);
+      if (act === "next" && f) detectSegFlash(n, { from: f.list[f.pick].peak + 1, next: true });
       if (act === "show" && f) full.seekTo(`s${n}`, f.list[f.pick].clean_frame);
     });
     row.querySelector(".seg-use-pos")?.addEventListener("click", async () => {
