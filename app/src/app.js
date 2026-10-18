@@ -184,6 +184,8 @@ dateInput.addEventListener("input", changed);
 
 // 清空全部前用系統對話框確認（不用 window.confirm()，它在 WebView 裡會卡住）
 $("clearAllBtn").addEventListener("click", async () => {
+  // 在影片頁按：清空目前這邊（單集或全集）的影片，不動文稿
+  if (!$("page-video").classList.contains("hidden") && window.onClearVideo) return window.onClearVideo();
   const ok = await window.__TAURI__.dialog.ask("確定要清空六段的內容、時間和 YT 連結嗎？", {
     title: "清空全部",
     kind: "warning",

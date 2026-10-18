@@ -109,9 +109,15 @@ function playChime(id = settings?.notify_sound_id, volume = settings?.notify_vol
  * 跳出完成提示框（設定關掉時不跳，回傳 false）。有 okText 就是詢問框，回傳使用者是否按了確定。
  * 提示音和提示框分開設定：只開提示音時照樣會響。
  */
-function showNotice({ title, message, okText = "好", cancelText = null }) {
+function showNotice({ title, message, okText = "好", cancelText = null, input = null }) {
   if (settings?.notify_sound) playChime();
   if (!settings?.notify_popup) return Promise.resolve(false);
+  const field = $("noticeInput");
+  $("noticeField").classList.toggle("hidden", !input);
+  if (input) {
+    $("noticeInputLabel").textContent = input.label;
+    field.value = input.value ?? "";
+  }
   const box = $("notice");
   $("noticeTitle").textContent = title;
   $("noticeMessage").textContent = message;
@@ -124,14 +130,20 @@ function showNotice({ title, message, okText = "好", cancelText = null }) {
   const check = box.querySelector(".notice-check");
   check.replaceWith(check.cloneNode(true));
   box.classList.remove("hidden");
-  ok.focus();
+  if (input) {
+    field.focus();
+    field.select();
+  } else ok.focus();
   return new Promise((resolve) => {
     const close = (answer) => {
       box.classList.add("hidden");
       ok.onclick = cancel.onclick = box.onclick = document.onkeydown = null;
       resolve(answer);
     };
-    ok.onclick = () => close(true);
+    ok.onclick = () => close(input ? { value: field.value.trim() } : true);
+    field.onkeydown = (e) => {
+      if (e.key === "Enter") ok.click();
+    };
     cancel.onclick = () => close(false);
     box.onclick = (e) => e.target === box && close(false);
     document.onkeydown = (e) => {
@@ -159,10 +171,10 @@ function usedDuration(c) {
   return Math.max(0, end - start);
 }
 
+/** 素材說明只留長度：輸出一律重新編碼成 1080p 29.97，格式不用看；格式衝突由快速模式那行提示。 */
 function describe(info) {
-  const fps = info.fps ? ` · ${info.fps.toFixed(2)}fps` : "";
   const audio = info.has_audio ? "" : " · 無聲音";
-  return `${fmtTime(info.duration)} · ${info.width}×${info.height}${fps}${audio}`;
+  return `${fmtTime(info.duration)}${audio}`;
 }
 
 async function probe(path) {
@@ -288,7 +300,11 @@ const SLOT_CLASS = { main: "clip-main", yt: "clip-yt", promo: "clip-promo" };
  *                      沒選檔案的項目會自動略過
  * @param defaultName 檔名欄空白時的預設檔名
  */
-function createPanel(prefix, buildSequence, defaultName) {
+/**
+ * @param hooks.setEnd(item, end) 切點微調器改了某段的結束點時呼叫（寫回該段的設定並重算）
+ * @param hooks.resetEnd(item) 還原自動切點；hooks.isManual(item) 這段是不是手動切點
+ */
+function createPanel(prefix, buildSequence, defaultName, hooks = {}) {
   const el = (name) => $(`${prefix}${name}`);
   const panel = { sequence: () => buildSequence().filter((item) => store[item.key]) };
   let lastOutput = null;
@@ -378,7 +394,7 @@ function createPanel(prefix, buildSequence, defaultName) {
       fastInfo.innerHTML = !seq.length
         ? ""
         : fastBlockers.length
-          ? `<span class="fast-no">需要完整重新編碼（較慢）：</span>${fastBlockers.map(escapeHtml).join("；")}`
+          ? `<span class="fast-no">素材格式不一致，需要重新編碼（較慢）：</span>${fastBlockers.map(escapeHtml).join("；")}`
           : '<span class="fast-yes">⚡ 快速模式：畫面直接複製，只重新編碼聲音，幾十秒內完成</span>';
     }
     timeline.replaceChildren();
@@ -401,7 +417,8 @@ function createPanel(prefix, buildSequence, defaultName) {
       if (i > 0) {
         const join = document.createElement("div");
         join.className = item.join === "cut" ? "cut" : "flash";
-        join.title = item.join === "cut" ? "直接接" : `閃白 ${settings.transition_secs} 秒`;
+        join.title = `${item.join === "cut" ? "直接接" : `閃白 ${settings.transition_secs} 秒`}（點一下微調這個接點）`;
+        join.addEventListener("click", () => panel.openTrim(seq[i - 1].key));
         timeline.appendChild(join);
       }
       const block = document.createElement("div");
@@ -658,6 +675,110 @@ function createPanel(prefix, buildSequence, defaultName) {
     );
   }
 
+  // --- 切點微調器 ---
+  //
+  // 一般的時間軸播放到切點就換下一段，只能檢查不能調。這裡固定看「某段結尾 → 下一段開頭」
+  // 這個接點：左邊是切點前最後一格、右邊是接上來的第一格，±1 格／秒直接移動切點。
+  const trim = { key: null };
+
+  function trimItem() {
+    const idx = tl.seq.findIndex((it) => it.key === trim.key);
+    return idx < 0 ? null : { idx, item: tl.seq[idx], next: tl.seq[idx + 1] || null };
+  }
+
+  /** 讓 video 停在 t 秒那一格（seek 完成才算數）。 */
+  function showFrame(video, path, t) {
+    return new Promise((resolve) => {
+      const go = () => {
+        video.addEventListener("seeked", () => resolve(), { once: true });
+        video.currentTime = Math.max(0, t);
+      };
+      if (video.dataset.path !== path) {
+        video.dataset.path = path;
+        video.src = convertFileSrc(path);
+        video.addEventListener("loadedmetadata", go, { once: true });
+      } else go();
+    });
+  }
+
+  async function renderTrim() {
+    const t = trimItem();
+    if (!t || !store[t.item.key]) return panel.closeTrim();
+    const clip = store[t.item.key];
+    const fps = clip.info.fps || 29.97;
+    const { end } = clipRange(t.item);
+    el("TrimTitle").textContent = `${t.item.label} → ${t.next ? t.next.label : "（片尾）"}`;
+    el("TrimAt").textContent = fmtPrecise(end);
+    el("TrimNote").textContent = `（最後一格約 ${fmtPrecise(end - 1 / fps)}，${t.next?.join === "flash" ? "接閃白" : "直接接"}）`;
+    el("TrimEditor").querySelector('[data-trim="reset"]').classList.toggle("hidden", !hooks.isManual?.(t.item));
+    const jobs = [showFrame(el("TrimOut"), clip.path, end - 0.5 / fps)];
+    const nextClip = t.next && store[t.next.key];
+    el("TrimIn").classList.toggle("hidden", !nextClip);
+    if (nextClip) jobs.push(showFrame(el("TrimIn"), nextClip.path, clipRange(t.next).start + 0.001));
+    await Promise.all(jobs);
+  }
+
+  panel.openTrim = (key) => {
+    const item = tl.seq.find((it) => it.key === key);
+    if (!item || !hooks.setEnd || item.kind === "promo") return;
+    trim.key = key;
+    el("TrimEditor").classList.remove("hidden");
+    el("TrimEditor").focus({ preventScroll: true });
+    renderTrim();
+  };
+
+  panel.closeTrim = () => {
+    trim.key = null;
+    el("TrimEditor").classList.add("hidden");
+  };
+
+  async function moveTrim(kind) {
+    const t = trimItem();
+    if (!t) return;
+    const clip = store[t.item.key];
+    const fps = clip.info.fps || 29.97;
+    const { start, end } = clipRange(t.item);
+    const delta = (kind.endsWith("s") ? 1 : 1 / fps) * (kind.startsWith("-") ? -1 : 1);
+    const next = Math.min(clip.info.duration, Math.max(start + 1 / fps, end + delta));
+    if (next === end) return;
+    await hooks.setEnd(t.item, next);
+    await renderTrim();
+  }
+
+  el("TrimEditor").addEventListener("click", async (ev) => {
+    const act = ev.target.closest("[data-trim]")?.dataset.trim;
+    if (!act) return;
+    if (act === "close") return panel.closeTrim();
+    if (act === "reset") {
+      const t = trimItem();
+      if (t) await hooks.resetEnd?.(t.item);
+      return renderTrim();
+    }
+    if (act === "play") {
+      const t = trimItem();
+      if (!t) return;
+      const { start, end } = clipRange(t.item);
+      const playFrom = Math.max(start, end - 3);
+      await tlGoto(t.idx, playFrom, true);
+      // 播過接點 3 秒後自動停
+      const stopAt = Date.now() + (end - playFrom + 3) * 1000;
+      const timer = setInterval(() => {
+        if (Date.now() >= stopAt || el("Player").paused) {
+          el("Player").pause();
+          clearInterval(timer);
+        }
+      }, 100);
+      return;
+    }
+    moveTrim(act);
+  });
+  // 焦點在微調器上時 ← → 逐格、Shift 逐秒
+  el("TrimEditor").addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    moveTrim(`${e.key === "ArrowLeft" ? "-" : "+"}1${e.shiftKey ? "s" : "f"}`);
+  });
+
   el("PlayTimelineBtn").addEventListener("click", () => {
     if (!tl.seq.length) return;
     tlGoto(0, clipRange(tl.seq[0]).start, true);
@@ -902,14 +1023,13 @@ async function downloadYtBlock(b) {
 
 /** 讀積木的開始／結束時間；格式錯誤時 ok 為 false。 */
 async function readTrim(b) {
-  const parse = async (text) => {
-    try {
-      return { ok: true, value: await invoke("parse_timecode", { input: text || "" }) };
-    } catch (e) {
-      return { ok: false, value: null, error: String(e) };
-    }
+  // 和全集切點同一套：0456、04:56、00:04:55.49 都可以；空白＝從頭／到結尾
+  const parse = (text) => {
+    if (!String(text ?? "").trim()) return { ok: true, value: null };
+    const value = parsePreciseTime(text);
+    return value == null ? { ok: false, value: null, error: `時間格式不對：${text}` } : { ok: true, value };
   };
-  const [s, e] = await Promise.all([parse(b.startText), parse(b.endText)]);
+  const [s, e] = [parse(b.startText), parse(b.endText)];
   return { ok: s.ok && e.ok, start: s.value, end: e.value, error: s.error || e.error };
 }
 
@@ -1046,7 +1166,17 @@ function renderBlocks() {
   single.refresh();
 }
 
-const single = createPanel("single", blockSequence, () => $("partSelect").value);
+const single = createPanel("single", blockSequence, () => $("partSelect").value, {
+  setEnd: async (item, end) => {
+    const b = blocks.find((x) => x.id === item.key);
+    if (!b) return;
+    b.endText = fmtPrecise(end);
+    const input = document.querySelector(`[data-block="${b.id}"] [data-field="endText"]`);
+    if (input) input.value = b.endText;
+    saveBlocks();
+    await applyTrim(b);
+  },
+});
 
 document.querySelectorAll("[data-add]").forEach((btn) =>
   btn.addEventListener("click", async () => {
@@ -1069,14 +1199,18 @@ document.querySelectorAll("[data-preset]").forEach((btn) =>
   }),
 );
 
-$("clearBlocksBtn").addEventListener("click", async () => {
-  if (!blocks.length) return;
-  const ok = await dialog.ask("確定要移除單集的所有積木嗎？", { title: "全部移除", kind: "warning", okLabel: "移除", cancelLabel: "取消" });
-  if (!ok) return;
+function clearBlocks() {
   blocks.forEach((b) => delete store[b.id]);
   blocks = [];
   renderBlocks();
   saveBlocks();
+  $("singleStatus").textContent = "";
+}
+
+$("clearBlocksBtn").addEventListener("click", async () => {
+  if (!blocks.length) return;
+  const ok = await dialog.ask("確定要移除單集的所有積木嗎？", { title: "全部移除", kind: "warning", okLabel: "移除", cancelLabel: "取消" });
+  if (ok) clearBlocks();
 });
 
 /** 啟動時還原上次的積木（影片檔重新讀取；找不到的檔案會標示錯誤）。 */
@@ -1139,8 +1273,50 @@ const full = createPanel(
     if (present.length) items.push({ key: "promo45", label: "Promo 45 秒", kind: "promo", join: "cut" });
     return items;
   },
-  () => `${$("date").value.trim()}關鍵時刻全集`,
+  () => fullDefaultName(),
+  {
+    // 微調器移動切點：第三、六段寫回時間欄；其他段記成手動切點（不再自動砍 promo 長度）
+    setEnd: async (item, end) => {
+      const n = item.segment;
+      if (!n) return;
+      if (CUT_AT_SEGMENTS.has(n)) {
+        const text = fmtPrecise(end);
+        segTrim[n].text = text;
+        segTrim[n].auto = { text, end };
+        if (segRows[n].timeInput) segRows[n].timeInput.value = text;
+      } else segTrim[n].manualEnd = end;
+      segTrim[n].on = true;
+      const box = segRows[n].el.querySelector(".seg-trim-on");
+      if (box) box.checked = true;
+      await applySegTrim(n);
+    },
+    resetEnd: async (item) => {
+      const n = item.segment;
+      if (!n) return;
+      if (CUT_AT_SEGMENTS.has(n)) {
+        const f = segFlash[n];
+        if (f?.list[f.pick]) return useFlashCandidate(n, f.pick);
+      } else segTrim[n].manualEnd = null;
+      await applySegTrim(n);
+    },
+    isManual: (item) => {
+      const n = item.segment;
+      if (!n) return false;
+      if (CUT_AT_SEGMENTS.has(n)) {
+        const f = segFlash[n];
+        const c = f?.list[f.pick];
+        return !!c && Math.abs((store[item.key]?.end ?? 0) - (c.cut - 0.005)) > 0.001;
+      }
+      return segTrim[n].manualEnd != null;
+    },
+  },
 );
+
+/** 全集預設檔名：當天日期（月日）＋全集，例如 1018全集。 */
+function fullDefaultName() {
+  const d = $("date").value.trim();
+  return `${/^\d{8}$/.test(d) ? d.slice(4) : d}全集`;
+}
 
 // 砍掉片尾：單集輸出的檔案尾巴接著 45 秒 promo（第三、六段前面還多接了 YT），
 // 全集要把它砍掉再接。第一、二、四、五段砍掉 45 秒 promo 檔的實際長度（＋設定的微調）；第三、六段
@@ -1182,6 +1358,9 @@ async function applySegTrim(n) {
           t.error = `時間點要在 00:00:00 和檔案長度 ${fmtTime(duration)} 之間`;
         }
       }
+    } else if (t.on && t.manualEnd != null) {
+      // 用切點微調器調過：照手動的切點
+      end = Math.min(t.manualEnd, duration);
     } else if (t.on) {
       const tail = promoTailSecs();
       if (tail == null) {
@@ -1205,7 +1384,7 @@ async function applySegTrim(n) {
         ? `⚠ ${t.error}`
         : CUT_AT_SEGMENTS.has(n)
           ? `使用到 ${fmtPrecise(clip.end)}，後面 ${fmtPrecise(clip.info.duration - clip.end)} 不要`
-          : `砍掉片尾 ${(clip.info.duration - clip.end).toFixed(2)} 秒，使用到 ${fmtPrecise(clip.end)}`;
+          : `${t.manualEnd != null ? "手動切點（微調過），" : ""}砍掉片尾 ${(clip.info.duration - clip.end).toFixed(2)} 秒，使用到 ${fmtPrecise(clip.end)}`;
     row.trimInfo.classList.toggle("warn", !t.ok);
   }
   full.refresh();
@@ -1245,7 +1424,7 @@ function renderFlashUi(n) {
   }
   const c = f.list[f.pick];
   box.innerHTML = `<span class="flash-pill">偵測到閃白 ${fmtPrecise(c.peak)}${f.list.length > 1 ? `（第 ${f.pick + 1} 個）` : ""}，切在前一格乾淨畫面</span>
-    ${btn("show", "跳到切點", "播放器停在閃白前最後一格，可用 ← → 逐格確認")}
+    ${btn("show", "微調切點", "看切點前最後一格和接上來的第一格，可以逐格移動切點")}
     ${prev}${btn("next", "下一個 ▶", "抓錯了：從這個閃白之後繼續往後找")}`;
 }
 
@@ -1283,8 +1462,11 @@ async function announceFlashDone() {
     message: `${where}，請問開始轉檔嗎？`,
     okText: "開始轉檔",
     cancelText: "稍後",
+    input: { label: "輸出檔名", value: $("fullName").value.trim() || fullDefaultName() },
   });
-  if (go) $("fullRenderBtn").click();
+  if (!go) return;
+  $("fullName").value = go.value || fullDefaultName();
+  $("fullRenderBtn").click();
 }
 
 async function detectSegFlash(n, { from, next = false } = {}) {
@@ -1318,6 +1500,7 @@ async function loadSegment(n, path) {
   row.info.textContent = "讀取中…";
   segTrim[n].text = "";
   segTrim[n].auto = null;
+  segTrim[n].manualEnd = null;
   delete segFlash[n];
   if (row.timeInput) row.timeInput.value = "";
   try {
@@ -1386,7 +1569,7 @@ $("fullSegments").replaceChildren(
       if (act === "start") detectSegFlash(n, { from: 0 });
       if (act === "prev" && f) useFlashCandidate(n, f.state === "none" ? f.pick : f.pick - 1);
       if (act === "next" && f) detectSegFlash(n, { from: f.list[f.pick].peak + 1, next: true });
-      if (act === "show" && f) full.seekTo(`s${n}`, f.list[f.pick].clean_frame);
+      if (act === "show" && f) full.openTrim(`s${n}`);
     });
     row.querySelector(".seg-use-pos")?.addEventListener("click", async () => {
       const t = full.playerTimeIn(`s${n}`);
@@ -1401,6 +1584,49 @@ $("fullSegments").replaceChildren(
     return row;
   }),
 );
+
+/** 全集六段全部清掉（含切點、閃白偵測結果），勾選回到預設。 */
+async function clearFullSegments() {
+  for (const n of [1, 2, 3, 4, 5, 6]) {
+    delete store[`s${n}`];
+    delete segFlash[n];
+    segTrim[n] = { on: true, text: "", ok: true, error: "", auto: null, manualEnd: null };
+    const row = segRows[n];
+    row.info.textContent = "尚未選擇";
+    row.trimInfo.textContent = "";
+    if (row.timeInput) row.timeInput.value = "";
+    const box = row.el.querySelector(".seg-trim-on");
+    if (box) box.checked = true;
+    row.el.querySelector(".seg-cut-at")?.classList.remove("hidden");
+    renderFlashUi(n);
+  }
+  flashAnnounce = false;
+  $("fullStatus").textContent = "";
+  $("chapterInfo").textContent = "時間點＝閃白結束、該段完全出現的那一秒";
+  full.refresh();
+}
+
+// 影片頁的「清空全部」：只清目前這邊（單集或全集）
+window.onClearVideo = async () => {
+  const isFull = !!document.querySelector('.mode-btn[data-mode="full"].active');
+  const ok = await dialog.ask(isFull ? "確定要清空全集的六段影片嗎？" : "確定要移除單集的所有積木嗎？", {
+    title: "清空全部",
+    kind: "warning",
+    okLabel: "清空",
+    cancelLabel: "取消",
+  });
+  if (!ok) return;
+  for (const p of ["single", "full"]) {
+    const player = $(`${p}Player`);
+    player.pause();
+    player.removeAttribute("src");
+    delete player.dataset.path;
+    player.load();
+    player.classList.add("hidden");
+  }
+  if (isFull) await clearFullSegments();
+  else clearBlocks();
+};
 
 // --- 單集／全集切換鈕（取代折疊區塊的摘要列） ---
 {

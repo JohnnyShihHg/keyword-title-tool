@@ -418,6 +418,10 @@ select { font: inherit; color: var(--text); background: var(--input-bg); border:
   stroke-dasharray: 40; stroke-dashoffset: 40; animation: notice-draw .35s .15s ease-out forwards; }
 .notice-title { font-size: 19px; font-weight: bold; margin-bottom: 6px; }
 .notice-message { font-size: 14px; color: var(--muted); word-break: break-all; margin-bottom: 20px; }
+.notice-field { display: flex; flex-direction: column; gap: 6px; text-align: left; font-size: 13px; color: var(--muted); margin: -6px 0 18px; }
+.notice-field.hidden { display: none; }
+.notice-input-row { display: flex; align-items: center; gap: 8px; }
+.notice-input-row input { flex: 1; padding: 9px 12px; font-size: 15px; }
 .notice-actions { display: flex; gap: 10px; justify-content: center; }
 .notice-actions button { min-width: 110px; }
 .notice-actions button.hidden { display: none; }
@@ -474,7 +478,7 @@ input { padding: 6px 10px; }
 .preview-wrap.card { align-items: stretch; }
 .preview-wrap video, .player-box { max-width: none; }
 .preview-wrap video { max-height: 50vh; border-radius: 10px; }
-.v-player:not(:has(video:not(.hidden)))::before { content: "按「▶ 從頭播放時間軸」或點時間軸，在這裡播放"; display: flex; align-items: center; justify-content: center; aspect-ratio: 16 / 9; border-radius: 10px; background: #111; color: #8b8e98; font-size: 12px; padding: 12px; text-align: center; }
+.v-player:not(:has(.player-box video:not(.hidden)))::before { content: "按「▶ 從頭播放時間軸」或點時間軸，在這裡播放"; display: flex; align-items: center; justify-content: center; aspect-ratio: 16 / 9; border-radius: 10px; background: #111; color: #8b8e98; font-size: 12px; padding: 12px; text-align: center; }
 
 /* 輸出：寬視窗是右欄的一張卡片；縮小時浮在視窗最底（見下方 @media） */
 .out-dock { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; box-shadow: var(--shadow); }
@@ -526,3 +530,16 @@ input { padding: 6px 10px; }
 .seg-row.landed, .block.landed { animation: landed .6s ease-out; }
 @keyframes landed { 0% { background: color-mix(in srgb, var(--accent) 22%, transparent); } 100% { background: transparent; } }
 @media (prefers-reduced-motion: reduce) { .fly-chip { display: none; } .seg-row.landed, .block.landed { animation: none; } }
+
+/* 切點微調器：左邊切點前最後一格、右邊接上來的第一格，±1 格／秒直接移動切點 */
+.trim-editor { display: flex; flex-direction: column; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid var(--line); outline: none; }
+.trim-head { display: flex; align-items: center; gap: 8px; }
+.trim-frames { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.trim-frames figure { margin: 0; display: flex; flex-direction: column; gap: 4px; }
+.trim-frames video { width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 8px; object-fit: contain; }
+.trim-frames figure:first-child video { box-shadow: 0 0 0 2px var(--accent); }
+.trim-frames figcaption { font-size: 12px; color: var(--muted); text-align: center; }
+.trim-cut { font-size: 13px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.trim-steps, .trim-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.timeline .flash, .timeline .cut { cursor: pointer; }
+.timeline .flash:hover, .timeline .cut:hover { filter: drop-shadow(0 0 4px var(--accent)); }

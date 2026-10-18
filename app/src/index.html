@@ -90,6 +90,25 @@
 
         <div class="v-side">
         <div class="preview-wrap v-player card">
+          <div id="singleTrimEditor" class="trim-editor hidden" tabindex="-1" aria-label="切點微調">
+            <div class="trim-head"><strong id="singleTrimTitle"></strong><span class="spacer"></span>
+              <button type="button" class="ghost small" data-trim="close">完成</button></div>
+            <div class="trim-frames">
+              <figure><video id="singleTrimOut" muted preload="auto"></video><figcaption id="singleTrimOutCap">切點前最後一格</figcaption></figure>
+              <figure><video id="singleTrimIn" muted preload="auto"></video><figcaption id="singleTrimInCap">接上來的第一格</figcaption></figure>
+            </div>
+            <div class="trim-cut">切點 <span id="singleTrimAt" class="precise"></span><span id="singleTrimNote" class="muted"></span></div>
+            <div class="trim-steps">
+              <button type="button" class="ghost small" data-trim="-1s" title="Shift + ←">◀◀ 1 秒</button>
+              <button type="button" class="ghost small" data-trim="-1f" title="←">◀ 1 格</button>
+              <button type="button" class="ghost small" data-trim="+1f" title="→">1 格 ▶</button>
+              <button type="button" class="ghost small" data-trim="+1s" title="Shift + →">1 秒 ▶▶</button>
+            </div>
+            <div class="trim-actions">
+              <button type="button" class="small" data-trim="play">▶ 播放這個接點（前後各 3 秒）</button>
+              <button type="button" class="ghost small hidden" data-trim="reset">還原自動切點</button>
+            </div>
+          </div>
           <div class="player-box">
             <video id="singlePlayer" class="hidden" controls preload="metadata"></video>
             <div id="singleFlash" class="flash-overlay"></div>
@@ -168,6 +187,25 @@
 
         <div class="v-side">
         <div class="preview-wrap v-player card">
+          <div id="fullTrimEditor" class="trim-editor hidden" tabindex="-1" aria-label="切點微調">
+            <div class="trim-head"><strong id="fullTrimTitle"></strong><span class="spacer"></span>
+              <button type="button" class="ghost small" data-trim="close">完成</button></div>
+            <div class="trim-frames">
+              <figure><video id="fullTrimOut" muted preload="auto"></video><figcaption id="fullTrimOutCap">切點前最後一格</figcaption></figure>
+              <figure><video id="fullTrimIn" muted preload="auto"></video><figcaption id="fullTrimInCap">接上來的第一格</figcaption></figure>
+            </div>
+            <div class="trim-cut">切點 <span id="fullTrimAt" class="precise"></span><span id="fullTrimNote" class="muted"></span></div>
+            <div class="trim-steps">
+              <button type="button" class="ghost small" data-trim="-1s" title="Shift + ←">◀◀ 1 秒</button>
+              <button type="button" class="ghost small" data-trim="-1f" title="←">◀ 1 格</button>
+              <button type="button" class="ghost small" data-trim="+1f" title="→">1 格 ▶</button>
+              <button type="button" class="ghost small" data-trim="+1s" title="Shift + →">1 秒 ▶▶</button>
+            </div>
+            <div class="trim-actions">
+              <button type="button" class="small" data-trim="play">▶ 播放這個接點（前後各 3 秒）</button>
+              <button type="button" class="ghost small hidden" data-trim="reset">還原自動切點</button>
+            </div>
+          </div>
           <div class="player-box">
             <video id="fullPlayer" class="hidden" controls preload="metadata"></video>
             <div id="fullFlash" class="flash-overlay"></div>
@@ -377,6 +415,10 @@
       </svg>
       <div id="noticeTitle" class="notice-title"></div>
       <div id="noticeMessage" class="notice-message"></div>
+      <label id="noticeField" class="notice-field hidden">
+        <span id="noticeInputLabel"></span>
+        <span class="notice-input-row"><input id="noticeInput" spellcheck="false" /><span class="muted">.mp4</span></span>
+      </label>
       <div class="notice-actions">
         <button id="noticeCancel" class="ghost"></button>
         <button id="noticeOk"></button>
