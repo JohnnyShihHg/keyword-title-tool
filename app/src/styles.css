@@ -416,6 +416,11 @@ select { font: inherit; color: var(--text); background: var(--input-bg); border:
 .seg-trim { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; white-space: nowrap; }
 .seg-cut-at { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; }
 .seg-cut-at.hidden { display: none; }
+/* 第三、六段：切在閃白／只砍片尾，選到的那顆灰底 */
+.seg-mode { display: inline-flex; gap: 2px; font-size: 13px; }
+.seg-mode.hidden { display: none; }
+.seg-mode-btn { transition: none; background: transparent; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 3px 10px; font-size: 13px; }
+.seg-mode-btn.active { background: var(--border); color: var(--text); font-weight: 500; }
 .seg-trim-time { width: 90px; }
 .seg-trim-info.warn { color: var(--warn); }
 

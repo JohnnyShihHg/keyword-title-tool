@@ -1294,7 +1294,7 @@ const full = createPanel(
     setEnd: async (item, end) => {
       const n = item.segment;
       if (!n) return;
-      if (CUT_AT_SEGMENTS.has(n)) {
+      if (usesCutAt(n)) {
         const text = fmtPrecise(end);
         segTrim[n].text = text;
         segTrim[n].auto = { text, end };
@@ -1308,7 +1308,7 @@ const full = createPanel(
     resetEnd: async (item) => {
       const n = item.segment;
       if (!n) return;
-      if (CUT_AT_SEGMENTS.has(n)) {
+      if (usesCutAt(n)) {
         const f = segFlash[n];
         if (f?.list[f.pick]) return useFlashCandidate(n, f.pick);
       } else segTrim[n].manualEnd = null;
@@ -1317,7 +1317,7 @@ const full = createPanel(
     isManual: (item) => {
       const n = item.segment;
       if (!n) return false;
-      if (CUT_AT_SEGMENTS.has(n)) {
+      if (usesCutAt(n)) {
         const f = segFlash[n];
         const c = f?.list[f.pick];
         return !!c && Math.abs((store[item.key]?.end ?? 0) - (c.cut - 0.005)) > 0.001;
@@ -1336,9 +1336,15 @@ function fullDefaultName() {
 // 砍掉片尾：單集輸出的檔案尾巴接著 45 秒 promo（第三、六段前面還多接了 YT），
 // 全集要把它砍掉再接。第一、二、四、五段砍掉 45 秒 promo 檔的實際長度（＋設定的微調）；第三、六段
 // 由使用者指定從哪個時間點以後都不要。預設勾選：放進全集的幾乎都是單集輸出的成品。
+// 第三、六段沒接 YT（也就沒有閃白）時，可以改選「只砍片尾」，跟第一、二、四、五段一樣砍 promo。
 const CUT_AT_SEGMENTS = new Set([3, 6]);
-const segTrim = Object.fromEntries([1, 2, 3, 4, 5, 6].map((n) => [n, { on: true, text: "", ok: true, error: "" }]));
+const segTrim = Object.fromEntries([1, 2, 3, 4, 5, 6].map((n) => [n, { on: true, text: "", ok: true, error: "", mode: "cut" }]));
 const segRows = {};
+
+/** 第 n 段是不是用「從某時間點以後不要」（閃白或手動輸入）：第三、六段且沒改選只砍片尾。 */
+function usesCutAt(n) {
+  return CUT_AT_SEGMENTS.has(n) && segTrim[n].mode !== "tail";
+}
 
 /** 片尾要砍的秒數＝45 秒 promo 檔的實際長度＋微調；還沒指定 promo 時回傳 null。 */
 function promoTailSecs() {
@@ -1357,7 +1363,7 @@ async function applySegTrim(n) {
   if (clip) {
     const duration = clip.info.duration;
     let end = null;
-    if (t.on && CUT_AT_SEGMENTS.has(n)) {
+    if (t.on && usesCutAt(n)) {
       if (!t.text.trim()) {
         t.ok = false;
         t.error = "請填入從哪個時間點以後不要";
@@ -1397,7 +1403,7 @@ async function applySegTrim(n) {
       ? ""
       : !t.ok
         ? `⚠ ${t.error}`
-        : CUT_AT_SEGMENTS.has(n)
+        : usesCutAt(n)
           ? `使用到 ${fmtPrecise(clip.end)}，後面 ${fmtPrecise(clip.info.duration - clip.end)} 不要`
           : `${t.manualEnd != null ? "手動切點（微調過），" : ""}砍掉片尾 ${(clip.info.duration - clip.end).toFixed(2)} 秒，使用到 ${fmtPrecise(clip.end)}`;
     row.trimInfo.classList.toggle("warn", !t.ok);
@@ -1420,7 +1426,7 @@ function renderFlashUi(n) {
   if (!box) return;
   const f = segFlash[n];
   const clip = store[`s${n}`];
-  if (!clip || !segTrim[n].on || !f) return (box.innerHTML = "");
+  if (!clip || !segTrim[n].on || !usesCutAt(n) || !f) return (box.innerHTML = "");
   const btn = (act, label, title = "") => `<button class="ghost small" data-flash="${act}" title="${title}">${label}</button>`;
   // 往後找不到時，「上一個」退回剛剛那個
   const prev = f.pick > 0 || (f.state === "none" && f.list.length) ? btn("prev", "◀ 上一個") : "";
@@ -1468,7 +1474,7 @@ let flashAnnounce = false;
 
 async function announceFlashDone() {
   if (!flashAnnounce) return;
-  const segs = [...CUT_AT_SEGMENTS].filter((n) => store[`s${n}`] && segTrim[n].on);
+  const segs = [...CUT_AT_SEGMENTS].filter((n) => store[`s${n}`] && segTrim[n].on && usesCutAt(n));
   if (!segs.length || segs.some((n) => segFlash[n]?.state !== "found")) return;
   flashAnnounce = false;
   const where = segs.map((n) => `第${SEGMENT_NAMES[n - 1]}段 ${fmtPrecise(segTrim[n].auto?.end ?? 0)}`).join("、");
@@ -1486,7 +1492,7 @@ async function announceFlashDone() {
 
 async function detectSegFlash(n, { from, next = false } = {}) {
   const clip = store[`s${n}`];
-  if (!clip || !CUT_AT_SEGMENTS.has(n) || !segTrim[n].on) return;
+  if (!clip || !usesCutAt(n) || !segTrim[n].on) return;
   const prev = segFlash[n];
   const list = next && prev ? prev.list.slice(0, prev.pick + 1) : [];
   if (from == null) from = clip.info.duration > FLASH_SKIP_SECS + 30 ? FLASH_SKIP_SECS : 0;
@@ -1526,7 +1532,7 @@ async function loadSegment(n, path) {
   }
   await applySegTrim(n);
   renderFlashUi(n);
-  if (CUT_AT_SEGMENTS.has(n)) flashAnnounce = true;
+  if (usesCutAt(n)) flashAnnounce = true;
   detectSegFlash(n);
 }
 
@@ -1542,6 +1548,9 @@ $("fullSegments").replaceChildren(
       <label class="seg-trim" title="${cutAt ? "從閃白（或指定時間點）以後都不要（YT 與片尾 promo）" : "砍掉檔案最後的片尾 promo，秒數在設定裡調整"}">
         <input type="checkbox" class="seg-trim-on" checked /> 砍掉片尾
       </label>
+      ${cutAt ? `<span class="seg-mode" role="radiogroup" title="沒接 YT（沒有閃白）時選「只砍片尾」">
+        <button type="button" class="seg-mode-btn active" data-mode="cut">切在閃白／時間點</button>
+        <button type="button" class="seg-mode-btn" data-mode="tail">只砍片尾</button></span>` : ""}
       ${cutAt ? `<span class="seg-cut-at">從 <input class="time seg-trim-time" placeholder="例 0456" title="自動抓閃白，也可手動輸入：0456＝4 分 56 秒、015620＝1 小時 56 分 20 秒；要更準可加小數，如 0456.43" /> 以後都不要
         <button class="ghost small seg-use-pos" title="用「播放時間軸」播到要切的地方暫停，再按這顆">用目前播放位置</button></span>` : ""}
       <span class="vinfo muted seg-info">尚未選擇</span>
@@ -1553,6 +1562,7 @@ $("fullSegments").replaceChildren(
     const cutAtBox = row.querySelector(".seg-cut-at");
     const timeInput = row.querySelector(".seg-trim-time");
     const flashBox = row.querySelector(".seg-flash");
+    const modeBox = row.querySelector(".seg-mode");
     segRows[n] = { el: row, info, timeInput, flashBox, trimInfo: row.querySelector(".seg-trim-info") };
 
     pick.addEventListener("click", async () => {
@@ -1568,9 +1578,20 @@ $("fullSegments").replaceChildren(
     });
     onBox.addEventListener("change", () => {
       segTrim[n].on = onBox.checked;
-      cutAtBox?.classList.toggle("hidden", !onBox.checked);
+      cutAtBox?.classList.toggle("hidden", !usesCutAt(n) || !onBox.checked);
+      modeBox?.classList.toggle("hidden", !onBox.checked);
       applySegTrim(n);
-      if (cutAt && onBox.checked && !segFlash[n] && !segTrim[n].text) detectSegFlash(n);
+      if (usesCutAt(n) && onBox.checked && !segFlash[n] && !segTrim[n].text) detectSegFlash(n);
+      renderFlashUi(n);
+    });
+    modeBox?.addEventListener("click", (ev) => {
+      const mode = ev.target.dataset?.mode;
+      if (!mode || mode === segTrim[n].mode) return;
+      segTrim[n].mode = mode;
+      modeBox.querySelectorAll(".seg-mode-btn").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
+      cutAtBox.classList.toggle("hidden", !usesCutAt(n) || !segTrim[n].on);
+      applySegTrim(n);
+      if (usesCutAt(n) && segTrim[n].on && !segFlash[n] && !segTrim[n].text) detectSegFlash(n);
       renderFlashUi(n);
     });
     timeInput?.addEventListener("input", () => {
@@ -1605,7 +1626,7 @@ async function clearFullSegments() {
   for (const n of [1, 2, 3, 4, 5, 6]) {
     delete store[`s${n}`];
     delete segFlash[n];
-    segTrim[n] = { on: true, text: "", ok: true, error: "", auto: null, manualEnd: null };
+    segTrim[n] = { on: true, text: "", ok: true, error: "", auto: null, manualEnd: null, mode: "cut" };
     const row = segRows[n];
     row.info.textContent = "尚未選擇";
     row.trimInfo.textContent = "";
@@ -1613,6 +1634,8 @@ async function clearFullSegments() {
     const box = row.el.querySelector(".seg-trim-on");
     if (box) box.checked = true;
     row.el.querySelector(".seg-cut-at")?.classList.remove("hidden");
+    row.el.querySelector(".seg-mode")?.classList.remove("hidden");
+    row.el.querySelectorAll(".seg-mode-btn").forEach((b) => b.classList.toggle("active", b.dataset.mode === "cut"));
     renderFlashUi(n);
   }
   flashAnnounce = false;
