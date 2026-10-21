@@ -1265,9 +1265,15 @@ function refreshPartOptions() {
   const parts = lastRendered?.parts || [];
   select.replaceChildren(
     new Option(parts.length ? "選擇段落…" : "（文稿頁還沒有段落）", ""),
-    ...parts.map((p) => new Option(`第${SEGMENT_NAMES[p.number - 1]}段：${p.title_line}`, p.title_line)),
+    ...parts.map((p) => new Option(`第${SEGMENT_NAMES[p.number - 1]}段：${p.title_line}`, singleDefaultName(p.number))),
   );
-  if (parts.some((p) => p.title_line === current)) select.value = current;
+  if (parts.some((p) => singleDefaultName(p.number) === current)) select.value = current;
+}
+
+/** 單集檔名＝文稿日期的月日－段號，例如 1021-3（和全集的 1021全集 同一套日期）。 */
+function singleDefaultName(n) {
+  const d = $("date").value.trim();
+  return `${/^\d{8}$/.test(d) ? d.slice(4) : d}-${n}`;
 }
 
 $("partSelect").addEventListener("change", () => {
