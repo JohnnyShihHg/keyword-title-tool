@@ -16,7 +16,7 @@ fn render_document(doc: DocumentInput) -> Rendered {
 }
 
 /// 匯入之前匯出的 txt，拆回六段、時間、YT 連結和日期。
-#[tauri::command]
+#[tauri::command(async)]
 fn import_text_file(path: String, settings: keyword_title_core::settings::Settings) -> Result<keyword_title_core::import::ImportedDocument, String> {
     let bytes = std::fs::read(&path).map_err(|e| format!("讀不到檔案：{e}"))?;
     let text = String::from_utf8(bytes).map_err(|_| "這個檔案不是 UTF-8 文字檔（請匯入本工具「存成 txt」的檔案）".to_string())?;

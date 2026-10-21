@@ -359,14 +359,17 @@ function setSyncStatus(text, kind = "") {
   updateSyncButtons();
 }
 
-/** 資料夾還沒建立、畫面是空的、清空後暫停中都不能寫（清空後只能載入）；還沒有 txt 就沒東西可載入。 */
+/**
+ * 資料夾還沒建立、畫面是空的、清空後暫停中都不能寫（清空後只能載入）。
+ * 「載入」一律可以按：按下去才讀，沒有 txt 會在狀態列說明（不能靠之前讀到的狀態決定，
+ * 清空後換了日期或暫停中都不會再自動讀，按鈕會一直灰掉）。
+ */
 function updateSyncButtons() {
   $("syncBtns").classList.toggle("hidden", !syncOn() || !sync.path);
   const write = $("syncWriteBtn");
   const why = !sync.folder ? "當天資料夾尚未建立" : syncPaused() ? "已清空畫面，只能載入" : !hasContent() ? "畫面上沒有內容可以寫入" : "";
   write.disabled = !!why;
   write.title = why || "把畫面上的內容寫進共用資料夾（還沒有 txt 時會建立）";
-  $("syncLoadBtn").disabled = sync.text === null && !sync.conflict;
 }
 
 function syncFailed(e, doing) {
@@ -544,7 +547,10 @@ $("conflictLaterBtn").addEventListener("click", () => {
 });
 
 $("syncLoadBtn").addEventListener("click", async () => {
-  if (sync.busy) return;
+  if (!sync.path) return;
+  if (sync.busy) return setSyncStatus("☁ 正在讀取共用資料夾，請稍候再按一次");
+  sync.busy = true;
+  setSyncStatus("☁ 讀取中…");
   try {
     const f = await invoke("sync_read", { path: sync.path });
     sync.folder = f.folder;
@@ -555,11 +561,13 @@ $("syncLoadBtn").addEventListener("click", async () => {
         okLabel: "載入",
         cancelLabel: "取消",
       });
-      if (!ok) return;
+      if (!ok) return setSyncStatus(syncPaused() ? "⏸ 已清空畫面，自動同步暫停（按「載入」恢復）" : "已取消載入");
     }
     await loadSynced(f);
   } catch (e) {
     syncFailed(e, "read");
+  } finally {
+    sync.busy = false;
   }
 });
 

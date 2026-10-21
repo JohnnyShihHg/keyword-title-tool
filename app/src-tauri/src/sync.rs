@@ -140,18 +140,19 @@ pub fn sync_path(settings: Settings, date: String) -> Option<String> {
     sync::file_path(&settings, &date).map(|p| p.to_string_lossy().into_owned())
 }
 
-#[tauri::command]
+// 共用資料夾是網路磁碟，可能讀很久：async 讓它在背景執行緒跑，不會卡住整個視窗。
+#[tauri::command(async)]
 pub fn sync_read(path: String) -> Result<SyncFile, SyncError> {
     read(Path::new(&path))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn sync_stat(path: String) -> Result<Option<u64>, SyncError> {
     check_root(Path::new(&path))?;
     mtime(Path::new(&path))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn sync_write(path: String, content: String, known: Option<String>, force: bool, create: bool) -> Result<Written, SyncError> {
     write(Path::new(&path), &content, known.as_deref(), force, create)
 }
