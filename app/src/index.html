@@ -331,7 +331,7 @@
         <label>全集砍掉片尾微調（秒）
           <input name="promo_tail_adjust_secs" type="number" min="-10" max="10" step="0.01" />
         </label>
-        <p class="muted">全集第一、二、四、五段勾「砍掉片尾」時，自動砍掉上面那支 45 秒 promo 的實際長度；這裡填的秒數再加上去（正數多砍、負數少砍），預設 0。第三、六段改用指定時間點。</p>
+        <p class="muted">全集各段選「只砍片尾」（第一、二、四、五段的預設）時，自動砍掉上面那支 45 秒 promo 的實際長度；這裡填的秒數再加上去（正數多砍、負數少砍），預設 0。選「切在閃白」（第三、六段的預設）時改用閃白或指定時間點。</p>
         <label>輸出資料夾
           <input name="output_dir" readonly placeholder="未指定（每次輸出時選擇）" />
           <button type="button" class="ghost small" data-pick-dir="output_dir">選擇</button>

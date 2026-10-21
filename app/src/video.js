@@ -1290,7 +1290,7 @@ const full = createPanel(
   },
   () => fullDefaultName(),
   {
-    // 微調器移動切點：第三、六段寫回時間欄；其他段記成手動切點（不再自動砍 promo 長度）
+    // 微調器移動切點：選「切在閃白」的段寫回時間欄；只砍片尾的段記成手動切點（不再自動砍 promo 長度）
     setEnd: async (item, end) => {
       const n = item.segment;
       if (!n) return;
@@ -1336,14 +1336,16 @@ function fullDefaultName() {
 // 砍掉片尾：單集輸出的檔案尾巴接著 45 秒 promo（第三、六段前面還多接了 YT），
 // 全集要把它砍掉再接。第一、二、四、五段砍掉 45 秒 promo 檔的實際長度（＋設定的微調）；第三、六段
 // 由使用者指定從哪個時間點以後都不要。預設勾選：放進全集的幾乎都是單集輸出的成品。
-// 第三、六段沒接 YT（也就沒有閃白）時，可以改選「只砍片尾」，跟第一、二、四、五段一樣砍 promo。
+// 每段都可以在「切在閃白／時間點」和「只砍片尾」之間切換：第三、六段沒接 YT（沒有閃白）時改選只砍片尾，
+// 其他段有接 YT 時改選切在閃白。CUT_AT_SEGMENTS 只是預設值。
 const CUT_AT_SEGMENTS = new Set([3, 6]);
-const segTrim = Object.fromEntries([1, 2, 3, 4, 5, 6].map((n) => [n, { on: true, text: "", ok: true, error: "", mode: "cut" }]));
+const defaultSegMode = (n) => (CUT_AT_SEGMENTS.has(n) ? "cut" : "tail");
+const segTrim = Object.fromEntries([1, 2, 3, 4, 5, 6].map((n) => [n, { on: true, text: "", ok: true, error: "", mode: defaultSegMode(n) }]));
 const segRows = {};
 
-/** 第 n 段是不是用「從某時間點以後不要」（閃白或手動輸入）：第三、六段且沒改選只砍片尾。 */
+/** 第 n 段是不是用「從某時間點以後不要」（閃白或手動輸入），而不是只砍片尾。 */
 function usesCutAt(n) {
-  return CUT_AT_SEGMENTS.has(n) && segTrim[n].mode !== "tail";
+  return segTrim[n].mode === "cut";
 }
 
 /** 片尾要砍的秒數＝45 秒 promo 檔的實際長度＋微調；還沒指定 promo 時回傳 null。 */
@@ -1415,7 +1417,7 @@ async function applyAllSegTrims() {
   for (const n of [1, 2, 3, 4, 5, 6]) await applySegTrim(n);
 }
 
-// 第三、六段自動抓閃白：完整單片是「帶子 ⚡ YT ｜ promo」，閃白之後都不要。
+// 選「切在閃白」的段（預設第三、六段）自動抓閃白：完整單片是「帶子 ⚡ YT ｜ promo」，閃白之後都不要。
 // 帶子本身三到五分鐘、不會有閃白；YT 長短每次不同（可能十幾分鐘），所以從開頭
 // 2 分半之後往後找，第一個閃白就是帶子接 YT 的那個，找到就停。
 const FLASH_SKIP_SECS = 150; // 帶子最短約 3 分鐘，提早 30 秒開始找，剛好 3 分鐘的也不會漏
@@ -1469,12 +1471,12 @@ function useFlashCandidate(n, i) {
  * 從 from 秒往後找第一個閃白。沒給 from：重新偵測，從開頭 2 分半之後找（片子比這還
  * 還短就從頭）。next：接著目前這個往後找，找到的排在後面，可以用「上一個」退回。
  */
-/** 放入影片後自動偵測的那一輪：第三、六段（有放的）都抓到閃白時，問要不要開始轉檔。 */
+/** 放入影片後自動偵測的那一輪：選「切在閃白」的段（有放的）都抓到閃白時，問要不要開始轉檔。 */
 let flashAnnounce = false;
 
 async function announceFlashDone() {
   if (!flashAnnounce) return;
-  const segs = [...CUT_AT_SEGMENTS].filter((n) => store[`s${n}`] && segTrim[n].on && usesCutAt(n));
+  const segs = [1, 2, 3, 4, 5, 6].filter((n) => store[`s${n}`] && segTrim[n].on && usesCutAt(n));
   if (!segs.length || segs.some((n) => segFlash[n]?.state !== "found")) return;
   flashAnnounce = false;
   const where = segs.map((n) => `第${SEGMENT_NAMES[n - 1]}段 ${fmtPrecise(segTrim[n].auto?.end ?? 0)}`).join("、");
@@ -1515,7 +1517,7 @@ async function detectSegFlash(n, { from, next = false } = {}) {
   renderFlashUi(n);
 }
 
-/** 第 n 段放入影片（選擇檔案和拖曳共用），接著套用砍片尾；第三、六段自動抓閃白。 */
+/** 第 n 段放入影片（選擇檔案和拖曳共用），接著套用砍片尾；選「切在閃白」的段自動抓閃白。 */
 async function loadSegment(n, path) {
   const row = segRows[n];
   row.info.textContent = "讀取中…";
@@ -1539,23 +1541,23 @@ async function loadSegment(n, path) {
 $("fullSegments").replaceChildren(
   ...SEGMENT_NAMES.map((name, i) => {
     const n = i + 1;
-    const cutAt = CUT_AT_SEGMENTS.has(n);
+    const cutAt = defaultSegMode(n) === "cut";
     const row = document.createElement("div");
     row.className = "vrow seg-row";
     row.innerHTML = `<span class="vlabel">第${name}段</span>
       <button class="ghost">選擇檔案…</button>
       <button class="ghost small">移除</button>
-      <label class="seg-trim" title="${cutAt ? "從閃白（或指定時間點）以後都不要（YT 與片尾 promo）" : "砍掉檔案最後的片尾 promo，秒數在設定裡調整"}">
+      <label class="seg-trim" title="切在閃白：從閃白（或指定時間點）以後都不要（YT 與片尾 promo）；只砍片尾：砍掉檔案最後的片尾 promo，秒數在設定裡調整">
         <input type="checkbox" class="seg-trim-on" checked /> 砍掉片尾
       </label>
-      ${cutAt ? `<span class="seg-mode" role="radiogroup" title="沒接 YT（沒有閃白）時選「只砍片尾」">
-        <button type="button" class="seg-mode-btn active" data-mode="cut">切在閃白／時間點</button>
-        <button type="button" class="seg-mode-btn" data-mode="tail">只砍片尾</button></span>` : ""}
-      ${cutAt ? `<span class="seg-cut-at">從 <input class="time seg-trim-time" placeholder="例 0456" title="自動抓閃白，也可手動輸入：0456＝4 分 56 秒、015620＝1 小時 56 分 20 秒；要更準可加小數，如 0456.43" /> 以後都不要
-        <button class="ghost small seg-use-pos" title="用「播放時間軸」播到要切的地方暫停，再按這顆">用目前播放位置</button></span>` : ""}
+      <span class="seg-mode" role="radiogroup" title="有接 YT（有閃白）選「切在閃白」，沒有就選「只砍片尾」">
+        <button type="button" class="seg-mode-btn${cutAt ? " active" : ""}" data-mode="cut">切在閃白／時間點</button>
+        <button type="button" class="seg-mode-btn${cutAt ? "" : " active"}" data-mode="tail">只砍片尾</button></span>
+      <span class="seg-cut-at${cutAt ? "" : " hidden"}">從 <input class="time seg-trim-time" placeholder="例 0456" title="自動抓閃白，也可手動輸入：0456＝4 分 56 秒、015620＝1 小時 56 分 20 秒；要更準可加小數，如 0456.43" /> 以後都不要
+        <button class="ghost small seg-use-pos" title="用「播放時間軸」播到要切的地方暫停，再按這顆">用目前播放位置</button></span>
       <span class="vinfo muted seg-info">尚未選擇</span>
       <span class="vinfo muted seg-trim-info"></span>
-      ${cutAt ? '<span class="seg-flash"></span>' : ""}`;
+      <span class="seg-flash"></span>`;
     const [pick, clear] = row.querySelectorAll("button");
     const info = row.querySelector(".seg-info");
     const onBox = row.querySelector(".seg-trim-on");
@@ -1626,16 +1628,16 @@ async function clearFullSegments() {
   for (const n of [1, 2, 3, 4, 5, 6]) {
     delete store[`s${n}`];
     delete segFlash[n];
-    segTrim[n] = { on: true, text: "", ok: true, error: "", auto: null, manualEnd: null, mode: "cut" };
+    segTrim[n] = { on: true, text: "", ok: true, error: "", auto: null, manualEnd: null, mode: defaultSegMode(n) };
     const row = segRows[n];
     row.info.textContent = "尚未選擇";
     row.trimInfo.textContent = "";
     if (row.timeInput) row.timeInput.value = "";
     const box = row.el.querySelector(".seg-trim-on");
     if (box) box.checked = true;
-    row.el.querySelector(".seg-cut-at")?.classList.remove("hidden");
-    row.el.querySelector(".seg-mode")?.classList.remove("hidden");
-    row.el.querySelectorAll(".seg-mode-btn").forEach((b) => b.classList.toggle("active", b.dataset.mode === "cut"));
+    row.el.querySelector(".seg-cut-at").classList.toggle("hidden", !usesCutAt(n));
+    row.el.querySelector(".seg-mode").classList.remove("hidden");
+    row.el.querySelectorAll(".seg-mode-btn").forEach((b) => b.classList.toggle("active", b.dataset.mode === segTrim[n].mode));
     renderFlashUi(n);
   }
   flashAnnounce = false;
