@@ -296,7 +296,7 @@ const SLOT_CLASS = { main: "clip-main", yt: "clip-yt", promo: "clip-promo" };
 
 /**
  * @param prefix  HTML id 前綴（single / full）
- * @param buildSequence 回傳 [{ key, label, kind: main|yt|promo, join: flash|cut, segment? }]，
+ * @param buildSequence 回傳 [{ key, label, kind: main|yt|promo, join: flash|cut, gain_db?, segment? }]，
  *                      沒選檔案的項目會自動略過
  * @param defaultName 檔名欄空白時的預設檔名
  */
@@ -327,13 +327,13 @@ function createPanel(prefix, buildSequence, defaultName, hooks = {}) {
           join: item.join || "flash",
           signature: c.info.copy_signature,
           label: item.label,
+          gain_db: item.gain_db || 0,
         };
       }),
       transition: settings?.transition_secs ?? 0.5,
       ...OUTPUT,
       encoder: "x264",
       output: "",
-      gain_db: settings?.audio_gain_db ?? 6,
       ...extra,
     };
   }
@@ -395,7 +395,7 @@ function createPanel(prefix, buildSequence, defaultName, hooks = {}) {
         ? ""
         : fastBlockers.length
           ? `<span class="fast-no">素材格式不一致，需要重新編碼（較慢）：</span>${fastBlockers.map(escapeHtml).join("；")}`
-          : '<span class="fast-yes">⚡ 快速模式：畫面直接複製，只重新編碼聲音，幾十秒內完成</span>';
+          : '<span class="fast-yes">⚡ 快速模式：畫面直接複製，幾十秒內完成</span>';
     }
     timeline.replaceChildren();
     ruler.replaceChildren();
@@ -928,14 +928,14 @@ const PRESETS = {
   yt: ["video", "flash", "yt", "promo45"],
 };
 
-/** @type {{id: string, type: string, path?: string, url?: string, startText?: string, endText?: string, status?: string}[]} */
+/** @type {{id: string, type: string, path?: string, url?: string, startText?: string, endText?: string, gainText?: string, status?: string}[]} */
 let blocks = [];
 let blockSeq = 0;
 const newId = () => `b${Date.now().toString(36)}${blockSeq++}`;
 
 function saveBlocks() {
   try {
-    const plain = blocks.map(({ id, type, path, url, startText, endText }) => ({ id, type, path, url, startText, endText }));
+    const plain = blocks.map(({ id, type, path, url, startText, endText, gainText }) => ({ id, type, path, url, startText, endText, gainText }));
     localStorage.setItem(BLOCKS_KEY, JSON.stringify(plain));
   } catch (_) {
     /* 存不了不影響使用 */
@@ -944,6 +944,15 @@ function saveBlocks() {
 
 function promoPath(type) {
   return type === "promo20" ? settings?.promo_20_path : type === "promo45" ? settings?.promo_45_path : "";
+}
+
+/**
+ * 影片積木的音量增益（dB）。沒填過就跟設定頁的預設（剪映 +6）；YT、promo 已經加過，不再加。
+ */
+function blockGain(b) {
+  if (b.type !== "video") return 0;
+  const v = parseFloat(b.gainText);
+  return Number.isFinite(v) ? Math.min(20, Math.max(-20, v)) : (settings?.audio_gain_db ?? 6);
 }
 
 /** 依積木順序組出 timeline / 輸出用的序列。 */
@@ -958,7 +967,7 @@ function blockSequence() {
     if (!store[b.id]) continue;
     const t = BLOCK_TYPES[b.type];
     const label = b.type === "video" && store[b.id] ? baseName(store[b.id].path).replace(/\.[^.]+$/, "") : t.label;
-    items.push({ key: b.id, label, kind: t.kind, join: flashPending ? "flash" : "cut" });
+    items.push({ key: b.id, label, kind: t.kind, join: flashPending ? "flash" : "cut", gain_db: blockGain(b) });
     flashPending = false;
   }
   return items;
@@ -1131,6 +1140,11 @@ function renderBlocks() {
             ? `<label class="field">開始 <input class="time" data-field="startText" placeholder="00:00:00" value="${b.startText || ""}"></label>
                <label class="field">結束 <input class="time" data-field="endText" placeholder="到結尾" value="${b.endText || ""}"></label>`
             : "";
+        const gain =
+          b.type === "video"
+            ? `<label class="field" title="剪映的 +6 就是 +6dB，會自動加限幅器不爆音；0＝不調整。只加在這段，YT、promo 不加">音量 +
+                 <input class="gain" data-field="gainText" type="number" min="-20" max="20" step="0.5" value="${blockGain(b)}"> dB</label>`
+            : "";
         const source =
           b.type === "video"
             ? `<button class="ghost small" data-act="pick">${b.path ? "換檔案…" : "選擇檔案…"}</button>`
@@ -1139,7 +1153,7 @@ function renderBlocks() {
                  <button class="ghost small" data-act="download" ${b.downloading ? "disabled" : ""}>下載</button>`
               : "";
         card.innerHTML = `<div class="block-row">${head}${source}${tools}</div>
-          <div class="block-row">${trim}<span class="block-status vinfo muted">${escapeHtml(b.status || (b.type === "video" ? "尚未選擇" : ""))}</span></div>`;
+          <div class="block-row">${trim}${gain}<span class="block-status vinfo muted">${escapeHtml(b.status || (b.type === "video" ? "尚未選擇" : ""))}</span></div>`;
       }
 
       card.addEventListener("click", async (ev) => {
@@ -1164,6 +1178,7 @@ function renderBlocks() {
         input.addEventListener("input", () => {
           b[input.dataset.field] = input.value;
           saveBlocks();
+          if (input.classList.contains("gain")) single.refresh();
           if (input.classList.contains("time")) {
             clearTimeout(b.trimTimer);
             b.trimTimer = setTimeout(() => applyTrim(b), 500);
@@ -1894,6 +1909,8 @@ window.onSettingsChanged = async () => {
   await refreshPromos();
   await applyAllSegTrims();
   for (const b of blocks) if (b.type === "promo20" || b.type === "promo45") await loadPromoBlock(b);
+  // 沒自己改過音量的影片積木跟著設定頁的預設走
+  renderBlocks();
   panels.forEach((p) => p.refresh());
 };
 

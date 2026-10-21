@@ -28,7 +28,7 @@ pub struct Settings {
     pub promo_20_path: String,
     /// 45 秒版 promo 檔案路徑
     pub promo_45_path: String,
-    /// 整體音量增益（dB），剪映的 +6 = 6.0
+    /// 單集「影片」積木預設的音量增益（dB），剪映的 +6 = 6.0；YT、promo、全集不加
     pub audio_gain_db: f64,
     /// 閃白過場長度（秒）
     pub transition_secs: f64,

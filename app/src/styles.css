@@ -200,6 +200,7 @@ input.invalid { border-color: var(--warn); background: var(--warn-bg); }
 .field { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
 #date { width: 96px; }
 .time { width: 84px; font-variant-numeric: tabular-nums; }
+.gain { width: 56px; font-variant-numeric: tabular-nums; }
 
 .tabs { display: flex; gap: 4px; }
 .tab { background: transparent; color: var(--muted); border-color: transparent; }

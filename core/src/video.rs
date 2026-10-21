@@ -24,6 +24,17 @@ pub struct Clip {
     /// 顯示用名稱（「Promo 45 秒」），說明為什麼不能走快速模式時用。
     #[serde(default)]
     pub label: Option<String>,
+    /// 這段的音量增益（dB），剪映的 +6 就是 6.0；0 表示不調整。
+    /// 只加在需要的素材上（單集正片），YT、promo、全集的素材都已經加過了。
+    #[serde(default)]
+    pub gain_db: f64,
+}
+
+/// 拉高音量後用限幅器壓住峰值，避免原本就大聲的地方爆音。
+/// level=false 關掉 alimiter 的自動音量，不然它會再把整體推到上限；
+/// latency=1 補償限幅器預看造成的延遲，不然每段聲音會晚幾毫秒、尾巴被吃掉一點。
+fn gain_filter(gain_db: f64) -> Option<String> {
+    (gain_db != 0.0).then(|| format!("volume={}dB,alimiter=limit=0.95:level=false:latency=1", secs(gain_db)))
 }
 
 /// 兩段之間的接法。
@@ -143,9 +154,6 @@ pub struct RenderSpec {
     pub fps: String,
     pub encoder: Encoder,
     pub output: String,
-    /// 整體音量增益（dB），剪映的 +6 就是 6.0；0 表示不調整。
-    #[serde(default)]
-    pub gain_db: f64,
 }
 
 /// 每段在成品上的位置。
@@ -230,9 +238,10 @@ pub fn build_render_args(spec: &RenderSpec) -> Result<Vec<String>, String> {
              pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps},format=yuv420p,settb=AVTB[v{i}]"
         ));
         if clip.has_audio {
+            let gain = gain_filter(clip.gain_db).map(|g| format!(",{g}")).unwrap_or_default();
             graph.push(format!(
                 "[{i}:a]asetpts=PTS-STARTPTS,aresample=48000,\
-                 aformat=sample_fmts=fltp:channel_layouts=stereo[a{i}]"
+                 aformat=sample_fmts=fltp:channel_layouts=stereo{gain}[a{i}]"
             ));
         } else {
             graph.push(format!(
@@ -271,16 +280,6 @@ pub fn build_render_args(spec: &RenderSpec) -> Result<Vec<String>, String> {
         }
         v_last = v_out;
         a_last = a_out;
-    }
-
-    // 整體音量：先拉高，再用限幅器壓住峰值，避免原本就大聲的地方爆音。
-    // level=false 關掉 alimiter 的自動音量，不然它會再把整體推到上限。
-    if spec.gain_db != 0.0 {
-        graph.push(format!(
-            "[{a_last}]volume={}dB,alimiter=limit=0.95:level=false[again]",
-            secs(spec.gain_db)
-        ));
-        a_last = "again".to_string();
     }
 
     args.push("-filter_complex".into());
@@ -394,16 +393,27 @@ pub fn concat_list(spec: &RenderSpec) -> String {
 }
 
 /// 快速模式的 ffmpeg 參數，`list_path` 是 [`concat_list`] 寫成的檔案。
+///
+/// 每段都不加音量時聲音也直接複製。有段要加音量時，聲音改從各檔案另外讀進來，
+/// 只對那幾段加，再接起來；每段聲音補齊或截到該檔長度，和 concat demuxer 的畫面對齊。
 pub fn build_copy_args(spec: &RenderSpec, list_path: &str) -> Vec<String> {
     let mut args = strings(&["-hide_banner", "-y", "-f", "concat", "-safe", "0", "-i"]);
     args.push(list_path.to_string());
-    args.extend(strings(&["-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy"]));
-    if spec.gain_db != 0.0 {
-        args.push("-af".into());
-        args.push(format!("volume={}dB,alimiter=limit=0.95:level=false", secs(spec.gain_db)));
-        args.extend(strings(&["-c:a", "aac", "-b:a", "192k"]));
+    if spec.clips.iter().all(|c| c.gain_db == 0.0) {
+        args.extend(strings(&["-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", "-c:a", "copy"]));
     } else {
-        args.extend(strings(&["-c:a", "copy"]));
+        let mut graph = Vec::new();
+        for (i, clip) in spec.clips.iter().enumerate() {
+            args.extend(["-i".into(), clip.path.clone()]);
+            let gain = gain_filter(clip.gain_db).map(|g| format!("{g},")).unwrap_or_default();
+            let d = secs(clip.duration);
+            graph.push(format!("[{}:a:0]{gain}apad=whole_dur={d},atrim=end={d}[a{i}]", i + 1));
+        }
+        let inputs: String = (0..spec.clips.len()).map(|i| format!("[a{i}]")).collect();
+        graph.push(format!("{inputs}concat=n={}:v=0:a=1[aout]", spec.clips.len()));
+        args.push("-filter_complex".into());
+        args.push(graph.join(";"));
+        args.extend(strings(&["-map", "0:v:0", "-map", "[aout]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k"]));
     }
     args.extend(strings(&["-movflags", "+faststart", "-progress", "pipe:1", "-nostats"]));
     args.push(spec.output.clone());
@@ -638,6 +648,7 @@ mod tests {
             join: Join::Flash,
             signature: Some("h264|High|1920x1080|yuv420p|30000/1001|aac|48000|2".into()),
             label: None,
+            gain_db: 0.0,
         }
     }
 
@@ -650,7 +661,6 @@ mod tests {
             fps: "30000/1001".into(),
             encoder: Encoder::X264,
             output: "out.mp4".into(),
-            gain_db: 0.0,
         }
     }
 
@@ -720,14 +730,23 @@ mod tests {
     }
 
     #[test]
-    fn gain_adds_volume_and_limiter() {
-        let mut s = spec(vec![clip("a", 60.0), clip("b", 20.0)]);
-        s.gain_db = 6.0;
+    fn gain_only_applies_to_marked_clips() {
+        // 單集：正片 +6 ⚡ YT ｜ promo45，YT 和 promo 不加
+        let mut main = clip("main.mp4", 60.0);
+        main.gain_db = 6.0;
+        let mut promo = clip("promo45.mp4", 45.0);
+        promo.join = Join::Cut;
+        let s = spec(vec![main, clip("yt.mp4", 20.0), promo]);
         let args = build_render_args(&s).unwrap();
         let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
-        assert!(graph.contains("[ax1]volume=6dB,alimiter=limit=0.95:level=false[again]"));
-        assert!(args.windows(2).any(|w| w == ["-map", "[again]"]));
-        s.gain_db = 0.0;
+        assert!(graph.contains("stereo,volume=6dB,alimiter=limit=0.95:level=false:latency=1[a0]"), "{graph}");
+        assert!(graph.contains("channel_layouts=stereo[a1]"));
+        assert!(graph.contains("channel_layouts=stereo[a2]"));
+        assert_eq!(graph.matches("volume=").count(), 1);
+        assert!(args.windows(2).any(|w| w == ["-map", "[ax2]"]));
+
+        // 全集：都不加就完全沒有音量濾鏡
+        let s = spec(vec![clip("a", 60.0), clip("b", 20.0)]);
         assert!(!build_render_args(&s).unwrap().iter().any(|a| a.contains("volume=")));
     }
 
@@ -842,18 +861,38 @@ mod tests {
     fn copy_args_and_list() {
         let mut promo = clip("C:\\promo\\it's.mp4", 45.0);
         promo.join = Join::Cut;
-        let mut s = spec(vec![clip("C:\\video\\main.mp4", 1800.0), promo]);
-        s.gain_db = 6.0;
+        let s = spec(vec![clip("C:\\video\\main.mp4", 1800.0), promo]);
         assert_eq!(
             concat_list(&s),
             "ffconcat version 1.0\nfile 'C:\\video\\main.mp4'\nfile 'C:\\promo\\it'\\''s.mp4'\n"
         );
+        // 都不加音量（全集）：聲音也直接複製
         let args = build_copy_args(&s, "list.txt");
         assert!(args.windows(2).any(|w| w == ["-c:v", "copy"]));
-        assert!(args.windows(2).any(|w| w == ["-af", "volume=6dB,alimiter=limit=0.95:level=false"]));
+        assert!(args.windows(2).any(|w| w == ["-c:a", "copy"]));
+        assert!(!args.iter().any(|a| a.contains("volume=")));
+        assert_eq!(args.iter().filter(|a| *a == "-i").count(), 1);
         assert_eq!(args.last().unwrap(), "out.mp4");
-        s.gain_db = 0.0;
-        assert!(build_copy_args(&s, "list.txt").windows(2).any(|w| w == ["-c:a", "copy"]));
+    }
+
+    #[test]
+    fn copy_args_gain_only_marked_clips() {
+        let mut main = clip("main.mp4", 1800.0);
+        main.gain_db = 6.0;
+        let mut promo = clip("promo45.mp4", 45.0);
+        promo.join = Join::Cut;
+        let args = build_copy_args(&spec(vec![main, promo]), "list.txt");
+        let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
+        assert_eq!(
+            graph,
+            "[1:a:0]volume=6dB,alimiter=limit=0.95:level=false:latency=1,apad=whole_dur=1800,atrim=end=1800[a0];\
+             [2:a:0]apad=whole_dur=45,atrim=end=45[a1];[a0][a1]concat=n=2:v=0:a=1[aout]"
+        );
+        assert!(args.windows(2).any(|w| w == ["-map", "0:v:0"]));
+        assert!(args.windows(2).any(|w| w == ["-map", "[aout]"]));
+        assert!(args.windows(2).any(|w| w == ["-c:v", "copy"]));
+        assert!(args.windows(2).any(|w| w == ["-c:a", "aac"]));
+        assert_eq!(args.iter().filter(|a| *a == "-i").count(), 3);
     }
 
     #[test]
