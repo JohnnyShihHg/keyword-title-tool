@@ -59,6 +59,16 @@ pub struct Settings {
     pub sync_auto_load: bool,
     /// 修改後自動寫回（txt 已經存在時；第一次要使用者自己按寫入或存成 txt）
     pub sync_auto_write: bool,
+
+    // --- 自動切段 ---
+    /// 側錄資料夾（每 10 分鐘一個檔）
+    pub autocut_watch_dir: String,
+    /// 要遮的靜圖資料夾；空白＝跟側錄同資料夾
+    pub autocut_stills_dir: String,
+    /// 成品資料夾；空白＝沿用 output_dir
+    pub autocut_output_dir: String,
+    /// 偵測到完整一段就自動遮蓋出片
+    pub autocut_auto_render: bool,
 }
 
 impl Default for Settings {
@@ -88,6 +98,10 @@ impl Default for Settings {
             sync_folder_format: "{MMDD}關鍵".to_string(),
             sync_auto_load: true,
             sync_auto_write: true,
+            autocut_watch_dir: String::new(),
+            autocut_stills_dir: String::new(),
+            autocut_output_dir: String::new(),
+            autocut_auto_render: true,
         }
     }
 }
@@ -106,5 +120,9 @@ mod tests {
         assert_eq!(s.program_tag, "【關鍵時刻】");
         assert!(s.label_segments);
         assert!(s.show_header);
+        assert_eq!(s.autocut_watch_dir, "");
+        assert_eq!(s.autocut_stills_dir, "");
+        assert_eq!(s.autocut_output_dir, "");
+        assert!(s.autocut_auto_render);
     }
 }

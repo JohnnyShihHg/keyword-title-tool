@@ -2,6 +2,7 @@
 //!
 //! 全部是純函式，不碰檔案也不碰 UI，方便用範本做逐字比對測試。
 
+pub mod autocut;
 pub mod batch;
 pub mod flash;
 pub mod fullwidth;

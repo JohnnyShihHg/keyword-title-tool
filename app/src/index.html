@@ -11,6 +11,7 @@
     <nav class="tabs" role="tablist">
       <button class="tab active" data-page="script" role="tab">文稿</button>
       <button class="tab" data-page="video" role="tab">影片</button>
+      <button class="tab" data-page="autocut" role="tab">自動切段</button>
     </nav>
     <span class="spacer"></span>
     <label class="field">日期
@@ -281,6 +282,64 @@
     </details>
   </main>
 
+  <main id="page-autocut" class="page hidden autocut-page">
+    <div class="card ac-setup">
+      <div class="ac-row">
+        <strong>自動切段</strong>
+        <span class="muted">側錄每錄完一個 10 分鐘檔就掃描；偵測到完整一段就遮蓋輸出「第N段.mp4」，各段到齊合成「全集.mp4」。</span>
+      </div>
+      <label class="ac-dir">側錄資料夾
+        <input id="acWatchDir" readonly placeholder="尚未指定" />
+        <button type="button" class="ghost small" data-ac-pick="autocut_watch_dir">選擇</button>
+      </label>
+      <label class="ac-dir">靜圖資料夾
+        <input id="acStillsDir" readonly placeholder="空白＝跟側錄同資料夾" />
+        <button type="button" class="ghost small" data-ac-pick="autocut_stills_dir">選擇</button>
+        <button type="button" class="ghost small" data-ac-clear="autocut_stills_dir">清除</button>
+      </label>
+      <label class="ac-dir">成品資料夾
+        <input id="acOutputDir" readonly placeholder="空白＝沿用設定的輸出資料夾" />
+        <button type="button" class="ghost small" data-ac-pick="autocut_output_dir">選擇</button>
+        <button type="button" class="ghost small" data-ac-clear="autocut_output_dir">清除</button>
+      </label>
+      <div class="ac-row">
+        <label class="check"><input id="acAutoRender" type="checkbox" /> 完整一段就自動出片</label>
+        <label class="check"><input id="acMakeAll" type="checkbox" checked /> 各段到齊自動合成全集</label>
+        <span id="acTitlesSource" class="muted"></span>
+      </div>
+      <div class="ac-row">
+        <button type="button" id="acStartBtn">▶ 開始監看</button>
+        <button type="button" id="acStopBtn" class="ghost danger hidden">■ 停止</button>
+        <button type="button" id="acReportBtn" class="ghost">判斷報告</button>
+        <button type="button" id="acOpenBtn" class="ghost">開啟成品資料夾</button>
+        <span id="acMessage" class="muted"></span>
+      </div>
+    </div>
+
+    <div class="ac-grid">
+      <div class="card">
+        <strong>段落</strong>
+        <table class="ac-table">
+          <thead><tr><th>段</th><th>狀態</th><th>側錄位置</th><th>長度</th><th>遮罩</th><th></th></tr></thead>
+          <tbody id="acSegments"></tbody>
+        </table>
+        <div id="acAll" class="muted"></div>
+      </div>
+      <div class="card">
+        <strong>側錄檔</strong>
+        <ul id="acFiles" class="ac-files"></ul>
+      </div>
+      <div class="card">
+        <strong>各階段耗時</strong>
+        <ul id="acStages" class="ac-stages"></ul>
+      </div>
+      <div class="card">
+        <strong>紀錄</strong>
+        <pre id="acLog" class="ac-log"></pre>
+      </div>
+    </div>
+  </main>
+
   <main id="page-settings" class="page hidden">
     <form id="settingsForm" class="settings" autocomplete="off">
       <h2>設定</h2>
@@ -486,5 +545,6 @@
   </div>
   <script src="app.js"></script>
   <script src="video.js"></script>
+  <script src="autocut.js"></script>
 </body>
 </html>

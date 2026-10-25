@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod autocut;
 mod sync;
 mod video;
 
@@ -112,6 +113,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(video::VideoState::default())
+        .manage(autocut::AutocutState::default())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if CLOSING.swap(true, Ordering::SeqCst) {
@@ -153,7 +155,14 @@ fn main() {
             video::output_path,
             video::path_exists,
             video::parse_timecode,
-            video::detect_flash
+            video::detect_flash,
+            autocut::autocut_start,
+            autocut::autocut_stop,
+            autocut::autocut_status,
+            autocut::autocut_render,
+            autocut::autocut_report,
+            autocut::autocut_set_titles,
+            autocut::autocut_reveal
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -19,6 +19,10 @@ zip = { version = "4", default-features = false, features = ["deflate"] }
 base64 = "0.22"
 keyword-title-core = { path = "../../core" }
 
+# 自動切段的 OCR（Windows 內建繁體中文 OCR）
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = ["Media_Ocr", "Graphics_Imaging", "Storage", "Storage_Streams", "Globalization", "Foundation", "Foundation_Collections"] }
+
 [[bin]]
 name = "keyword-title-tool"
 path = "src/main.rs"

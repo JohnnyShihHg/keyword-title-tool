@@ -708,6 +708,11 @@ function readSettingsForm() {
     sync_folder_format: f.sync_folder_format.value.trim() || settings.sync_folder_format,
     sync_auto_load: f.sync_auto_load.checked,
     sync_auto_write: f.sync_auto_write.checked,
+    // 自動切段的欄位在自動切段頁（autocut.js）改，這裡原樣保留
+    autocut_watch_dir: settings.autocut_watch_dir,
+    autocut_stills_dir: settings.autocut_stills_dir,
+    autocut_output_dir: settings.autocut_output_dir,
+    autocut_auto_render: settings.autocut_auto_render,
   };
 }
 

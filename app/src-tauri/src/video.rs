@@ -59,12 +59,12 @@ fn find_tool(app: &AppHandle, tool: &str) -> Option<PathBuf> {
     })
 }
 
-fn require_tool(app: &AppHandle, tool: &str) -> Result<PathBuf, String> {
+pub(crate) fn require_tool(app: &AppHandle, tool: &str) -> Result<PathBuf, String> {
     find_tool(app, tool).ok_or_else(|| format!("找不到 {tool}，請到「設定 → 影片工具」按「下載工具」"))
 }
 
 /// 開子程序。Windows 上要加 CREATE_NO_WINDOW，否則每次呼叫 ffmpeg 都會閃一個黑色命令列視窗。
-fn command(program: &Path) -> Command {
+pub(crate) fn command(program: &Path) -> Command {
     #[allow(unused_mut)]
     let mut cmd = Command::new(program);
     #[cfg(windows)]

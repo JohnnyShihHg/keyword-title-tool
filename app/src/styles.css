@@ -581,3 +581,21 @@ input { padding: 6px 10px; }
 .trim-steps, .trim-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .timeline .flash, .timeline .cut { cursor: pointer; }
 .timeline .flash:hover, .timeline .cut:hover { filter: drop-shadow(0 0 4px var(--accent)); }
+
+/* --- 自動切段 --- */
+.autocut-page { overflow-y: auto; padding: 18px 20px; display: flex; flex-direction: column; gap: 16px; }
+.ac-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.ac-dir { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+.ac-dir input { flex: 1; min-width: 0; }
+.ac-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 16px; }
+.ac-table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+.ac-table th, .ac-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.ac-table th { color: var(--muted); font-weight: normal; font-size: 12px; }
+.ac-state { display: inline-block; padding: 0 8px; border-radius: 999px; border: 1px solid currentColor; font-size: 12px; white-space: nowrap; color: var(--muted); }
+.ac-state.ok { color: var(--accent); }
+.ac-state.bad { color: #c0392b; }
+.ac-files, .ac-stages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 13px; max-height: 240px; overflow-y: auto; }
+.ac-files li { display: flex; gap: 8px; }
+.ac-files .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ac-log { margin: 0; max-height: 240px; overflow-y: auto; font-size: 12px; white-space: pre-wrap; }
+@media (max-width: 900px) { .ac-grid { grid-template-columns: minmax(0, 1fr); } }

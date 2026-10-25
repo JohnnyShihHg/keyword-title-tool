@@ -17,6 +17,7 @@
   - 輸出 1920×1080、29.97fps、H.264 + AAC，自動偵測 NVIDIA／Intel／AMD 硬體編碼
   - 整體音量 +6dB（＝剪映的 +6）並加限幅器避免爆音，可在設定調整
   - ffmpeg、yt-dlp 第一次使用時從設定頁下載到程式資料夾
+- **自動切段**：監看側錄資料夾，每錄完一個 10 分鐘檔就掃描；用標題條判斷節目／廣告、OCR 對文稿分段、依靜圖遮蓋翻攝畫面，完整一段就輸出 `第N段.mp4`，各段到齊合成 `全集.mp4`（OCR 需要 Windows 繁體中文 OCR）
 
 ## 安裝
 
@@ -55,6 +56,7 @@ cargo run -p keyword-title-tool    # 開發模式執行
 | 路徑 | 內容 |
 |---|---|
 | `core/` | 純函式核心：解析、全形轉換、時間點、排版、設定 |
+| `core/src/autocut/` | 自動切段的判斷規則（從 mask-detector 照搬，常數改動前先用三天側錄重跑比對） |
 | `core/tests/fixtures/20261014/` | 範本 `expected.txt` 與反推的輸入，golden test 逐字比對 |
 | `app/src-tauri/` | Tauri 外殼：IPC 指令、設定檔、存檔、自動更新；`video.rs` 預留 ffmpeg |
 | `app/src/` | 前端（不需建置，原樣打包） |
