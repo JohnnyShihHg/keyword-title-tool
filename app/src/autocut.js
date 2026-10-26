@@ -75,6 +75,8 @@ $("acStartBtn").addEventListener("click", async () => {
         titles,
         auto_render: settings.autocut_auto_render !== false,
         make_all: $("acMakeAll").checked,
+        ai_key: settings.autocut_ai_key || null,
+        ai_model: settings.autocut_ai_model || null,
       },
     });
     $("acLog").textContent = "";

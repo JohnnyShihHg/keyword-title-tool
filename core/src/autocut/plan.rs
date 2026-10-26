@@ -67,6 +67,9 @@ pub struct MaskSeg {
     pub still: usize,
     pub by_label: bool,
     pub iou: f32,
+    /// 規則沒把握、交給 AI 判斷後補上的
+    #[serde(default)]
+    pub ai: bool,
 }
 
 pub fn is_cut(frames: &[FrameInfo], i: usize) -> bool {
@@ -285,7 +288,7 @@ pub fn plan_masks(frames: &[FrameInfo], set: &StillSet, range: (usize, usize)) -
                     continue;
                 }
             }
-            segs.push(MaskSeg { start: i, end: j, layout, still, by_label, iou: max_iou });
+            segs.push(MaskSeg { start: i, end: j, layout, still, by_label, iou: max_iou, ai: false });
             i = j;
         }
     }
@@ -309,6 +312,137 @@ pub fn segment_masks(frames: &[FrameInfo], set: &StillSet, seg: &Segment) -> Vec
     seg.pieces.iter().flat_map(|&p| plan_masks(frames, set, p)).collect()
 }
 
+// ───────────────────────── 交給 AI 判斷的鏡頭 ─────────────────────────
+
+/// 規則沒把握的一段畫面：取幾格右上角來源字給 AI 看，問「跟這些靜圖的來源字是不是同一個」
+#[derive(Clone, Debug, PartialEq)]
+pub struct AiCandidate {
+    pub start: usize,
+    pub end: usize,
+    pub layout: Layout,
+    /// 參考靜圖（同一個來源字的靜圖）
+    pub stills: Vec<usize>,
+    /// 給 AI 看的格（3 格，分散在這段裡）
+    pub samples: Vec<usize>,
+    pub kind: AiKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AiKind {
+    /// 兩段同來源遮罩中間沒遮到的空檔（例：10/20 第 2 段 8:42–9:00，遠景鏡頭跟特寫靜圖不像、來源字太小比不到）
+    Gap,
+    /// 來源字比對分數在灰色地帶（0.15～0.62）、或畫面有幾分像（0.5～0.8）但沒達到門檻
+    Weak,
+}
+
+/// 空檔最長幾秒還問 AI（太長多半中間換了別的內容）
+pub const AI_GAP_MAX_SECS: f64 = 60.0;
+/// 來源字灰色地帶的下限、畫面相似灰色地帶的下限（10/20 實測：0.5 會撈到大量其實是別的來源的鏡頭）
+pub const AI_WEAK_IOU: f32 = 0.15;
+pub const AI_WEAK_SIM: f32 = 0.65;
+/// 灰色地帶至少要持續幾秒才問
+pub const AI_WEAK_MIN_SECS: f64 = 2.0;
+/// 灰色地帶每段最多問幾處（空檔一定問，不受限）
+pub const AI_MAX_WEAK_PER_SEGMENT: usize = 12;
+
+fn samples(s: usize, e: usize) -> Vec<usize> {
+    [1, 2, 3].iter().map(|k| s + (e - s) * k / 4).collect()
+}
+
+/// 找出這一段裡要問 AI 的地方。`masks` 是 `segment_masks` 的結果（依時間排序）。
+pub fn ai_candidates(frames: &[FrameInfo], set: &StillSet, seg: &Segment, masks: &[MaskSeg]) -> Vec<AiCandidate> {
+    let fps = FPS as usize;
+    let mut out = Vec::new();
+    let template_of = |k: usize| set.stills[k].template;
+    let in_piece = |a: usize, b: usize| seg.pieces.iter().any(|&(s, e)| a >= s && b <= e);
+    // ① 兩段同來源遮罩之間的空檔
+    for w in masks.windows(2) {
+        let (m1, m2) = (&w[0], &w[1]);
+        let same_source = m1.still == m2.still || (template_of(m1.still).is_some() && template_of(m1.still) == template_of(m2.still));
+        let gap = m2.start.saturating_sub(m1.end);
+        if !same_source || m1.layout != m2.layout || gap == 0 || gap as f64 > AI_GAP_MAX_SECS * FPS || !in_piece(m1.end, m2.start) {
+            continue;
+        }
+        let g = &frames[m1.end..m2.start];
+        let same_layout = g.iter().filter(|f| f.layout == m1.layout).count() * 10 >= g.len() * 9;
+        let program = g.iter().filter(|f| f.program).count() * 10 >= g.len() * 9;
+        if same_layout && program {
+            let mut stills = vec![m1.still];
+            if m2.still != m1.still {
+                stills.push(m2.still);
+            }
+            out.push(AiCandidate { start: m1.end, end: m2.start, layout: m1.layout, stills, samples: samples(m1.end, m2.start), kind: AiKind::Gap });
+        }
+    }
+    // ② 灰色地帶：沒被遮、但來源字或畫面有幾分像
+    let gaps = out.len();
+    let covered = |i: usize| masks.iter().any(|m| i >= m.start && i < m.end);
+    for &(s, e) in &seg.pieces {
+        let weak: Vec<bool> = (s..e)
+            .map(|i| {
+                let f = &frames[i];
+                let iou_weak = f.tmpl >= 0 && f.iou >= AI_WEAK_IOU;
+                let sim_weak = f.sims.iter().any(|&v| v >= AI_WEAK_SIM);
+                f.program && !covered(i) && (iou_weak || sim_weak)
+            })
+            .collect();
+        for (a, b) in runs(&weak, fps / 2, (AI_WEAK_MIN_SECS * FPS) as usize) {
+            let (a, b) = (a + s, b + s);
+            if out.iter().any(|c: &AiCandidate| a < c.end && b > c.start) {
+                continue;
+            }
+            let layout = if frames[a..b].iter().filter(|f| f.layout == Layout::Dual).count() * 2 > b - a { Layout::Dual } else { Layout::Full };
+            // 參考靜圖：最常出現的點陣樣板底下的靜圖＋畫面最像的那張（同版型）
+            let mut votes: BTreeMap<i16, usize> = BTreeMap::new();
+            let mut score = vec![0f32; set.stills.len()];
+            for f in &frames[a..b] {
+                if f.tmpl >= 0 && f.iou >= AI_WEAK_IOU {
+                    *votes.entry(f.tmpl).or_default() += 1;
+                }
+                for (k, v) in f.sims.iter().enumerate() {
+                    score[k] += v;
+                }
+            }
+            let mut stills: Vec<usize> = votes.iter().max_by_key(|(_, c)| **c).map(|(t, _)| set.templates[*t as usize].stills.clone()).unwrap_or_default();
+            if let Some(best) = (0..set.stills.len()).filter(|&k| set.stills[k].layout == layout).max_by(|x, y| score[*x].total_cmp(&score[*y])) {
+                if score[best] / ((b - a) as f32) >= AI_WEAK_SIM && !stills.contains(&best) {
+                    stills.push(best);
+                }
+            }
+            stills.retain(|&k| set.stills[k].layout == layout || set.stills.iter().all(|s| s.layout != layout));
+            stills.truncate(3);
+            if !stills.is_empty() {
+                out.push(AiCandidate { start: a, end: b, layout, stills, samples: samples(a, b), kind: AiKind::Weak });
+            }
+        }
+    }
+    // 空檔全部問；灰色地帶只問前幾處
+    out.truncate(gaps + AI_MAX_WEAK_PER_SEGMENT);
+    out.sort_by_key(|c| c.start);
+    out
+}
+
+/// AI 說「同一個來源」：空檔 → 把前後兩段遮罩接成一段；灰色地帶 → 補一段遮罩（用參考靜圖裡同版型、畫面最像的那張）
+pub fn apply_ai(frames: &[FrameInfo], masks: &mut Vec<MaskSeg>, c: &AiCandidate) {
+    match c.kind {
+        AiKind::Gap => {
+            if let Some(k) = masks.iter().position(|m| m.end == c.start) {
+                if k + 1 < masks.len() && masks[k + 1].start == c.end {
+                    let next = masks.remove(k + 1);
+                    masks[k].end = next.end;
+                    masks[k].ai = true;
+                }
+            }
+        }
+        AiKind::Weak => {
+            let score = |k: usize| frames[c.start..c.end].iter().map(|f| f.sims.get(k).copied().unwrap_or(0.0)).sum::<f32>();
+            let still = *c.stills.iter().max_by(|a, b| score(**a).total_cmp(&score(**b))).unwrap();
+            masks.push(MaskSeg { start: c.start, end: c.end, layout: c.layout, still, by_label: true, iou: 0.0, ai: true });
+            masks.sort_by_key(|m| m.start);
+        }
+    }
+}
+
 // ───────────────────────── 報告 ─────────────────────────
 
 /// 「== 段落 ==」那一節
@@ -320,15 +454,17 @@ pub fn report_segments(segs: &[(Segment, Vec<MaskSeg>)], set: &StillSet) -> Stri
             r.push_str(&format!("  側錄 {} – {}\n", tc(secs(*s)), tc(secs(*e))));
         }
         for m in masks {
-            r.push_str(&format!(
-                "    遮 {} – {} ｜ {} ｜ {}{} ｜ {}\n",
-                tc(secs(m.start)),
-                tc(secs(m.end)),
-                m.layout.zh(),
-                if m.by_label { "來源字" } else { "畫面相似" },
-                if m.by_label { format!("(IoU {:.2})", m.iou) } else { String::new() },
-                set.stills[m.still].name
-            ));
+            let why = if m.ai && m.iou == 0.0 && m.by_label {
+                "AI 判斷（來源字相同）".to_string()
+            } else {
+                format!(
+                    "{}{}{}",
+                    if m.by_label { "來源字" } else { "畫面相似" },
+                    if m.by_label { format!("(IoU {:.2})", m.iou) } else { String::new() },
+                    if m.ai { "＋AI 接上空檔" } else { "" }
+                )
+            };
+            r.push_str(&format!("    遮 {} – {} ｜ {} ｜ {} ｜ {}\n", tc(secs(m.start)), tc(secs(m.end)), m.layout.zh(), why, set.stills[m.still].name));
         }
     }
     r
@@ -558,5 +694,84 @@ mod tests {
         assert!((m[0].iou - 0.8).abs() < 1e-6);
         // 範圍外的不遮
         assert!(plan_masks(&frames, &set, (0, 10 * fps)).is_empty());
+    }
+
+    /// 10/20 第 2 段 8:42–9:00：雙框特寫（像靜圖）有遮、中間遠景（不像、來源字比不到）沒遮，
+    /// 前後是同一張靜圖 → 空檔交給 AI；AI 說同一個來源就接成一段
+    #[test]
+    fn gap_between_same_source_masks_goes_to_ai() {
+        let set = one_still_set();
+        let fps = FPS as usize;
+        let n = 120 * fps;
+        let frames: Vec<FrameInfo> = (0..n).map(|_| FrameInfo { program: true, layout: Layout::Dual, luma: 100.0, cut_diff: 0.0, tmpl: -1, iou: 0.0, sims: vec![0.2] }).collect();
+        let seg = Segment { n: 2, pieces: vec![(0, n)], start_ok: true, end_ok: true };
+        let m = |a: usize, b: usize| MaskSeg { start: a * fps, end: b * fps, layout: Layout::Dual, still: 0, by_label: false, iou: 0.0, ai: false };
+        let mut masks = vec![m(20, 25), m(43, 50)];
+        let c = ai_candidates(&frames, &set, &seg, &masks);
+        assert_eq!(c.len(), 1, "{c:?}");
+        assert_eq!((c[0].start, c[0].end, c[0].kind), (25 * fps, 43 * fps, AiKind::Gap));
+        assert_eq!(c[0].stills, vec![0]);
+        assert_eq!(c[0].samples.len(), 3);
+        assert!(c[0].samples.iter().all(|&s| s > 25 * fps && s < 43 * fps));
+        apply_ai(&frames, &mut masks, &c[0]);
+        assert_eq!(masks.len(), 1);
+        assert_eq!((masks[0].start, masks[0].end), (20 * fps, 50 * fps));
+        assert!(masks[0].ai);
+        // 空檔超過 60 秒、或版型不同就不問
+        let far = vec![m(0, 5), m(70, 75)];
+        assert!(ai_candidates(&frames, &set, &seg, &far).is_empty());
+    }
+
+    #[test]
+    fn weak_scores_go_to_ai_and_become_a_mask() {
+        let set = one_still_set();
+        let fps = FPS as usize;
+        let n = 60 * fps;
+        let mut frames: Vec<FrameInfo> = (0..n).map(|_| FrameInfo { program: true, layout: Layout::Full, luma: 100.0, cut_diff: 0.0, tmpl: -1, iou: 0.0, sims: vec![0.1] }).collect();
+        // 10～14 秒：來源字分數 0.3（灰色地帶）
+        for f in &mut frames[10 * fps..14 * fps] {
+            f.tmpl = 0;
+            f.iou = 0.3;
+        }
+        let seg = Segment { n: 1, pieces: vec![(0, n)], start_ok: true, end_ok: true };
+        let mut masks = Vec::new();
+        let c = ai_candidates(&frames, &set, &seg, &masks);
+        assert_eq!(c.len(), 1, "{c:?}");
+        assert_eq!((c[0].start, c[0].end, c[0].kind), (10 * fps, 14 * fps, AiKind::Weak));
+        apply_ai(&frames, &mut masks, &c[0]);
+        assert_eq!(masks.len(), 1);
+        assert!(masks[0].ai && masks[0].by_label);
+        // 分數很低（< 0.15）不問
+        for f in &mut frames[10 * fps..14 * fps] {
+            f.iou = 0.1;
+        }
+        assert!(ai_candidates(&frames, &set, &seg, &[]).is_empty());
+        // 灰色地帶太短（< 2 秒）不問
+        for f in &mut frames[10 * fps..11 * fps] {
+            f.iou = 0.3;
+        }
+        assert!(ai_candidates(&frames, &set, &seg, &[]).is_empty());
+    }
+
+    /// 灰色地帶很多時，空檔還是一定會問（不會被次數上限擠掉）
+    #[test]
+    fn gaps_are_never_dropped_by_the_weak_limit() {
+        let set = one_still_set();
+        let fps = FPS as usize;
+        let n = 300 * fps;
+        let mut frames: Vec<FrameInfo> = (0..n).map(|_| FrameInfo { program: true, layout: Layout::Dual, luma: 100.0, cut_diff: 0.0, tmpl: -1, iou: 0.0, sims: vec![0.1] }).collect();
+        // 前 200 秒每 6 秒有一段 3 秒的灰色地帶（共 33 處，超過上限）
+        for k in 0..33 {
+            for f in &mut frames[k * 6 * fps..(k * 6 + 3) * fps] {
+                f.tmpl = 0;
+                f.iou = 0.3;
+            }
+        }
+        let seg = Segment { n: 2, pieces: vec![(0, n)], start_ok: true, end_ok: true };
+        let m = |a: usize, b: usize| MaskSeg { start: a * fps, end: b * fps, layout: Layout::Dual, still: 0, by_label: false, iou: 0.0, ai: false };
+        let masks = vec![m(250, 255), m(270, 280)];
+        let c = ai_candidates(&frames, &set, &seg, &masks);
+        assert_eq!(c.iter().filter(|c| c.kind == AiKind::Weak).count(), AI_MAX_WEAK_PER_SEGMENT);
+        assert!(c.iter().any(|c| c.kind == AiKind::Gap && c.start == 255 * fps), "{c:?}");
     }
 }

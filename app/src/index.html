@@ -446,6 +446,17 @@
       </fieldset>
 
       <fieldset>
+        <legend>自動切段：AI 補判</legend>
+        <label>Gemini API 金鑰
+          <input name="autocut_ai_key" type="password" autocomplete="off" spellcheck="false" placeholder="空白＝不用 AI" />
+        </label>
+        <label>模型
+          <input name="autocut_ai_model" spellcheck="false" placeholder="gemini-3.5-flash-lite" />
+        </label>
+        <p class="muted">規則沒把握的鏡頭（例如兩段同來源遮罩中間沒遮到、右上角來源字太小比不準），截右上角來源字給 Gemini 讀，跟靜圖的來源字相同就遮。判斷結果會存起來，同一個鏡頭不會重複問。</p>
+      </fieldset>
+
+      <fieldset>
         <legend>畫面配色</legend>
         <div class="theme-list" id="themeList"></div>
       </fieldset>

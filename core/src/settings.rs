@@ -69,6 +69,10 @@ pub struct Settings {
     pub autocut_output_dir: String,
     /// 偵測到完整一段就自動遮蓋出片
     pub autocut_auto_render: bool,
+    /// AI 補判（規則沒把握的鏡頭交給 Gemini 看右上角來源字）的 API 金鑰；空白＝不用 AI
+    pub autocut_ai_key: String,
+    /// AI 補判用的模型
+    pub autocut_ai_model: String,
 }
 
 impl Default for Settings {
@@ -102,6 +106,8 @@ impl Default for Settings {
             autocut_stills_dir: String::new(),
             autocut_output_dir: String::new(),
             autocut_auto_render: true,
+            autocut_ai_key: String::new(),
+            autocut_ai_model: "gemini-3.5-flash-lite".to_string(),
         }
     }
 }
@@ -124,5 +130,7 @@ mod tests {
         assert_eq!(s.autocut_stills_dir, "");
         assert_eq!(s.autocut_output_dir, "");
         assert!(s.autocut_auto_render);
+        assert_eq!(s.autocut_ai_key, "", "舊設定檔沒有金鑰＝不用 AI");
+        assert_eq!(s.autocut_ai_model, "gemini-3.5-flash-lite");
     }
 }

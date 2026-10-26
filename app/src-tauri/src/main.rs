@@ -99,16 +99,57 @@ fn finish_close(app: tauri::AppHandle) {
     app.exit(0);
 }
 
+/// 隱藏的開發用參數：`keyword-title-tool.exe --autocut-batch <設定.json>`
+/// 不開畫面，照設定（同 autocut_start 的 AutocutConfig）把資料夾裡的側錄整批跑完、出完片就結束。
+/// 紀錄寫在 `{成品資料夾}\.autocut\batch.log`，結果在 `{成品資料夾}\report.txt`。
+fn batch_config() -> Option<Result<autocut::AutocutConfig, String>> {
+    let args: Vec<String> = std::env::args().collect();
+    let i = args.iter().position(|a| a == "--autocut-batch")?;
+    Some((|| {
+        let path = args.get(i + 1).ok_or("--autocut-batch 後面要接設定檔路徑")?;
+        let text = std::fs::read_to_string(path).map_err(|e| format!("讀不到設定檔 {path}：{e}"))?;
+        let mut cfg: autocut::AutocutConfig = serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| format!("設定檔格式錯誤：{e}"))?;
+        cfg.batch = true;
+        Ok(cfg)
+    })())
+}
+
 fn main() {
-    tauri::Builder::default()
+    let batch = match batch_config() {
+        Some(Ok(cfg)) => Some(cfg),
+        Some(Err(e)) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+        None => None,
+    };
+    let mut builder = tauri::Builder::default();
+    // 整批模式不註冊單一執行個體：工具開著時也能另外跑一個整批
+    if batch.is_none() {
         // 必須第一個註冊：再次開啟程式時不開第二個，而是把已開的視窗叫到最前面
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
             }
-        }))
+        }));
+    }
+    builder
+        .setup(move |app| {
+            if let Some(cfg) = batch.clone() {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+                let handle = app.handle().clone();
+                let state = app.state::<autocut::AutocutState>();
+                if let Err(e) = autocut::start(handle, &state, cfg) {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+            }
+            Ok(())
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
