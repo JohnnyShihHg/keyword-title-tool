@@ -713,6 +713,8 @@ function readSettingsForm() {
     autocut_stills_dir: settings.autocut_stills_dir,
     autocut_output_dir: settings.autocut_output_dir,
     autocut_auto_render: settings.autocut_auto_render,
+    autocut_ai_key: f.autocut_ai_key.value.trim(),
+    autocut_ai_model: f.autocut_ai_model.value.trim() || settings.autocut_ai_model,
   };
 }
 

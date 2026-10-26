@@ -67,6 +67,17 @@ pub struct AutocutConfig {
     /// 開發用：人工切點（gt_segments.txt），報告會列出差幾格
     #[serde(default)]
     pub gt: Option<String>,
+    /// 整批模式（隱藏命令列參數 `--autocut-batch` 用）：資料夾裡的檔都當成已錄完，
+    /// 全部掃完、出完片就結束，不等新檔
+    #[serde(default)]
+    pub batch: bool,
+    /// AI 補判（Gemini）：金鑰（畫面上的設定）或金鑰檔（整批模式用）；都沒有＝不用 AI
+    #[serde(default)]
+    pub ai_key: Option<String>,
+    #[serde(default)]
+    pub ai_key_file: Option<String>,
+    #[serde(default)]
+    pub ai_model: Option<String>,
 }
 
 #[derive(Clone, Serialize, Default)]
@@ -178,6 +189,8 @@ struct Shared {
     render_child: Mutex<Option<Child>>,
     jobs: Mutex<Option<Sender<RenderJob>>>,
     config: Mutex<Option<AutocutConfig>>,
+    /// 整批模式：紀錄也寫進這個檔（沒有畫面可看）
+    log_file: Mutex<Option<PathBuf>>,
 }
 
 #[derive(Default)]
@@ -244,7 +257,27 @@ impl Shared {
 
     fn log(&self, app: &AppHandle, line: impl Into<String>) {
         let line = line.into();
+        if let Some(p) = self.log_file.lock().unwrap().as_ref() {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+                let t = now_ms() / 1000 % 86_400;
+                let _ = writeln!(f, "[{:02}:{:02}:{:02} UTC] {line}", t / 3600, t / 60 % 60, t % 60);
+            }
+        }
         let _ = app.emit("autocut-log", line);
+    }
+
+    /// report.txt＝目前的判斷報告＋各階段耗時
+    fn write_report_file(&self, output_dir: &str) {
+        let mut r = self.report.lock().unwrap().clone();
+        let stages = self.stages.lock().unwrap();
+        r.push_str("\n== 各階段耗時 ==\n");
+        let all: f64 = stages.iter().map(|s| s.secs).sum();
+        for s in stages.iter() {
+            r.push_str(&format!("  {}：{:.1} 秒\n", s.name, s.secs));
+        }
+        r.push_str(&format!("  合計：{all:.1} 秒（約 {:.1} 分鐘）\n", all / 60.0));
+        let _ = std::fs::write(Path::new(output_dir).join("report.txt"), r);
     }
 
     fn stopped(&self) -> bool {
@@ -268,6 +301,11 @@ impl Shared {
 
 #[tauri::command]
 pub fn autocut_start(app: AppHandle, state: State<'_, AutocutState>, config: AutocutConfig) -> Result<(), String> {
+    start(app, &state, config)
+}
+
+/// 開始監看（畫面按「開始監看」或整批模式）。整批模式跑完會寫好報告並結束程式。
+pub fn start(app: AppHandle, state: &AutocutState, config: AutocutConfig) -> Result<(), String> {
     let mut slot = state.shared.lock().unwrap();
     if slot.as_ref().is_some_and(|s| s.running.load(Ordering::SeqCst)) {
         return Err("已經在監看中".into());
@@ -287,6 +325,11 @@ pub fn autocut_start(app: AppHandle, state: State<'_, AutocutState>, config: Aut
         *shared.titles_text.lock().unwrap() = t.clone();
     }
     *shared.config.lock().unwrap() = Some(config.clone());
+    if config.batch {
+        let p = Path::new(&config.output_dir).join(".autocut").join("batch.log");
+        let _ = std::fs::remove_file(&p);
+        *shared.log_file.lock().unwrap() = Some(p);
+    }
     let (tx, rx) = mpsc::channel();
     *shared.jobs.lock().unwrap() = Some(tx);
     *slot = Some(shared.clone());
@@ -295,6 +338,7 @@ pub fn autocut_start(app: AppHandle, state: State<'_, AutocutState>, config: Aut
     let (app2, shared2, ffmpeg2) = (app.clone(), shared.clone(), ffmpeg.clone());
     let cfg2 = config.clone();
     let render = std::thread::spawn(move || render_loop(&app2, &shared2, &ffmpeg2, &ffprobe, &cfg2, rx));
+    let (batch, output_dir) = (config.batch, config.output_dir.clone());
     std::thread::spawn(move || {
         let r = Watcher::new(app.clone(), shared.clone(), config, ffmpeg).and_then(|mut w| w.run());
         if let Err(e) = r {
@@ -311,6 +355,12 @@ pub fn autocut_start(app: AppHandle, state: State<'_, AutocutState>, config: Aut
         }
         shared.running.store(false, Ordering::SeqCst);
         shared.publish(&app);
+        if batch {
+            // 出片、合成全集的耗時也要進報告
+            shared.write_report_file(&output_dir);
+            shared.log(&app, "整批完成，結束程式");
+            app.exit(0);
+        }
     });
     Ok(())
 }
@@ -407,13 +457,25 @@ struct Watcher {
     /// 規劃用的資料有沒有變（新掃好的檔、靜圖、文稿）
     dirty: bool,
     last_titles: String,
+    /// AI 補判（沒設金鑰＝None）與判斷過的結果（存在 .autocut\ai.tsv，同一個地方不重複問）
+    ai: Option<ai::Gemini>,
+    ai_cache: HashMap<String, (bool, String)>,
 }
 
 impl Watcher {
     fn new(app: AppHandle, shared: Arc<Shared>, cfg: AutocutConfig, ffmpeg: PathBuf) -> Result<Watcher, String> {
         let logo = image::load_from_memory(include_bytes!("../assets/bumper_logo.png")).map_err(|e| format!("讀不到 Logo 樣板：{e}"))?;
         let work = Path::new(&cfg.output_dir).join(".autocut");
+        let key = match (&cfg.ai_key, &cfg.ai_key_file) {
+            (Some(k), _) if !k.trim().is_empty() => Some(k.trim().to_string()),
+            (_, Some(f)) => Some(std::fs::read_to_string(f).map_err(|e| format!("讀不到 AI 金鑰檔：{e}"))?.trim().to_string()).filter(|k| !k.is_empty()),
+            _ => None,
+        };
+        let model = cfg.ai_model.clone().filter(|m| !m.trim().is_empty()).unwrap_or_else(|| "gemini-3.5-flash-lite".into());
+        let ai_cache = ai::load_cache(&work.join("ai.tsv"));
         Ok(Watcher {
+            ai: key.map(|k| ai::Gemini::new(k, model)),
+            ai_cache,
             app,
             shared,
             cfg,
@@ -439,12 +501,24 @@ impl Watcher {
 
     fn run(&mut self) -> Result<(), String> {
         self.log(format!("開始監看 {}", self.cfg.watch_dir));
+        match &self.ai {
+            Some(g) => self.log(format!("AI 補判：開啟（{}，已判斷過 {} 處）", g.model, self.ai_cache.len())),
+            None => self.log("AI 補判：關閉（沒有設定金鑰）"),
+        }
         while !self.shared.stopped() {
             // 停止時砍掉 ffmpeg 造成的錯誤不用報
-            if let Err(e) = self.poll().or_else(|e| if self.shared.stopped() { Ok(()) } else { Err(e) }) {
-                *self.shared.message.lock().unwrap() = e.clone();
-                self.log(format!("★ {e}"));
-                self.shared.publish(&self.app);
+            match self.poll().or_else(|e| if self.shared.stopped() { Ok(false) } else { Err(e) }) {
+                // 整批模式：資料夾裡的檔都處理過就結束，出片佇列由呼叫端等它送完
+                Ok(all_done) if self.cfg.batch && all_done => break,
+                Ok(_) => {}
+                Err(e) => {
+                    *self.shared.message.lock().unwrap() = e.clone();
+                    self.log(format!("★ {e}"));
+                    self.shared.publish(&self.app);
+                    if self.cfg.batch {
+                        break;
+                    }
+                }
             }
             // 每秒看一次要不要停
             let t = Instant::now();
@@ -463,7 +537,8 @@ impl Watcher {
         Ok(())
     }
 
-    fn poll(&mut self) -> Result<(), String> {
+    /// 掃描資料夾一輪。回傳：資料夾裡的檔是不是都處理過了
+    fn poll(&mut self) -> Result<bool, String> {
         self.load_stills()?;
         self.load_titles()?;
         let files = self.list_files()?;
@@ -472,9 +547,9 @@ impl Watcher {
         let mut ready = true;
         for (k, (name, path, size)) in files.iter().enumerate() {
             if self.shared.stopped() {
-                return Ok(());
+                return Ok(false);
             }
-            let finished = k + 1 < files.len() || self.stable(name, *size);
+            let finished = k + 1 < files.len() || self.cfg.batch || self.stable(name, *size);
             if !ready || !finished {
                 ready = false;
                 statuses.push(FileStatus { name: name.clone(), state: if finished { "waiting" } else { "recording" }, frames: 0 });
@@ -516,12 +591,14 @@ impl Watcher {
             self.scanned.truncate(done);
             self.dirty = true;
         }
+        // 都處理過（失敗的也算，整批模式不會卡住）
+        let all_done = statuses.iter().all(|s| s.state == "done" || s.state == "error");
         *self.shared.files.lock().unwrap() = statuses;
         if self.dirty {
             self.replan();
         }
         self.shared.publish(&self.app);
-        Ok(())
+        Ok(all_done)
     }
 
     /// 最後一個檔：大小連續 60 秒不變才算錄完
@@ -769,13 +846,44 @@ impl Watcher {
                 None => log.push_str(&format!("  第 {} 段開頭：找不到 Logo 轉場，維持 {}\n", seg.n, tc(secs(s)))),
             }
         }
-        let planned: Vec<(Segment, Vec<MaskSeg>)> = segs
+        let mut planned: Vec<(Segment, Vec<MaskSeg>)> = segs
             .into_iter()
             .map(|s| {
                 let m = if s.complete() { plan::segment_masks(&frames, &self.stills, &s) } else { Vec::new() };
                 (s, m)
             })
             .collect();
+        // AI 補判：規則沒把握的地方截右上角來源字給 Gemini 看（判斷過的存起來，不重複問）
+        if self.ai.is_some() {
+            let mut asked = 0usize;
+            let t_ai = (now_ms(), Instant::now());
+            for (seg, masks) in planned.iter_mut().filter(|(s, _)| s.complete()) {
+                for c in plan::ai_candidates(&frames, &self.stills, seg, masks) {
+                    let (same, note, fresh) = match self.ai_decide(&files, &c) {
+                        Ok(x) => x,
+                        Err(e) => {
+                            log.push_str(&format!("  ★ AI 補判失敗（第 {} 段 側錄 {}）：{e}\n", seg.n, tc(secs(c.start))));
+                            continue;
+                        }
+                    };
+                    asked += fresh as usize;
+                    let kind = if c.kind == plan::AiKind::Gap { "空檔" } else { "灰色地帶" };
+                    log.push_str(&format!(
+                        "  AI：第 {} 段 側錄 {} – {}（{kind}）→ {}｜{note}\n",
+                        seg.n,
+                        tc(secs(c.start)),
+                        tc(secs(c.end)),
+                        if same { "同一個來源，遮" } else { "不同，不遮" }
+                    ));
+                    if same {
+                        plan::apply_ai(&frames, masks, &c);
+                    }
+                }
+            }
+            if asked > 0 {
+                self.shared.stages.lock().unwrap().push(StageInfo { name: format!("AI 補判（問了 {asked} 處）"), started: t_ai.0, secs: t_ai.1.elapsed().as_secs_f64() });
+            }
+        }
 
         // 段落狀態：文稿有的每一段都列出來
         let wanted = |n: usize| self.cfg.only.as_ref().is_none_or(|o| o.contains(&n));
@@ -854,15 +962,7 @@ impl Watcher {
     }
 
     fn write_report(&self) {
-        let mut r = self.shared.report.lock().unwrap().clone();
-        let stages = self.shared.stages.lock().unwrap();
-        r.push_str("\n== 各階段耗時 ==\n");
-        let all: f64 = stages.iter().map(|s| s.secs).sum();
-        for s in stages.iter() {
-            r.push_str(&format!("  {}：{:.1} 秒\n", s.name, s.secs));
-        }
-        r.push_str(&format!("  合計：{all:.1} 秒（約 {:.1} 分鐘）\n", all / 60.0));
-        let _ = std::fs::write(Path::new(&self.cfg.output_dir).join("report.txt"), r);
+        self.shared.write_report_file(&self.cfg.output_dir);
     }
 
     fn job(&self, seg: &Segment, masks: &[MaskSeg], files: &[(PathBuf, f64, f64)]) -> RenderJob {
@@ -890,6 +990,42 @@ impl Watcher {
             work: self.work.clone(),
             fingerprint,
         }
+    }
+
+    /// 問 AI 這個地方的來源字跟參考靜圖是不是同一個。回傳 (同一個?, 說明, 這次有沒有真的呼叫 API)
+    fn ai_decide(&mut self, files: &[(PathBuf, f64, f64)], c: &plan::AiCandidate) -> Result<(bool, String, bool), String> {
+        let names: Vec<&str> = c.stills.iter().map(|&k| self.stills.stills[k].name.as_str()).collect();
+        let key = format!("{}|{}|{:?}|{:?}|{}", c.start, c.end, c.kind, c.layout, names.join(","));
+        if let Some((same, note)) = self.ai_cache.get(&key) {
+            return Ok((*same, note.clone(), false));
+        }
+        let refs: Vec<Vec<u8>> = c.stills.iter().take(2).map(|&k| ai::still_crop(&self.stills.stills[k].path, c.layout)).collect::<Result<_, _>>()?;
+        let targets: Vec<Vec<u8>> = c.samples.iter().map(|&f| self.grab_crop(files, f, c.layout)).collect::<Result<_, _>>()?;
+        let ans = self.ai.as_ref().ok_or("AI 沒開")?.compare(&refs, &targets)?;
+        // 三格裡過半說相同才算
+        let same = ans.same.iter().filter(|b| **b).count() * 2 > ans.same.len().max(1);
+        let note = format!("參考「{}」、讀到 {}", ans.reference, ans.texts.iter().map(|t| format!("「{t}」")).collect::<Vec<_>>().join(""));
+        self.ai_cache.insert(key.clone(), (same, note.clone()));
+        ai::append_cache(&self.work.join("ai.tsv"), &key, same, &note);
+        Ok((same, note, true))
+    }
+
+    /// 截側錄某一格的右上角來源字（PNG）
+    fn grab_crop(&self, files: &[(PathBuf, f64, f64)], frame: usize, layout: Layout) -> Result<Vec<u8>, String> {
+        let t = secs(frame);
+        let (p, fs, _) = files.iter().rev().find(|(_, fs, _)| *fs <= t).ok_or("找不到這一格的側錄檔")?;
+        let (x, y, w, h, k) = ai::crop_box(layout);
+        let o = command(&self.ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{:.4}", t - fs), "-i"])
+            .arg(p)
+            .args(["-frames:v", "1", "-an", "-vf", &format!("crop={w}:{h}:{x}:{y},scale={}:{}:flags=lanczos", w * k, h * k), "-f", "image2pipe", "-vcodec", "png", "-"])
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("無法執行 ffmpeg：{e}"))?;
+        if o.stdout.is_empty() {
+            return Err("截不到畫面".into());
+        }
+        Ok(o.stdout)
     }
 
     /// 段落開頭修準：在標題條出現前 6 秒內，找「關鍵時刻」Logo 轉場溶接到棚內結束的那一格。
@@ -925,6 +1061,123 @@ fn collect_stderr(stderr: impl Read + Send + 'static) -> std::thread::JoinHandle
         let _ = BufReader::new(stderr).read_to_string(&mut s);
         s.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
     })
+}
+
+// ───────────────────────── AI 補判（Gemini） ─────────────────────────
+
+mod ai {
+    use base64::Engine as _;
+    use keyword_title_core::autocut::image::{self, imageops, ImageFormat};
+    use keyword_title_core::autocut::{Layout, H, W};
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::time::Duration;
+
+    pub struct Gemini {
+        key: String,
+        pub model: String,
+    }
+
+    pub struct Answer {
+        pub reference: String,
+        pub texts: Vec<String>,
+        pub same: Vec<bool>,
+    }
+
+    /// 給 AI 看的右上角範圍 x y w h 與放大倍數（比規則用的範圍寬：一行長字、兩行字都放得進去）
+    pub fn crop_box(layout: Layout) -> (u32, u32, u32, u32, u32) {
+        match layout {
+            // 雙框：左框右上角（右界不超過左框 x 942）；字小，放大 2 倍
+            Layout::Dual => (560, 70, 382, 160, 2),
+            Layout::Full => (1280, 40, 640, 210, 1),
+        }
+    }
+
+    /// 靜圖的同一塊（PNG）
+    pub fn still_crop(path: &str, layout: Layout) -> Result<Vec<u8>, String> {
+        let img = image::open(path).map_err(|e| format!("讀不到靜圖 {path}：{e}"))?.to_rgb8();
+        let img = if img.dimensions() != (W, H) { imageops::resize(&img, W, H, imageops::FilterType::Triangle) } else { img };
+        let (x, y, w, h, k) = crop_box(layout);
+        let crop = imageops::crop_imm(&img, x, y, w, h).to_image();
+        let crop = imageops::resize(&crop, w * k, h * k, imageops::FilterType::Lanczos3);
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(crop).write_to(&mut out, ImageFormat::Png).map_err(|e| e.to_string())?;
+        Ok(out.into_inner())
+    }
+
+    impl Gemini {
+        pub fn new(key: String, model: String) -> Gemini {
+            Gemini { key, model }
+        }
+
+        /// 參考圖（同一個來源的靜圖）＋要判斷的幾格 → 每格的來源字是不是跟參考相同
+        pub fn compare(&self, refs: &[Vec<u8>], targets: &[Vec<u8>]) -> Result<Answer, String> {
+            let b64 = |b: &Vec<u8>| base64::engine::general_purpose::STANDARD.encode(b);
+            let prompt = format!(
+                "以下是台灣電視節目畫面右上角「來源標示」區域的截圖。來源標示是白色或灰色的小字，例如「翻攝 IG / 伊朗女忍者」「翻攝 Youtube 少康戰情室」「翻攝 抖音 / 中國辦公大樓空置」，也可能只有一行說明文字；截圖裡可能還有別台的台標、字幕，那些不算。\n\
+                 第 1～{r} 張是參考圖（同一個來源）。第 {a}～{b} 張是要判斷的畫面。\n\
+                 請先讀出參考圖的來源標示文字，再逐張判斷要判斷的畫面裡是否出現「完全相同」的來源標示（平台和主題都要相同；畫面內容、背景不同沒關係）。看不到任何來源標示就算不同。\n\
+                 只回傳 JSON：{{\"ref\":\"參考圖的來源標示\",\"targets\":[{{\"text\":\"讀到的來源標示，沒有就空字串\",\"same\":true}}]}}，targets 依序共 {n} 個。",
+                r = refs.len(),
+                a = refs.len() + 1,
+                b = refs.len() + targets.len(),
+                n = targets.len()
+            );
+            let mut parts = vec![serde_json::json!({ "text": prompt })];
+            for img in refs.iter().chain(targets) {
+                parts.push(serde_json::json!({ "inline_data": { "mime_type": "image/png", "data": b64(img) } }));
+            }
+            let body = serde_json::json!({
+                "contents": [{ "role": "user", "parts": parts }],
+                "generationConfig": { "temperature": 0, "response_mime_type": "application/json" }
+            });
+            let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", self.model);
+            let resp = ureq::post(&url)
+                .set("x-goog-api-key", &self.key)
+                .set("Content-Type", "application/json")
+                .timeout(Duration::from_secs(90))
+                .send_string(&body.to_string());
+            let text = match resp {
+                Ok(r) => r.into_string().map_err(|e| e.to_string())?,
+                Err(ureq::Error::Status(code, r)) => {
+                    let detail = r.into_string().unwrap_or_default();
+                    let msg = serde_json::from_str::<serde_json::Value>(&detail).ok().and_then(|v| v["error"]["message"].as_str().map(String::from)).unwrap_or(detail);
+                    return Err(format!("Gemini 回應 {code}：{}", msg.chars().take(300).collect::<String>()));
+                }
+                Err(e) => return Err(format!("連不到 Gemini：{e}")),
+            };
+            let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("Gemini 回應看不懂：{e}"))?;
+            let out = v["candidates"][0]["content"]["parts"][0]["text"].as_str().ok_or("Gemini 沒有回答")?;
+            let a: serde_json::Value = serde_json::from_str(out.trim().trim_start_matches("```json").trim_end_matches("```").trim()).map_err(|e| format!("Gemini 回答不是 JSON：{e}"))?;
+            let targets = a["targets"].as_array().cloned().unwrap_or_default();
+            Ok(Answer {
+                reference: a["ref"].as_str().unwrap_or("").to_string(),
+                texts: targets.iter().map(|t| t["text"].as_str().unwrap_or("").to_string()).collect(),
+                same: targets.iter().map(|t| t["same"].as_bool().unwrap_or(false)).collect(),
+            })
+        }
+    }
+
+    /// ai.tsv：每行「位置<Tab>1|0<Tab>說明」
+    pub fn load_cache(path: &Path) -> HashMap<String, (bool, String)> {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| {
+                let mut it = l.splitn(3, '\t');
+                let k = it.next()?.to_string();
+                let same = it.next()? == "1";
+                Some((k, (same, it.next().unwrap_or("").to_string())))
+            })
+            .collect()
+    }
+
+    pub fn append_cache(path: &Path, key: &str, same: bool, note: &str) {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{key}\t{}\t{}", if same { 1 } else { 0 }, note.replace(['\t', '\n', '\r'], " "));
+        }
+    }
 }
 
 // ───────────────────────── OCR ─────────────────────────
