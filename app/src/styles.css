@@ -595,7 +595,9 @@ input { padding: 6px 10px; }
 .ac-state.ok { color: var(--accent); }
 .ac-state.bad { color: #c0392b; }
 .ac-chain-card { margin-bottom: 12px; }
-.ac-chain-table input.ac-url { width: 100%; min-width: 220px; }
+.ac-chain-table .ac-src-cell { display: flex; gap: 6px; align-items: center; }
+.ac-chain-table input.ac-url { flex: 1; min-width: 220px; }
+.ac-chain-table .ac-yt-status { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
 .ac-chain-table input.ac-time { width: 90px; }
 .ac-chain-table input.bad { border-color: #c0392b; }
 .ac-chain-table .ac-yt-status { font-size: 12px; white-space: nowrap; }

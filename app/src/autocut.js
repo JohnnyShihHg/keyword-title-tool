@@ -228,7 +228,17 @@ const AC_CHAIN_STATES = {
 /** 預設：第三、六段串 YT（閃白）；其他段接 45 秒 promo */
 function acChainDefault(n) {
   const yt = n === 3 || n === 6;
-  return { promo: yt ? 0 : 45, yt_mode: yt, url: "", startText: "", endText: "", start: null, end: null, flash: true, path: "", ytStatus: "" };
+  return { promo: yt ? 0 : 45, yt_mode: yt, src: "yt", url: "", ytPath: "", file: "", startText: "", endText: "", start: null, end: null, flash: true, ytStatus: "" };
+}
+
+/** 要串的影片：YT 下載好的檔，或直接選的檔案 */
+function acChainVideo(c) {
+  return c.src === "file" ? c.file : c.ytPath;
+}
+
+function acVideoStatus(c) {
+  if (c.src === "file") return c.file ? c.file.split(/[\\/]/).pop() : "";
+  return c.ytPath ? "已下載" : "";
 }
 
 let acChains = {};
@@ -245,10 +255,12 @@ function acLoadChains() {
     saved = JSON.parse(localStorage.getItem(acChainKey()) || "null");
   } catch {}
   acChains = {};
-  for (const n of [1, 2, 3, 4, 5, 6]) acChains[n] = { ...acChainDefault(n), ...(saved?.[n] || {}), ytStatus: "" };
   for (const n of [1, 2, 3, 4, 5, 6]) {
-    const c = acChains[n];
-    if (c.path) c.ytStatus = "已下載";
+    const c = { ...acChainDefault(n), ...(saved?.[n] || {}) };
+    if (c.path && !c.ytPath) c.ytPath = c.path; // 0.6.1 存的 YT 檔
+    delete c.path;
+    c.ytStatus = acVideoStatus(c);
+    acChains[n] = c;
   }
   acBuildChainRows();
 }
@@ -263,10 +275,11 @@ function acSaveChains() {
 function acChainPayload(n) {
   const c = acChains[n];
   if (!c || !(c.promo || c.yt_mode)) return null;
+  const video = acChainVideo(c);
   return {
     promo: c.promo,
     yt_mode: c.yt_mode,
-    yt: c.yt_mode && c.path ? { path: c.path, start: c.start, end: c.end } : null,
+    yt: c.yt_mode && video ? { path: video, start: c.start, end: c.end } : null,
     flash: c.flash,
   };
 }
@@ -313,7 +326,9 @@ function acBuildChainRows() {
       tr.innerHTML = `<td>第 ${n} 段</td>
         <td><select class="ac-promo"><option value="0">不接</option><option value="20">20 秒</option><option value="45">45 秒</option></select></td>
         <td><input type="checkbox" class="ac-yt" /></td>
-        <td><input class="ac-url" spellcheck="false" placeholder="https://youtu.be/…" /></td>
+        <td class="ac-src-cell"><select class="ac-src"><option value="yt">YT</option><option value="file">檔案</option></select>
+          <input class="ac-url" spellcheck="false" placeholder="https://youtu.be/…" />
+          <button type="button" class="ghost small ac-pick">選擇檔案</button></td>
         <td><input class="ac-start ac-time" spellcheck="false" placeholder="開頭" /></td>
         <td><input class="ac-end ac-time" spellcheck="false" placeholder="結尾" /></td>
         <td><input type="checkbox" class="ac-flash" /></td>
@@ -325,10 +340,26 @@ function acBuildChainRows() {
       q(".ac-start").value = c.startText;
       q(".ac-end").value = c.endText;
       q(".ac-flash").checked = c.flash;
+      q(".ac-src").value = c.src;
       const syncEnabled = () => {
-        for (const s of [".ac-url", ".ac-start", ".ac-end", ".ac-flash"]) q(s).disabled = !c.yt_mode;
+        for (const s of [".ac-src", ".ac-url", ".ac-pick", ".ac-start", ".ac-end", ".ac-flash"]) q(s).disabled = !c.yt_mode;
+        q(".ac-url").classList.toggle("hidden", c.src === "file");
+        q(".ac-pick").classList.toggle("hidden", c.src !== "file");
       };
       syncEnabled();
+      q(".ac-src").onchange = () => {
+        c.src = q(".ac-src").value;
+        syncEnabled();
+        acYtStatus(n, acVideoStatus(c));
+        acPushChain(n);
+      };
+      q(".ac-pick").onclick = async () => {
+        const path = await pickVideo();
+        if (!path) return;
+        c.file = path;
+        acYtStatus(n, acVideoStatus(c));
+        acPushChain(n);
+      };
       q(".ac-promo").onchange = () => {
         c.promo = Number(q(".ac-promo").value);
         acPushChain(n);
@@ -344,7 +375,7 @@ function acBuildChainRows() {
       };
       q(".ac-url").onchange = () => {
         c.url = q(".ac-url").value.trim();
-        c.path = "";
+        c.ytPath = "";
         acPushChain(n);
         if (c.url) acDownloadYt(n);
         else acYtStatus(n, "");
@@ -395,7 +426,7 @@ function acDownloadYt(n) {
     try {
       const path = await invoke("download_youtube", { url });
       if (acChains[n].url !== url) return;
-      acChains[n].path = path;
+      acChains[n].ytPath = path;
       acYtStatus(n, "已下載");
       acPushChain(n);
     } catch (e) {
