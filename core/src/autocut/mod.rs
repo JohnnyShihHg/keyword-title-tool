@@ -38,9 +38,11 @@ pub const LABEL_IOU_STRONG: f32 = 0.62;
 pub const SIM_NCC: f32 = 0.80;
 pub const CUT_DIFF: f32 = 28.0;
 pub const FLASH_LUMA: f32 = 25.0;
-/// 段落結尾比切進廣告轉場早幾格、開頭比 Logo 轉場結束晚幾格（對照 1022 人工版平均）
+/// 段落結尾比切進廣告轉場早幾格（對照 1022 人工版平均）
 pub const END_TRIM: usize = 6;
-pub const START_DELAY: usize = 13;
+/// 段落開頭比 Logo 轉場結束晚幾格：判定結束那格還有淡淡的 Logo 殘影，下一格就是乾淨的棚內畫面。
+/// （以前用 1022 人工版平均的 13 格，1026 實測主持人 Logo 後 0.25 秒就開口，會切掉第一個字）
+pub const START_DELAY: usize = 1;
 
 // 分析用畫布：ffmpeg 每格輸出一張 564×290 rgb24，把需要的區塊拼在一起
 pub const CW: usize = 564;
