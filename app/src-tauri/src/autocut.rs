@@ -1677,6 +1677,50 @@ fn promo_path(cfg: &AutocutConfig, secs: u32) -> Result<&str, String> {
     Ok(p)
 }
 
+/// promo 先轉成跟正片一樣的規格（存在 .autocut，promo 檔沒換就只轉一次）：只接 promo 時
+/// 畫面能直接複製串接，幾秒就好，不用把整段正片重新編碼
+fn promo_like(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Path, cfg: &AutocutConfig, secs: u32, seg: &Clip) -> Result<String, String> {
+    let src = promo_path(cfg, secs)?;
+    let info = probe(ffprobe, src)?;
+    if seg.signature.as_deref() == Some(info.copy_signature.as_str()) {
+        return Ok(src.to_string());
+    }
+    let dst = Path::new(&cfg.output_dir).join(".autocut").join(format!("promo{secs}-{}.mp4", seg.signature.as_deref().map_or(0, |s| s.bytes().map(u64::from).sum::<u64>())));
+    let tag = dst.with_extension("src.txt");
+    let mtime = std::fs::metadata(src).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+    let stamp = format!("{src}\n{mtime}");
+    if dst.is_file() && std::fs::read_to_string(&tag).ok().as_deref() == Some(stamp.as_str()) {
+        return Ok(dst.display().to_string());
+    }
+    let tmp = dst.with_extension("part.mp4");
+    let base: Vec<String> = [
+        "-hide_banner", "-y", "-loglevel", "error", "-i", src,
+        "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30000/1001",
+    ]
+    .map(String::from)
+    .to_vec();
+    let tail: Vec<String> = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats"].map(String::from).to_vec();
+    // 跟 render_segment 同一組編碼參數
+    let run = |enc: &[&str]| {
+        let mut a = base.clone();
+        a.extend(enc.iter().map(|s| s.to_string()));
+        a.extend(tail.clone());
+        a.push(tmp.display().to_string());
+        run_ffmpeg(shared, ffmpeg, &a, info.duration, &mut |_| {})
+    };
+    let r = shared.stage(app, &format!("promo {secs} 秒轉成正片規格（只做一次）"), || {
+        run(&["-c:v", "h264_nvenc", "-preset", "p5", "-b:v", "12M", "-pix_fmt", "yuv420p"]).or_else(|_| run(&["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]))
+    });
+    if let Err(e) = r {
+        let _ = std::fs::remove_file(&tmp);
+        shared.log(app, format!("promo 轉檔失敗，改成整段重新編碼：{e}"));
+        return Ok(src.to_string());
+    }
+    std::fs::rename(&tmp, &dst).map_err(|e| e.to_string())?;
+    let _ = std::fs::write(&tag, stamp);
+    Ok(dst.display().to_string())
+}
+
 /// 正片 →（閃白）→ YT →（直接接）→ promo。正片已經 +6dB、壓過水印，這裡都不再加
 #[allow(clippy::too_many_arguments)]
 fn render_chain(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Path, cfg: &AutocutConfig, n: usize, chain: &Chain, seg_out: &str, out: &Path) -> Result<(), String> {
@@ -1685,7 +1729,8 @@ fn render_chain(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &
         clips.push(clip_of(ffprobe, &yt.path, "YT", if chain.flash { Join::Flash } else { Join::Cut }, yt.start, yt.end)?);
     }
     if chain.promo != 0 {
-        clips.push(clip_of(ffprobe, promo_path(cfg, chain.promo)?, &format!("Promo {} 秒", chain.promo), Join::Cut, None, None)?);
+        let p = promo_like(app, shared, ffmpeg, ffprobe, cfg, chain.promo, &clips[0])?;
+        clips.push(clip_of(ffprobe, &p, &format!("Promo {} 秒", chain.promo), Join::Cut, None, None)?);
     }
     let dir = out.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir).map_err(|e| format!("無法建立 {}：{e}", dir.display()))?;
