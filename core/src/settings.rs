@@ -73,6 +73,10 @@ pub struct Settings {
     pub autocut_ai_key: String,
     /// AI 補判用的模型
     pub autocut_ai_model: String,
+    /// 自動切段正片要壓的台標（1920×1080 透明 PNG，整張蓋上）；空白＝不壓。YT、promo 不壓
+    pub autocut_watermark: String,
+    /// 月份標（例如 `202610.png`）。檔名是年月時，出片自動換成節目日期那個月的同資料夾檔案
+    pub autocut_watermark_month: String,
 }
 
 impl Default for Settings {
@@ -108,6 +112,8 @@ impl Default for Settings {
             autocut_auto_render: true,
             autocut_ai_key: String::new(),
             autocut_ai_model: "gemini-3.5-flash-lite".to_string(),
+            autocut_watermark: String::new(),
+            autocut_watermark_month: String::new(),
         }
     }
 }
@@ -132,5 +138,6 @@ mod tests {
         assert!(s.autocut_auto_render);
         assert_eq!(s.autocut_ai_key, "", "舊設定檔沒有金鑰＝不用 AI");
         assert_eq!(s.autocut_ai_model, "gemini-3.5-flash-lite");
+        assert_eq!(s.autocut_watermark, "", "舊設定檔沒有水印＝不壓");
     }
 }

@@ -715,6 +715,8 @@ function readSettingsForm() {
     autocut_auto_render: settings.autocut_auto_render,
     autocut_ai_key: f.autocut_ai_key.value.trim(),
     autocut_ai_model: f.autocut_ai_model.value.trim() || settings.autocut_ai_model,
+    autocut_watermark: f.autocut_watermark.value,
+    autocut_watermark_month: f.autocut_watermark_month.value,
   };
 }
 

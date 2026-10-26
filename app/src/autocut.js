@@ -77,6 +77,17 @@ $("acStartBtn").addEventListener("click", async () => {
         make_all: $("acMakeAll").checked,
         ai_key: settings.autocut_ai_key || null,
         ai_model: settings.autocut_ai_model || null,
+        // 正片加工（跟影片頁單集一樣）、串接、全集用
+        gain_db: settings.audio_gain_db ?? 6,
+        watermarks: await acWatermarks(date),
+        promo_20: settings.promo_20_path || "",
+        promo_45: settings.promo_45_path || "",
+        transition: settings.transition_secs ?? 0.5,
+        encoder: await acEncoder(),
+        date_tag: /^\d{8}$/.test(date) ? date.slice(4) : "",
+        chains: Object.fromEntries(
+          [1, 2, 3, 4, 5, 6].map((n) => [n, acChainPayload(n)]).filter(([, c]) => c),
+        ),
       },
     });
     $("acLog").textContent = "";
@@ -131,7 +142,7 @@ function acShow(st) {
       }
       const where = s.rec_start == null ? "" : `${acTime(s.rec_start)} – ${acTime(s.rec_end)}`;
       const len = s.state === "waiting" ? "" : fmtTime(s.recorded);
-      tr.innerHTML = `<td>第 ${s.n} 段</td><td><span class="ac-state ${cls}"></span></td><td>${where}</td><td>${len}</td><td>${s.rec_end == null ? "" : s.masks}</td><td class="ac-actions"></td>`;
+      tr.innerHTML = `<td>第 ${s.n} 段</td><td><span class="ac-state ${cls}"></span></td><td>${where}</td><td>${len}</td><td>${s.rec_end == null ? "" : s.masks}</td><td class="ac-chain-cell"></td><td class="ac-actions"></td>`;
       tr.querySelector(".ac-state").textContent = label;
       if (s.error) tr.querySelector(".ac-state").title = s.error;
       const actions = tr.querySelector(".ac-actions");
@@ -142,6 +153,7 @@ function acShow(st) {
         open.onclick = () => invoke("autocut_reveal", { path: s.output });
         actions.append(open);
       }
+      acChainCell(tr.querySelector(".ac-chain-cell"), s, st.running);
       // 完整但沒出（關了自動出片）、出片失敗、靜圖更新後：讓使用者自己按
       if (st.running && (s.state === "complete" || s.state === "failed" || (s.state === "done" && s.stale))) {
         const btn = document.createElement("button");
@@ -153,7 +165,8 @@ function acShow(st) {
       return tr;
     }),
   );
-  $("acAll").textContent = st.all ? `全集：${st.all}` : "";
+  $("acAll").textContent =
+    st.all_progress != null ? `全集合成中 ${Math.round(st.all_progress * 100)}%` : st.all ? `全集：${st.all}` : "";
 
   $("acFiles").replaceChildren(
     ...st.files.map((f) => {
@@ -190,8 +203,249 @@ listen("autocut-log", (e) => {
 });
 
 listen("autocut-done", (e) => {
-  const { n, path } = e.payload;
-  showNotice({ title: n ? `第 ${n} 段出片完成` : "全集合成完成", message: path });
+  const { n, path, chain } = e.payload;
+  showNotice({ title: chain ? `第 ${n} 段串接完成` : n ? `第 ${n} 段出片完成` : "全集合成完成", message: path });
+});
+
+// ───────── 每段串接（正片 →（閃白）→ YT → promo） ─────────
+
+const AC_CHAIN_STATES = {
+  need_yt: ["等 YT", "bad"],
+  waiting: ["等正片", ""],
+  queued: ["排隊", "ok"],
+  rendering: ["串接中", "ok"],
+  done: ["完成", "ok"],
+  stale: ["設定已改", "bad"],
+  failed: ["失敗", "bad"],
+};
+
+/** 預設：第三、六段串 YT（閃白）；其他段接 45 秒 promo */
+function acChainDefault(n) {
+  const yt = n === 3 || n === 6;
+  return { promo: yt ? 0 : 45, yt_mode: yt, url: "", startText: "", endText: "", start: null, end: null, flash: true, path: "", ytStatus: "" };
+}
+
+let acChains = {};
+let acChainsDate = null;
+
+function acChainKey() {
+  return `acChains:${dateInput.value.trim() || "today"}`;
+}
+
+function acLoadChains() {
+  acChainsDate = dateInput.value.trim();
+  let saved = null;
+  try {
+    saved = JSON.parse(localStorage.getItem(acChainKey()) || "null");
+  } catch {}
+  acChains = {};
+  for (const n of [1, 2, 3, 4, 5, 6]) acChains[n] = { ...acChainDefault(n), ...(saved?.[n] || {}), ytStatus: "" };
+  for (const n of [1, 2, 3, 4, 5, 6]) {
+    const c = acChains[n];
+    if (c.path) c.ytStatus = "已下載";
+  }
+  acBuildChainRows();
+}
+
+function acSaveChains() {
+  try {
+    localStorage.setItem(acChainKey(), JSON.stringify(acChains));
+  } catch {}
+}
+
+/** 送給 Rust 的設定；不接東西＝null */
+function acChainPayload(n) {
+  const c = acChains[n];
+  if (!c || !(c.promo || c.yt_mode)) return null;
+  return {
+    promo: c.promo,
+    yt_mode: c.yt_mode,
+    yt: c.yt_mode && c.path ? { path: c.path, start: c.start, end: c.end } : null,
+    flash: c.flash,
+  };
+}
+
+async function acPushChain(n, retry = false) {
+  acSaveChains();
+  try {
+    await invoke("autocut_set_chain", { n, chain: acChainPayload(n), retry });
+  } catch (e) {
+    acMessage(String(e));
+  }
+}
+
+/** 台標＋月份標。月份標檔名是年月（202610.png）時換成節目日期那個月的同資料夾檔案 */
+async function acWatermarks(date) {
+  const list = [];
+  if (settings.autocut_watermark) list.push(settings.autocut_watermark);
+  let month = settings.autocut_watermark_month || "";
+  const m = month.match(/^(.*[\\/])(\d{6})(\.png)$/i);
+  if (m && /^\d{8}$/.test(date) && m[2] !== date.slice(0, 6)) {
+    const want = `${m[1]}${date.slice(0, 6)}${m[3]}`;
+    if (await invoke("path_exists", { path: want })) month = want;
+    else acMessage(`找不到 ${date.slice(0, 6)} 的月份標，先用 ${m[2]}`);
+  }
+  if (month) list.push(month);
+  return list;
+}
+
+async function acEncoder() {
+  if (settings.encoder && settings.encoder !== "auto") return settings.encoder;
+  try {
+    return (await invoke("detect_encoder", { force: false })).chosen;
+  } catch {
+    return "x264";
+  }
+}
+
+function acBuildChainRows() {
+  $("acChains").replaceChildren(
+    ...[1, 2, 3, 4, 5, 6].map((n) => {
+      const c = acChains[n];
+      const tr = document.createElement("tr");
+      tr.dataset.chain = n;
+      tr.innerHTML = `<td>第 ${n} 段</td>
+        <td><select class="ac-promo"><option value="0">不接</option><option value="20">20 秒</option><option value="45">45 秒</option></select></td>
+        <td><input type="checkbox" class="ac-yt" /></td>
+        <td><input class="ac-url" spellcheck="false" placeholder="https://youtu.be/…" /></td>
+        <td><input class="ac-start ac-time" spellcheck="false" placeholder="開頭" /></td>
+        <td><input class="ac-end ac-time" spellcheck="false" placeholder="結尾" /></td>
+        <td><input type="checkbox" class="ac-flash" /></td>
+        <td class="ac-yt-status muted"></td>`;
+      const q = (s) => tr.querySelector(s);
+      q(".ac-promo").value = String(c.promo);
+      q(".ac-yt").checked = c.yt_mode;
+      q(".ac-url").value = c.url;
+      q(".ac-start").value = c.startText;
+      q(".ac-end").value = c.endText;
+      q(".ac-flash").checked = c.flash;
+      const syncEnabled = () => {
+        for (const s of [".ac-url", ".ac-start", ".ac-end", ".ac-flash"]) q(s).disabled = !c.yt_mode;
+      };
+      syncEnabled();
+      q(".ac-promo").onchange = () => {
+        c.promo = Number(q(".ac-promo").value);
+        acPushChain(n);
+      };
+      q(".ac-yt").onchange = () => {
+        c.yt_mode = q(".ac-yt").checked;
+        syncEnabled();
+        acPushChain(n);
+      };
+      q(".ac-flash").onchange = () => {
+        c.flash = q(".ac-flash").checked;
+        acPushChain(n);
+      };
+      q(".ac-url").onchange = () => {
+        c.url = q(".ac-url").value.trim();
+        c.path = "";
+        acPushChain(n);
+        if (c.url) acDownloadYt(n);
+        else acYtStatus(n, "");
+      };
+      for (const [sel, key] of [
+        [".ac-start", "start"],
+        [".ac-end", "end"],
+      ]) {
+        q(sel).onchange = async () => {
+          const text = q(sel).value.trim();
+          try {
+            c[key] = text ? await invoke("parse_timecode", { input: text }) : null;
+            c[`${key}Text`] = text;
+            q(sel).classList.remove("bad");
+            acPushChain(n);
+          } catch (e) {
+            q(sel).classList.add("bad");
+            q(sel).title = String(e);
+          }
+        };
+      }
+      return tr;
+    }),
+  );
+  for (const n of [1, 2, 3, 4, 5, 6]) acYtStatus(n, acChains[n].ytStatus);
+}
+
+function acYtStatus(n, text) {
+  acChains[n].ytStatus = text;
+  const el = document.querySelector(`[data-chain="${n}"] .ac-yt-status`);
+  if (el) el.textContent = text;
+}
+
+// YT 一次下載一支
+let acYtQueue = Promise.resolve();
+let acYtActive = null;
+listen("yt-progress", ({ payload }) => {
+  if (acYtActive != null) acYtStatus(acYtActive, `下載中 ${payload.percent.toFixed(0)}%`);
+});
+
+function acDownloadYt(n) {
+  const url = acChains[n].url;
+  acYtStatus(n, "排隊下載…");
+  acYtQueue = acYtQueue.then(async () => {
+    if (acChains[n].url !== url) return; // 排隊時網址又改了
+    acYtActive = n;
+    acYtStatus(n, "下載中…");
+    try {
+      const path = await invoke("download_youtube", { url });
+      if (acChains[n].url !== url) return;
+      acChains[n].path = path;
+      acYtStatus(n, "已下載");
+      acPushChain(n);
+    } catch (e) {
+      acYtStatus(n, `★ ${e}`);
+    } finally {
+      acYtActive = null;
+    }
+  });
+}
+
+/** 段落表的「串接」欄 */
+function acChainCell(td, s, running) {
+  const ch = s.chain;
+  if (!ch) return;
+  let [label, cls] = AC_CHAIN_STATES[ch.state] || [ch.state, ""];
+  if (ch.state === "rendering" && ch.progress != null) label += ` ${Math.round(ch.progress * 100)}%`;
+  const span = document.createElement("span");
+  span.className = `ac-state ${cls}`;
+  span.textContent = label;
+  if (ch.error) span.title = ch.error;
+  td.append(span);
+  if (ch.output && (ch.state === "done" || ch.state === "stale")) {
+    const open = document.createElement("button");
+    open.className = "ghost small";
+    open.textContent = "開啟";
+    open.onclick = () => invoke("autocut_reveal", { path: ch.output });
+    td.append(open);
+  }
+  if (running && (ch.state === "failed" || ch.state === "stale")) {
+    const btn = document.createElement("button");
+    btn.className = "small";
+    btn.textContent = "重新串接";
+    btn.onclick = () => acPushChain(s.n, true);
+    td.append(btn);
+  }
+}
+
+// 設定頁：水印選圖、清除
+document.querySelectorAll("[data-pick-image]").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    const path = await dialog.open({ multiple: false, filters: [{ name: "圖片", extensions: ["png"] }] });
+    if (!path) return;
+    settingsForm.elements[btn.dataset.pickImage].value = path;
+    settingsFieldChanged();
+  });
+});
+document.querySelectorAll("[data-clear-field]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    settingsForm.elements[btn.dataset.clearField].value = "";
+    settingsFieldChanged();
+  });
+});
+
+// 換日期＝換一組串接設定
+dateInput.addEventListener("change", () => {
+  if (dateInput.value.trim() !== acChainsDate) acLoadChains();
 });
 
 // 設定載入／改變後更新畫面上的資料夾
@@ -203,5 +457,6 @@ window.onSettingsChanged = () => {
 (async function acInit() {
   while (!settings) await new Promise((r) => setTimeout(r, 100));
   acFillDirs();
+  acLoadChains();
   acShow(await invoke("autocut_status"));
 })();

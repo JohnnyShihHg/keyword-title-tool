@@ -6,6 +6,7 @@
 //! 掃描跟出片可以同時跑（實測不衝突，只是互相變慢）。
 
 use crate::video::{command, require_tool};
+use keyword_title_core::video::{self, Clip, Encoder, Join, RenderSpec};
 use keyword_title_core::autocut::image;
 use keyword_title_core::autocut::plan::{self, MaskSeg, Segment};
 use keyword_title_core::autocut::stills::StillSet;
@@ -78,6 +79,66 @@ pub struct AutocutConfig {
     pub ai_key_file: Option<String>,
     #[serde(default)]
     pub ai_model: Option<String>,
+
+    // --- 成品加工（跟影片頁單集一樣：正片 +6dB、壓水印；YT、promo 不動） ---
+    /// 正片音量增益（dB）
+    #[serde(default)]
+    pub gain_db: f64,
+    /// 水印（台標、月份標）：1920×1080 透明 PNG，依序整張蓋上；空的＝不壓
+    #[serde(default)]
+    pub watermarks: Vec<String>,
+    #[serde(default)]
+    pub promo_20: String,
+    #[serde(default)]
+    pub promo_45: String,
+    /// 閃白長度（秒）
+    #[serde(default = "half")]
+    pub transition: f64,
+    /// 串接、全集用的編碼器（畫面先偵測好）；失敗退回 CPU
+    #[serde(default)]
+    pub encoder: Option<Encoder>,
+    /// 串接成品檔名的日期（`1020` → `上傳\1020-3.mp4`）
+    #[serde(default)]
+    pub date_tag: String,
+    /// 每段後面接什麼（開始時的設定；之後用 `autocut_set_chain` 改）
+    #[serde(default)]
+    pub chains: HashMap<usize, Chain>,
+}
+
+fn half() -> f64 {
+    0.5
+}
+
+/// 一段正片後面要接的東西：正片 →（閃白）→ YT →（直接接）→ promo
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Chain {
+    /// 0＝不接 promo；20／45＝接那支
+    #[serde(default)]
+    pub promo: u32,
+    /// 這段要串 YT（還沒填好 YT 就先等著）
+    #[serde(default)]
+    pub yt_mode: bool,
+    #[serde(default)]
+    pub yt: Option<YtClip>,
+    /// 正片跟 YT 之間閃白
+    #[serde(default = "yes")]
+    pub flash: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct YtClip {
+    /// 已下載的檔案
+    pub path: String,
+    #[serde(default)]
+    pub start: Option<f64>,
+    #[serde(default)]
+    pub end: Option<f64>,
+}
+
+impl Chain {
+    fn enabled(&self) -> bool {
+        self.promo != 0 || self.yt_mode
+    }
 }
 
 #[derive(Clone, Serialize, Default)]
@@ -103,6 +164,17 @@ pub struct SegStatus {
     /// 出片後靜圖或判斷結果變了，可以重新出片
     stale: bool,
     error: Option<String>,
+    /// 串接（沒設定要接東西＝None）
+    chain: Option<ChainStatus>,
+}
+
+#[derive(Clone, Serialize, Default)]
+pub struct ChainStatus {
+    /// need_yt（還沒填 YT）／waiting（等正片）／queued／rendering／done／stale／failed
+    state: &'static str,
+    progress: Option<f64>,
+    output: Option<String>,
+    error: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -121,6 +193,8 @@ pub struct AutocutStatus {
     stages: Vec<StageInfo>,
     /// 全集.mp4（合成好才有）
     all: Option<String>,
+    /// 全集合成進度 0–1（合成中才有）
+    all_progress: Option<f64>,
     message: String,
 }
 
@@ -129,6 +203,16 @@ struct Done {
     /// 第幾段；0＝全集
     n: usize,
     path: String,
+    /// 串接成品（不是正片）
+    chain: bool,
+}
+
+/// 出片佇列的工作
+enum Job {
+    /// 遮蓋出正片
+    Segment(RenderJob),
+    /// 正片後面接 YT／promo
+    Chain(usize),
 }
 
 // ───────────────────────── 共用狀態 ─────────────────────────
@@ -142,7 +226,11 @@ struct RenderJob {
     files: Vec<(PathBuf, f64, f64)>,
     out: PathBuf,
     work: PathBuf,
-    /// 段落切點＋遮罩＋靜圖的指紋：跟出片時不同＝可重新出片
+    /// 正片增益（dB）
+    gain_db: f64,
+    /// 水印 PNG（整張蓋上）
+    watermarks: Vec<String>,
+    /// 段落切點＋遮罩＋靜圖（＋增益、水印）的指紋：跟出片時不同＝可重新出片
     fingerprint: String,
 }
 
@@ -187,8 +275,13 @@ struct Shared {
     /// 正在跑的掃描／出片 ffmpeg（停止時砍掉）
     scan_child: Mutex<Option<Child>>,
     render_child: Mutex<Option<Child>>,
-    jobs: Mutex<Option<Sender<RenderJob>>>,
+    jobs: Mutex<Option<Sender<Job>>>,
     config: Mutex<Option<AutocutConfig>>,
+    /// 每段後面接什麼（畫面隨時可改）
+    chains: Mutex<HashMap<usize, Chain>>,
+    /// 串接成品的狀態（Done 的指紋＝正片指紋＋串接設定）
+    chain_renders: Mutex<HashMap<usize, Render>>,
+    all_progress: Mutex<Option<f64>>,
     /// 整批模式：紀錄也寫進這個檔（沒有畫面可看）
     log_file: Mutex<Option<PathBuf>>,
 }
@@ -238,6 +331,7 @@ impl Shared {
                     }
                     None => {}
                 }
+                s.chain = self.chain_status(p.n);
                 s
             })
             .collect();
@@ -247,6 +341,7 @@ impl Shared {
             segments,
             stages: self.stages.lock().unwrap().clone(),
             all: self.all.lock().unwrap().clone(),
+            all_progress: *self.all_progress.lock().unwrap(),
             message: self.message.lock().unwrap().clone(),
         }
     }
@@ -282,6 +377,72 @@ impl Shared {
 
     fn stopped(&self) -> bool {
         self.stop.load(Ordering::SeqCst)
+    }
+
+    /// 這段可以串接了（有設定、需要的 YT 已填、正片出好）→ (設定, 正片成品, 串接指紋)
+    fn chain_ready(&self, n: usize) -> Option<(Chain, String, String)> {
+        let chain = self.chains.lock().unwrap().get(&n).cloned().filter(Chain::enabled)?;
+        if chain.yt_mode && chain.yt.is_none() {
+            return None;
+        }
+        let (output, seg_fp) = match self.renders.lock().unwrap().get(&n) {
+            Some(Render::Done { output, fingerprint }) => (output.clone(), fingerprint.clone()),
+            _ => return None,
+        };
+        let cfg = self.config.lock().unwrap().clone()?;
+        let promo = match chain.promo {
+            20 => cfg.promo_20.as_str(),
+            45 => cfg.promo_45.as_str(),
+            _ => "",
+        };
+        let fp = format!("{seg_fp}\n---\n{}\n{promo}\n{}", serde_json::to_string(&chain).unwrap_or_default(), cfg.transition);
+        Some((chain, output, fp))
+    }
+
+    fn chain_status(&self, n: usize) -> Option<ChainStatus> {
+        let chain = self.chains.lock().unwrap().get(&n).cloned().filter(Chain::enabled)?;
+        let mut s = ChainStatus::default();
+        match self.chain_renders.lock().unwrap().get(&n).cloned() {
+            Some(Render::Queued) => s.state = "queued",
+            Some(Render::Rendering(p)) => {
+                s.state = "rendering";
+                s.progress = Some(p);
+            }
+            Some(Render::Done { output, fingerprint }) => {
+                s.output = Some(output);
+                let current = self.chain_ready(n).map(|r| r.2);
+                s.state = if current.is_some_and(|c| c != fingerprint) { "stale" } else { "done" };
+            }
+            Some(Render::Failed(e)) => {
+                s.state = "failed";
+                s.error = Some(e);
+            }
+            None => s.state = if chain.yt_mode && chain.yt.is_none() { "need_yt" } else { "waiting" },
+        }
+        Some(s)
+    }
+
+    /// 該串接卻還沒串（或設定改過了）就排進出片佇列。`retry`＝失敗過的也重來（畫面按的）
+    fn queue_chain(&self, n: usize, retry: bool) {
+        let Some((_, _, fp)) = self.chain_ready(n) else { return };
+        let Some(cfg) = self.config.lock().unwrap().clone() else { return };
+        let out = chain_out(&cfg, n);
+        let mut cr = self.chain_renders.lock().unwrap();
+        match cr.get(&n) {
+            Some(Render::Queued | Render::Rendering(_)) => return,
+            Some(Render::Done { fingerprint, .. }) if *fingerprint == fp => return,
+            Some(Render::Failed(_)) if !retry => return,
+            _ => {}
+        }
+        // 工具重開：之前串過、設定也一樣
+        if out.is_file() && std::fs::read_to_string(chain_marker(&cfg, n)).ok().as_deref() == Some(fp.as_str()) {
+            cr.insert(n, Render::Done { output: out.display().to_string(), fingerprint: fp });
+            return;
+        }
+        if let Some(tx) = self.jobs.lock().unwrap().as_ref() {
+            cr.insert(n, Render::Queued);
+            let _ = tx.send(Job::Chain(n));
+        }
     }
 
     /// 記一個階段的耗時（畫面顯示、報告最後列出）
@@ -325,6 +486,7 @@ pub fn start(app: AppHandle, state: &AutocutState, config: AutocutConfig) -> Res
         *shared.titles_text.lock().unwrap() = t.clone();
     }
     *shared.config.lock().unwrap() = Some(config.clone());
+    *shared.chains.lock().unwrap() = config.chains.clone();
     if config.batch {
         let p = Path::new(&config.output_dir).join(".autocut").join("batch.log");
         let _ = std::fs::remove_file(&p);
@@ -348,11 +510,14 @@ pub fn start(app: AppHandle, state: &AutocutState, config: AutocutConfig) -> Res
         // 監看停了：出片佇列送完就收（停止鍵會直接砍掉正在出的片）
         shared.jobs.lock().unwrap().take();
         let _ = render.join();
-        for r in shared.renders.lock().unwrap().values_mut() {
-            if matches!(r, Render::Queued | Render::Rendering(_)) {
-                *r = Render::Failed("已停止".into());
+        for slot in [&shared.renders, &shared.chain_renders] {
+            for r in slot.lock().unwrap().values_mut() {
+                if matches!(r, Render::Queued | Render::Rendering(_)) {
+                    *r = Render::Failed("已停止".into());
+                }
             }
         }
+        *shared.all_progress.lock().unwrap() = None;
         shared.running.store(false, Ordering::SeqCst);
         shared.publish(&app);
         if batch {
@@ -392,9 +557,22 @@ pub fn autocut_render(app: AppHandle, state: State<'_, AutocutState>, n: usize) 
         return Err(format!("第 {n} 段已經在出片佇列裡"));
     }
     shared.renders.lock().unwrap().insert(n, Render::Queued);
-    shared.jobs.lock().unwrap().as_ref().ok_or("出片已停止")?.send(job).map_err(|e| e.to_string())?;
+    shared.jobs.lock().unwrap().as_ref().ok_or("出片已停止")?.send(Job::Segment(job)).map_err(|e| e.to_string())?;
     shared.publish(&app);
     Ok(())
+}
+
+/// 改某段後面接的東西（None＝不接）。正片已經出好就馬上排進佇列串接；沒在監看時只回報成功，
+/// 畫面會在開始監看時一起送
+#[tauri::command]
+pub fn autocut_set_chain(app: AppHandle, state: State<'_, AutocutState>, n: usize, chain: Option<Chain>, retry: Option<bool>) {
+    let Some(shared) = state.shared.lock().unwrap().clone().filter(|s| s.running.load(Ordering::SeqCst)) else { return };
+    match chain {
+        Some(c) => shared.chains.lock().unwrap().insert(n, c),
+        None => shared.chains.lock().unwrap().remove(&n),
+    };
+    shared.queue_chain(n, retry.unwrap_or(false));
+    shared.publish(&app);
 }
 
 /// 等同 report.txt
@@ -934,13 +1112,18 @@ impl Watcher {
                 }
             }
         }
+        let ns: Vec<usize> = plan_segs.iter().map(|p| p.n).collect();
         *self.shared.plan.lock().unwrap() = plan_segs;
         self.shared.stages.lock().unwrap().push(StageInfo { name: "規劃段落與遮罩".into(), started, secs: t.elapsed().as_secs_f64() });
         if let Some(tx) = self.shared.jobs.lock().unwrap().as_ref() {
             for job in to_send {
                 self.log(format!("第 {} 段完整，送去出片", job.n));
-                let _ = tx.send(job);
+                let _ = tx.send(Job::Segment(job));
             }
+        }
+        // 工具重開時之前出好的正片：該串接的補串（串過且設定一樣的直接算完成）
+        for n in ns {
+            self.shared.queue_chain(n, false);
         }
 
         // 報告
@@ -975,11 +1158,20 @@ impl Watcher {
                 (m.clone(), s.path.clone(), s.layout)
             })
             .collect();
-        let fingerprint = format!(
+        let mut fingerprint = format!(
             "{:?}\n{}",
             seg.pieces,
             masks.iter().map(|(m, p, _)| format!("{} {} {:?} {}", m.start, m.end, m.layout, p)).collect::<Vec<_>>().join("\n")
         );
+        let watermarks: Vec<String> = self.cfg.watermarks.iter().filter(|p| !p.trim().is_empty()).cloned().collect();
+        // 沒加工時指紋跟舊版一樣（之前出好的不用重出）
+        if self.cfg.gain_db != 0.0 {
+            fingerprint.push_str(&format!("\ngain {}", self.cfg.gain_db));
+        }
+        for p in &watermarks {
+            let mtime = std::fs::metadata(p).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+            fingerprint.push_str(&format!("\nwatermark {p} {mtime}"));
+        }
         // 只取這段用得到的檔（出片時不用開整天的檔）
         let (a, b) = (secs(seg.start()), secs(seg.end()));
         let files = files.iter().filter(|(_, fs, fd)| fs + fd > a && *fs < b).cloned().collect();
@@ -990,6 +1182,8 @@ impl Watcher {
             files,
             out: Path::new(&self.cfg.output_dir).join(format!("第{}段.mp4", seg.n)),
             work: self.work.clone(),
+            gain_db: self.cfg.gain_db,
+            watermarks,
             fingerprint,
         }
     }
@@ -1345,23 +1539,65 @@ fn done_marker(job: &RenderJob) -> Option<String> {
     std::fs::read_to_string(marker_path(job)).ok()
 }
 
-fn render_loop(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Path, cfg: &AutocutConfig, rx: Receiver<RenderJob>) {
-    for job in rx {
+/// 串接成品：`成品資料夾\上傳\1020-3.mp4`（沒有日期時 `第3段.mp4`）。放子資料夾，
+/// 成品跟側錄同資料夾時也不會被當成側錄檔
+fn chain_out(cfg: &AutocutConfig, n: usize) -> PathBuf {
+    let name = if cfg.date_tag.trim().is_empty() { format!("第{n}段.mp4") } else { format!("{}-{n}.mp4", video::sanitize_file_name(cfg.date_tag.trim())) };
+    Path::new(&cfg.output_dir).join("上傳").join(name)
+}
+
+fn chain_marker(cfg: &AutocutConfig, n: usize) -> PathBuf {
+    Path::new(&cfg.output_dir).join(".autocut").join(format!("第{n}段.chain.done"))
+}
+
+fn render_loop(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Path, cfg: &AutocutConfig, rx: Receiver<Job>) {
+    let mut pending: std::collections::VecDeque<Job> = Default::default();
+    loop {
+        let job = match pending.pop_front() {
+            Some(j) => j,
+            None => match rx.recv() {
+                Ok(j) => j,
+                Err(_) => break,
+            },
+        };
         if shared.stopped() {
             break;
         }
+        match job {
+            Job::Segment(job) => {
+                let n = job.n;
+                if render_one_segment(app, shared, ffprobe, ffmpeg, &job) && shared.chain_ready(n).is_some() {
+                    // 正片好了直接串（不經佇列：整批模式這時佇列可能已經關了）
+                    shared.chain_renders.lock().unwrap().insert(n, Render::Queued);
+                    run_chain(app, shared, ffmpeg, ffprobe, cfg, n);
+                }
+            }
+            Job::Chain(n) => run_chain(app, shared, ffmpeg, ffprobe, cfg, n),
+        }
+        // 全集要重新編碼、很久：佇列裡還有工作（正片、串接）就先做完
+        pending.extend(rx.try_iter());
+        if pending.is_empty() && cfg.make_all && cfg.only.is_none() && !shared.stopped() {
+            maybe_concat_all(app, shared, ffmpeg, ffprobe, cfg);
+        }
+    }
+}
+
+/// 出一段正片；成功回傳 true
+fn render_one_segment(app: &AppHandle, shared: &Arc<Shared>, ffprobe: &Path, ffmpeg: &Path, job: &RenderJob) -> bool {
+    {
         let n = job.n;
         shared.renders.lock().unwrap().insert(n, Render::Rendering(0.0));
         shared.publish(app);
-        let r = shared.stage(app, &format!("輸出第 {n} 段（去交錯、遮蓋、編碼）"), || render_segment(app, shared, ffmpeg, &job));
+        let r = shared.stage(app, &format!("輸出第 {n} 段（去交錯、遮蓋、編碼）"), || render_segment(app, shared, ffmpeg, job));
         let r = r.and_then(|_| verify_length(ffprobe, &job.out, job.duration()));
+        let ok = r.is_ok();
         match r {
             Ok(()) => {
-                let _ = std::fs::write(marker_path(&job), &job.fingerprint);
+                let _ = std::fs::write(marker_path(job), &job.fingerprint);
                 let output = job.out.display().to_string();
                 shared.renders.lock().unwrap().insert(n, Render::Done { output: output.clone(), fingerprint: job.fingerprint.clone() });
                 shared.log(app, format!("第 {n} 段完成：{output}"));
-                let _ = app.emit("autocut-done", Done { n, path: output });
+                let _ = app.emit("autocut-done", Done { n, path: output, chain: false });
             }
             Err(e) => {
                 let e = if shared.stopped() { "已停止".to_string() } else { e };
@@ -1370,14 +1606,196 @@ fn render_loop(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &P
             }
         }
         shared.publish(app);
-        if cfg.make_all && cfg.only.is_none() && !shared.stopped() {
-            maybe_concat_all(app, shared, ffmpeg, cfg);
-        }
+        ok
     }
 }
 
-/// 文稿的每一段都出好（而且不是舊的）→ 直接串接成全集（不重新編碼）
-fn maybe_concat_all(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, cfg: &AutocutConfig) {
+/// 第 n 段正片後面接 YT／promo，輸出上傳用的成品
+fn run_chain(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Path, cfg: &AutocutConfig, n: usize) {
+    // 排隊時設定可能被改掉（取消串接、YT 清掉）
+    let Some((chain, seg_out, fp)) = shared.chain_ready(n) else {
+        shared.chain_renders.lock().unwrap().remove(&n);
+        shared.publish(app);
+        return;
+    };
+    let out = chain_out(cfg, n);
+    if out.is_file() && std::fs::read_to_string(chain_marker(cfg, n)).ok().as_deref() == Some(fp.as_str()) {
+        shared.chain_renders.lock().unwrap().insert(n, Render::Done { output: out.display().to_string(), fingerprint: fp });
+        shared.publish(app);
+        return;
+    }
+    shared.chain_renders.lock().unwrap().insert(n, Render::Rendering(0.0));
+    shared.publish(app);
+    let what = [chain.yt.as_ref().map(|_| if chain.flash { "閃白＋YT" } else { "YT" }), (chain.promo != 0).then_some(if chain.promo == 20 { "promo 20 秒" } else { "promo 45 秒" })]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("＋");
+    let r = shared.stage(app, &format!("串接第 {n} 段（{what}）"), || render_chain(app, shared, ffmpeg, ffprobe, cfg, n, &chain, &seg_out, &out));
+    match r {
+        Ok(()) => {
+            let _ = std::fs::write(chain_marker(cfg, n), &fp);
+            let output = out.display().to_string();
+            shared.chain_renders.lock().unwrap().insert(n, Render::Done { output: output.clone(), fingerprint: fp });
+            shared.log(app, format!("第 {n} 段串接完成：{output}"));
+            let _ = app.emit("autocut-done", Done { n, path: output, chain: true });
+        }
+        Err(e) => {
+            let e = if shared.stopped() { "已停止".to_string() } else { e };
+            shared.log(app, format!("★ 第 {n} 段串接失敗：{e}"));
+            shared.chain_renders.lock().unwrap().insert(n, Render::Failed(e));
+        }
+    }
+    shared.publish(app);
+    // 串接途中設定又改了 → 再排一次
+    if !shared.stopped() {
+        shared.queue_chain(n, false);
+    }
+}
+
+fn probe(ffprobe: &Path, path: &str) -> Result<video::ProbeInfo, String> {
+    let out = command(ffprobe).args(video::probe_args(path)).stdin(Stdio::null()).output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!("讀不到 {path}：{}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    video::parse_probe_json(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn clip_of(ffprobe: &Path, path: &str, label: &str, join: Join, start: Option<f64>, end: Option<f64>) -> Result<Clip, String> {
+    if !Path::new(path).is_file() {
+        return Err(format!("找不到「{label}」的檔案：{path}"));
+    }
+    let info = probe(ffprobe, path)?;
+    Ok(Clip { path: path.to_string(), duration: info.duration, has_audio: info.has_audio, start, end, join, signature: Some(info.copy_signature), label: Some(label.to_string()), gain_db: 0.0 })
+}
+
+fn promo_path(cfg: &AutocutConfig, secs: u32) -> Result<&str, String> {
+    let p = if secs == 20 { &cfg.promo_20 } else { &cfg.promo_45 };
+    if p.trim().is_empty() {
+        return Err(format!("設定頁還沒指定 {secs} 秒 promo 的檔案"));
+    }
+    Ok(p)
+}
+
+/// promo 先轉成跟正片一樣的規格（存在 .autocut，promo 檔沒換就只轉一次）：只接 promo 時
+/// 畫面能直接複製串接，幾秒就好，不用把整段正片重新編碼
+fn promo_like(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Path, cfg: &AutocutConfig, secs: u32, seg: &Clip) -> Result<String, String> {
+    let src = promo_path(cfg, secs)?;
+    let info = probe(ffprobe, src)?;
+    if seg.signature.as_deref() == Some(info.copy_signature.as_str()) {
+        return Ok(src.to_string());
+    }
+    let dst = Path::new(&cfg.output_dir).join(".autocut").join(format!("promo{secs}-{}.mp4", seg.signature.as_deref().map_or(0, |s| s.bytes().map(u64::from).sum::<u64>())));
+    let tag = dst.with_extension("src.txt");
+    let mtime = std::fs::metadata(src).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+    let stamp = format!("{src}\n{mtime}");
+    if dst.is_file() && std::fs::read_to_string(&tag).ok().as_deref() == Some(stamp.as_str()) {
+        return Ok(dst.display().to_string());
+    }
+    let tmp = dst.with_extension("part.mp4");
+    let base: Vec<String> = [
+        "-hide_banner", "-y", "-loglevel", "error", "-i", src,
+        "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30000/1001",
+    ]
+    .map(String::from)
+    .to_vec();
+    let tail: Vec<String> = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats"].map(String::from).to_vec();
+    // 跟 render_segment 同一組編碼參數
+    let run = |enc: &[&str]| {
+        let mut a = base.clone();
+        a.extend(enc.iter().map(|s| s.to_string()));
+        a.extend(tail.clone());
+        a.push(tmp.display().to_string());
+        run_ffmpeg(shared, ffmpeg, &a, info.duration, &mut |_| {})
+    };
+    let r = shared.stage(app, &format!("promo {secs} 秒轉成正片規格（只做一次）"), || {
+        run(&["-c:v", "h264_nvenc", "-preset", "p5", "-b:v", "12M", "-pix_fmt", "yuv420p"]).or_else(|_| run(&["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]))
+    });
+    if let Err(e) = r {
+        let _ = std::fs::remove_file(&tmp);
+        shared.log(app, format!("promo 轉檔失敗，改成整段重新編碼：{e}"));
+        return Ok(src.to_string());
+    }
+    std::fs::rename(&tmp, &dst).map_err(|e| e.to_string())?;
+    let _ = std::fs::write(&tag, stamp);
+    Ok(dst.display().to_string())
+}
+
+/// 正片 →（閃白）→ YT →（直接接）→ promo。正片已經 +6dB、壓過水印，這裡都不再加
+#[allow(clippy::too_many_arguments)]
+fn render_chain(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Path, cfg: &AutocutConfig, n: usize, chain: &Chain, seg_out: &str, out: &Path) -> Result<(), String> {
+    let mut clips = vec![clip_of(ffprobe, seg_out, &format!("第 {n} 段"), Join::Cut, None, None)?];
+    if let Some(yt) = &chain.yt {
+        clips.push(clip_of(ffprobe, &yt.path, "YT", if chain.flash { Join::Flash } else { Join::Cut }, yt.start, yt.end)?);
+    }
+    if chain.promo != 0 {
+        let p = promo_like(app, shared, ffmpeg, ffprobe, cfg, chain.promo, &clips[0])?;
+        clips.push(clip_of(ffprobe, &p, &format!("Promo {} 秒", chain.promo), Join::Cut, None, None)?);
+    }
+    let dir = out.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir).map_err(|e| format!("無法建立 {}：{e}", dir.display()))?;
+    let tmp = out.with_extension("part.mp4");
+    let spec = RenderSpec { clips, transition: cfg.transition, width: W as u32, height: H as u32, fps: "30000/1001".into(), encoder: cfg.encoder.unwrap_or(Encoder::X264), output: tmp.display().to_string() };
+    let list = Path::new(&cfg.output_dir).join(".autocut").join(format!("第{n}段.chain.txt"));
+    let r = render_spec(app, shared, ffmpeg, spec, &list, &mut |p| {
+        shared.chain_renders.lock().unwrap().insert(n, Render::Rendering(p));
+    });
+    if let Err(e) = r {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    std::fs::rename(&tmp, out).map_err(|e| format!("無法寫入 {}：{e}", out.display()))
+}
+
+/// 用影片頁同一套參數輸出。能直接複製畫面就走快速模式；硬體編碼失敗退回 CPU
+fn render_spec(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, mut spec: RenderSpec, list: &Path, on_progress: &mut dyn FnMut(f64)) -> Result<(), String> {
+    let total = video::output_duration(&spec);
+    let mut progress = |p: f64| {
+        on_progress(p);
+        shared.publish(app);
+    };
+    if video::can_copy_video(&spec) {
+        std::fs::write(list, video::concat_list(&spec)).map_err(|e| e.to_string())?;
+        let r = run_ffmpeg(shared, ffmpeg, &video::build_copy_args(&spec, &list.display().to_string()), total, &mut progress);
+        let _ = std::fs::remove_file(list);
+        return r;
+    }
+    match run_ffmpeg(shared, ffmpeg, &video::build_render_args(&spec)?, total, &mut progress) {
+        Err(e) if spec.encoder != Encoder::X264 && !shared.stopped() => {
+            shared.log(app, format!("{} 編碼失敗，改用 CPU：{}", spec.encoder.label(), e.lines().last().unwrap_or("")));
+            spec.encoder = Encoder::X264;
+            run_ffmpeg(shared, ffmpeg, &video::build_render_args(&spec)?, total, &mut progress)
+        }
+        r => r,
+    }
+}
+
+/// 跑一支 ffmpeg（停止鍵砍得到），`-progress pipe:1` 的進度每半秒回報一次
+fn run_ffmpeg(shared: &Shared, ffmpeg: &Path, args: &[String], total: f64, on_progress: &mut dyn FnMut(f64)) -> Result<(), String> {
+    let mut child = command(ffmpeg).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("無法執行 ffmpeg：{e}"))?;
+    let stdout = child.stdout.take().unwrap();
+    let err_tail = collect_stderr(child.stderr.take().unwrap());
+    *shared.render_child.lock().unwrap() = Some(child);
+    let mut last = Instant::now();
+    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        if let Some(t) = video::parse_progress_line(&line) {
+            if last.elapsed() > Duration::from_millis(500) && total > 0.0 {
+                last = Instant::now();
+                on_progress((t / total).clamp(0.0, 1.0));
+            }
+        }
+    }
+    let status = shared.render_child.lock().unwrap().take().map(|mut c| c.wait());
+    match status {
+        Some(Ok(s)) if s.success() => Ok(()),
+        _ => Err(err_tail.join().unwrap_or_default()),
+    }
+}
+
+/// 文稿的每一段都出好（而且不是舊的）→ 合成全集。
+/// 有設定 promo：跟影片頁全集一樣（第一段 → promo 20 → 閃白接各段 → promo 45，重新編碼）；
+/// 沒設定 promo（整批測試）：直接接，不重新編碼
+fn maybe_concat_all(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Path, cfg: &AutocutConfig) {
     let plan = shared.plan.lock().unwrap().clone();
     let renders = shared.renders.lock().unwrap().clone();
     if plan.is_empty() {
@@ -1396,23 +1814,62 @@ fn maybe_concat_all(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, cfg: &
     }
     let out = Path::new(&cfg.output_dir).join("全集.mp4");
     let marker = Path::new(&cfg.output_dir).join(".autocut").join("全集.done");
-    let fp = fps.join("\n---\n");
+    let with_promo = !cfg.promo_20.trim().is_empty() || !cfg.promo_45.trim().is_empty();
+    let mut fp = fps.join("\n---\n");
+    if with_promo {
+        fp.push_str(&format!("\n---\n{}\n{}\n{}", cfg.promo_20, cfg.promo_45, cfg.transition));
+    }
     if out.is_file() && std::fs::read_to_string(&marker).ok().as_deref() == Some(fp.as_str()) {
         *shared.all.lock().unwrap() = Some(out.display().to_string());
         return;
     }
-    let ok = shared.stage(app, "合成全集（直接接，不重新編碼）", || concat_all(ffmpeg, &clips, &out));
+    let ok = if with_promo {
+        shared.stage(app, "合成全集（promo、閃白，重新編碼）", || render_all(app, shared, ffmpeg, ffprobe, cfg, &clips, &out))
+    } else {
+        shared.stage(app, "合成全集（直接接，不重新編碼）", || concat_all(ffmpeg, &clips, &out))
+    };
+    *shared.all_progress.lock().unwrap() = None;
     match ok {
         Ok(()) => {
             let _ = std::fs::write(&marker, fp);
             let path = out.display().to_string();
             *shared.all.lock().unwrap() = Some(path.clone());
             shared.log(app, format!("全集完成：{path}"));
-            let _ = app.emit("autocut-done", Done { n: 0, path });
+            let _ = app.emit("autocut-done", Done { n: 0, path, chain: false });
         }
-        Err(e) => shared.log(app, format!("★ 合成全集失敗：{e}")),
+        Err(e) => {
+            let e = if shared.stopped() { "已停止".to_string() } else { e };
+            shared.log(app, format!("★ 合成全集失敗：{e}"));
+        }
     }
     shared.publish(app);
+}
+
+/// 全集跟影片頁一樣：第一段 → promo 20（直接接）→ 各段之間閃白 → promo 45（直接接）。
+/// 正片已經 +6dB、壓過水印；promo 沒設定的就略過
+fn render_all(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Path, cfg: &AutocutConfig, segs: &[PathBuf], out: &Path) -> Result<(), String> {
+    let mut clips = Vec::new();
+    for (i, p) in segs.iter().enumerate() {
+        clips.push(clip_of(ffprobe, &p.display().to_string(), &format!("第 {} 段", i + 1), Join::Flash, None, None)?);
+        if i == 0 && !cfg.promo_20.trim().is_empty() {
+            clips.push(clip_of(ffprobe, &cfg.promo_20, "Promo 20 秒", Join::Cut, None, None)?);
+        }
+    }
+    if !cfg.promo_45.trim().is_empty() {
+        clips.push(clip_of(ffprobe, &cfg.promo_45, "Promo 45 秒", Join::Cut, None, None)?);
+    }
+    let tmp = out.with_extension("part.mp4");
+    *shared.all_progress.lock().unwrap() = Some(0.0);
+    let spec = RenderSpec { clips, transition: cfg.transition, width: W as u32, height: H as u32, fps: "30000/1001".into(), encoder: cfg.encoder.unwrap_or(Encoder::X264), output: tmp.display().to_string() };
+    let list = Path::new(&cfg.output_dir).join(".autocut").join("全集.list.txt");
+    let r = render_spec(app, shared, ffmpeg, spec, &list, &mut |p| {
+        *shared.all_progress.lock().unwrap() = Some(p);
+    });
+    if let Err(e) = r {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    std::fs::rename(&tmp, out).map_err(|e| format!("無法寫入 {}：{e}", out.display()))
 }
 
 /// 依片段從各側錄檔取出來接起來，去交錯、蓋上靜圖、編碼。先試 NVENC，不行改 x264
@@ -1471,14 +1928,32 @@ fn render_segment(app: &AppHandle, shared: &Shared, ffmpeg: &Path, job: &RenderJ
         }
         cur = format!("m{si}");
     }
+    // 水印蓋在最上面（遮罩之後），整張 1920×1080 蓋上
+    for (wi, p) in job.watermarks.iter().enumerate() {
+        if !Path::new(p).is_file() {
+            return Err(format!("找不到水印：{p}"));
+        }
+        args.extend(["-i".into(), p.clone()]);
+        let inp = n_in + job.masks.len() + wi;
+        g.push(format!("[{inp}:v]scale={W}:{H},format=rgba[wm{wi}]"));
+        g.push(format!("[{cur}][wm{wi}]overlay=0:0[wmo{wi}]"));
+        cur = format!("wmo{wi}");
+    }
     g.push(format!("[{cur}]null[vout]"));
+    // 正片 +6dB：跟影片頁一樣拉高後用限幅器壓住峰值
+    let audio = if job.gain_db != 0.0 {
+        g.push(format!("[ac]volume={}dB,alimiter=limit=0.95:level=false:latency=1[aout]", job.gain_db));
+        "[aout]"
+    } else {
+        "[ac]"
+    };
     let script = job.work.join(format!("第{}段.filter.txt", job.n));
     std::fs::write(&script, g.join(";\n")).map_err(|e| e.to_string())?;
     let total = job.duration();
     let tmp = job.out.with_extension("part.mp4");
     let run = |enc: &[&str]| -> Result<(), String> {
         let mut a = args.clone();
-        a.extend(["-filter_complex_script".into(), script.display().to_string(), "-map".into(), "[vout]".into(), "-map".into(), "[ac]".into()]);
+        a.extend(["-filter_complex_script".into(), script.display().to_string(), "-map".into(), "[vout]".into(), "-map".into(), audio.into()]);
         a.extend(enc.iter().map(|s| s.to_string()));
         a.extend(["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats"].map(String::from));
         a.push(tmp.display().to_string());
