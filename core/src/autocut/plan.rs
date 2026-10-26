@@ -337,11 +337,13 @@ pub enum AiKind {
 
 /// 空檔最長幾秒還問 AI（太長多半中間換了別的內容）
 pub const AI_GAP_MAX_SECS: f64 = 60.0;
-/// 來源字灰色地帶的下限、畫面相似灰色地帶的下限
+/// 來源字灰色地帶的下限、畫面相似灰色地帶的下限（10/20 實測：0.5 會撈到大量其實是別的來源的鏡頭）
 pub const AI_WEAK_IOU: f32 = 0.15;
-pub const AI_WEAK_SIM: f32 = 0.5;
-/// 每段最多問幾次（避免某段全是灰色地帶時呼叫太多次）
-pub const AI_MAX_PER_SEGMENT: usize = 30;
+pub const AI_WEAK_SIM: f32 = 0.65;
+/// 灰色地帶至少要持續幾秒才問
+pub const AI_WEAK_MIN_SECS: f64 = 2.0;
+/// 灰色地帶每段最多問幾處（空檔一定問，不受限）
+pub const AI_MAX_WEAK_PER_SEGMENT: usize = 12;
 
 fn samples(s: usize, e: usize) -> Vec<usize> {
     [1, 2, 3].iter().map(|k| s + (e - s) * k / 4).collect()
@@ -373,6 +375,7 @@ pub fn ai_candidates(frames: &[FrameInfo], set: &StillSet, seg: &Segment, masks:
         }
     }
     // ② 灰色地帶：沒被遮、但來源字或畫面有幾分像
+    let gaps = out.len();
     let covered = |i: usize| masks.iter().any(|m| i >= m.start && i < m.end);
     for &(s, e) in &seg.pieces {
         let weak: Vec<bool> = (s..e)
@@ -383,7 +386,7 @@ pub fn ai_candidates(frames: &[FrameInfo], set: &StillSet, seg: &Segment, masks:
                 f.program && !covered(i) && (iou_weak || sim_weak)
             })
             .collect();
-        for (a, b) in runs(&weak, fps / 2, fps) {
+        for (a, b) in runs(&weak, fps / 2, (AI_WEAK_MIN_SECS * FPS) as usize) {
             let (a, b) = (a + s, b + s);
             if out.iter().any(|c: &AiCandidate| a < c.end && b > c.start) {
                 continue;
@@ -413,8 +416,9 @@ pub fn ai_candidates(frames: &[FrameInfo], set: &StillSet, seg: &Segment, masks:
             }
         }
     }
+    // 空檔全部問；灰色地帶只問前幾處
+    out.truncate(gaps + AI_MAX_WEAK_PER_SEGMENT);
     out.sort_by_key(|c| c.start);
-    out.truncate(AI_MAX_PER_SEGMENT);
     out
 }
 
@@ -742,5 +746,32 @@ mod tests {
             f.iou = 0.1;
         }
         assert!(ai_candidates(&frames, &set, &seg, &[]).is_empty());
+        // 灰色地帶太短（< 2 秒）不問
+        for f in &mut frames[10 * fps..11 * fps] {
+            f.iou = 0.3;
+        }
+        assert!(ai_candidates(&frames, &set, &seg, &[]).is_empty());
+    }
+
+    /// 灰色地帶很多時，空檔還是一定會問（不會被次數上限擠掉）
+    #[test]
+    fn gaps_are_never_dropped_by_the_weak_limit() {
+        let set = one_still_set();
+        let fps = FPS as usize;
+        let n = 300 * fps;
+        let mut frames: Vec<FrameInfo> = (0..n).map(|_| FrameInfo { program: true, layout: Layout::Dual, luma: 100.0, cut_diff: 0.0, tmpl: -1, iou: 0.0, sims: vec![0.1] }).collect();
+        // 前 200 秒每 6 秒有一段 3 秒的灰色地帶（共 33 處，超過上限）
+        for k in 0..33 {
+            for f in &mut frames[k * 6 * fps..(k * 6 + 3) * fps] {
+                f.tmpl = 0;
+                f.iou = 0.3;
+            }
+        }
+        let seg = Segment { n: 2, pieces: vec![(0, n)], start_ok: true, end_ok: true };
+        let m = |a: usize, b: usize| MaskSeg { start: a * fps, end: b * fps, layout: Layout::Dual, still: 0, by_label: false, iou: 0.0, ai: false };
+        let masks = vec![m(250, 255), m(270, 280)];
+        let c = ai_candidates(&frames, &set, &seg, &masks);
+        assert_eq!(c.iter().filter(|c| c.kind == AiKind::Weak).count(), AI_MAX_WEAK_PER_SEGMENT);
+        assert!(c.iter().any(|c| c.kind == AiKind::Gap && c.start == 255 * fps), "{c:?}");
     }
 }

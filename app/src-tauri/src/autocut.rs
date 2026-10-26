@@ -858,8 +858,10 @@ impl Watcher {
             let mut asked = 0usize;
             let t_ai = (now_ms(), Instant::now());
             for (seg, masks) in planned.iter_mut().filter(|(s, _)| s.complete()) {
-                for c in plan::ai_candidates(&frames, &self.stills, seg, masks) {
-                    let (same, note, fresh) = match self.ai_decide(&files, &c) {
+                let cands = plan::ai_candidates(&frames, &self.stills, seg, masks);
+                let answers = self.ai_decide_many(&files, &cands);
+                for (c, a) in cands.iter().zip(answers) {
+                    let (same, note, fresh) = match a {
                         Ok(x) => x,
                         Err(e) => {
                             log.push_str(&format!("  ★ AI 補判失敗（第 {} 段 側錄 {}）：{e}\n", seg.n, tc(secs(c.start))));
@@ -876,7 +878,7 @@ impl Watcher {
                         if same { "同一個來源，遮" } else { "不同，不遮" }
                     ));
                     if same {
-                        plan::apply_ai(&frames, masks, &c);
+                        plan::apply_ai(&frames, masks, c);
                     }
                 }
             }
@@ -992,40 +994,36 @@ impl Watcher {
         }
     }
 
-    /// 問 AI 這個地方的來源字跟參考靜圖是不是同一個。回傳 (同一個?, 說明, 這次有沒有真的呼叫 API)
-    fn ai_decide(&mut self, files: &[(PathBuf, f64, f64)], c: &plan::AiCandidate) -> Result<(bool, String, bool), String> {
-        let names: Vec<&str> = c.stills.iter().map(|&k| self.stills.stills[k].name.as_str()).collect();
-        let key = format!("{}|{}|{:?}|{:?}|{}", c.start, c.end, c.kind, c.layout, names.join(","));
-        if let Some((same, note)) = self.ai_cache.get(&key) {
-            return Ok((*same, note.clone(), false));
+    /// 問 AI 這些地方的來源字跟參考靜圖是不是同一個（判斷過的直接用；沒判斷過的 4 個同時問）。
+    /// 每個回傳 (同一個?, 說明, 這次有沒有真的呼叫 API)
+    fn ai_decide_many(&mut self, files: &[(PathBuf, f64, f64)], cands: &[plan::AiCandidate]) -> Vec<Result<(bool, String, bool), String>> {
+        let key_of = |c: &plan::AiCandidate| {
+            let names: Vec<&str> = c.stills.iter().map(|&k| self.stills.stills[k].name.as_str()).collect();
+            format!("{}|{}|{:?}|{:?}|{}", c.start, c.end, c.kind, c.layout, names.join(","))
+        };
+        let keys: Vec<String> = cands.iter().map(key_of).collect();
+        let mut out: Vec<Option<Result<(bool, String, bool), String>>> = keys.iter().map(|k| self.ai_cache.get(k).map(|(s, n)| Ok((*s, n.clone(), false)))).collect();
+        let todo: Vec<usize> = (0..cands.len()).filter(|&i| out[i].is_none()).collect();
+        if !todo.is_empty() {
+            let Some(gemini) = self.ai.as_ref() else { return vec![Err("AI 沒開".into()); cands.len()] };
+            let (ffmpeg, stills) = (&self.ffmpeg, &self.stills);
+            let chunk = todo.len().div_ceil(AI_THREADS);
+            let fresh: Vec<(usize, Result<(bool, String), String>)> = std::thread::scope(|sc| {
+                let hs: Vec<_> = todo
+                    .chunks(chunk)
+                    .map(|part| sc.spawn(move || part.iter().map(|&i| (i, ai_eval(ffmpeg, stills, gemini, files, &cands[i]))).collect::<Vec<_>>()))
+                    .collect();
+                hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+            });
+            for (i, r) in fresh {
+                if let Ok((same, note)) = &r {
+                    self.ai_cache.insert(keys[i].clone(), (*same, note.clone()));
+                    ai::append_cache(&self.work.join("ai.tsv"), &keys[i], *same, note);
+                }
+                out[i] = Some(r.map(|(s, n)| (s, n, true)));
+            }
         }
-        let refs: Vec<Vec<u8>> = c.stills.iter().take(2).map(|&k| ai::still_crop(&self.stills.stills[k].path, c.layout)).collect::<Result<_, _>>()?;
-        let targets: Vec<Vec<u8>> = c.samples.iter().map(|&f| self.grab_crop(files, f, c.layout)).collect::<Result<_, _>>()?;
-        let ans = self.ai.as_ref().ok_or("AI 沒開")?.compare(&refs, &targets)?;
-        // 三格裡過半說相同才算
-        let same = ans.same.iter().filter(|b| **b).count() * 2 > ans.same.len().max(1);
-        let note = format!("參考「{}」、讀到 {}", ans.reference, ans.texts.iter().map(|t| format!("「{t}」")).collect::<Vec<_>>().join(""));
-        self.ai_cache.insert(key.clone(), (same, note.clone()));
-        ai::append_cache(&self.work.join("ai.tsv"), &key, same, &note);
-        Ok((same, note, true))
-    }
-
-    /// 截側錄某一格的右上角來源字（PNG）
-    fn grab_crop(&self, files: &[(PathBuf, f64, f64)], frame: usize, layout: Layout) -> Result<Vec<u8>, String> {
-        let t = secs(frame);
-        let (p, fs, _) = files.iter().rev().find(|(_, fs, _)| *fs <= t).ok_or("找不到這一格的側錄檔")?;
-        let (x, y, w, h, k) = ai::crop_box(layout);
-        let o = command(&self.ffmpeg)
-            .args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{:.4}", t - fs), "-i"])
-            .arg(p)
-            .args(["-frames:v", "1", "-an", "-vf", &format!("crop={w}:{h}:{x}:{y},scale={}:{}:flags=lanczos", w * k, h * k), "-f", "image2pipe", "-vcodec", "png", "-"])
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| format!("無法執行 ffmpeg：{e}"))?;
-        if o.stdout.is_empty() {
-            return Err("截不到畫面".into());
-        }
-        Ok(o.stdout)
+        out.into_iter().map(|r| r.unwrap_or_else(|| Err("沒有結果".into()))).collect()
     }
 
     /// 段落開頭修準：在標題條出現前 6 秒內，找「關鍵時刻」Logo 轉場溶接到棚內結束的那一格。
@@ -1065,6 +1063,37 @@ fn collect_stderr(stderr: impl Read + Send + 'static) -> std::thread::JoinHandle
 
 // ───────────────────────── AI 補判（Gemini） ─────────────────────────
 
+/// 同時問 AI 幾個地方
+const AI_THREADS: usize = 4;
+
+/// 一個地方：截參考靜圖與側錄 3 格的右上角給 AI，過半說「相同」才算
+fn ai_eval(ffmpeg: &Path, stills: &StillSet, gemini: &ai::Gemini, files: &[(PathBuf, f64, f64)], c: &plan::AiCandidate) -> Result<(bool, String), String> {
+    let refs: Vec<Vec<u8>> = c.stills.iter().take(2).map(|&k| ai::still_crop(&stills.stills[k].path, c.layout)).collect::<Result<_, _>>()?;
+    let targets: Vec<Vec<u8>> = c.samples.iter().map(|&f| grab_crop(ffmpeg, files, f, c.layout)).collect::<Result<_, _>>()?;
+    let ans = gemini.compare(&refs, &targets)?;
+    let same = ans.same.iter().filter(|b| **b).count() * 2 > ans.same.len().max(1);
+    let note = format!("參考「{}」、讀到 {}", ans.reference, ans.texts.iter().map(|t| format!("「{t}」")).collect::<Vec<_>>().join(""));
+    Ok((same, note))
+}
+
+/// 截側錄某一格的右上角來源字（PNG）
+fn grab_crop(ffmpeg: &Path, files: &[(PathBuf, f64, f64)], frame: usize, layout: Layout) -> Result<Vec<u8>, String> {
+    let t = secs(frame);
+    let (p, fs, _) = files.iter().rev().find(|(_, fs, _)| *fs <= t).ok_or("找不到這一格的側錄檔")?;
+    let (x, y, w, h, k) = ai::crop_box(layout);
+    let o = command(ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{:.4}", t - fs), "-i"])
+        .arg(p)
+        .args(["-frames:v", "1", "-an", "-vf", &format!("crop={w}:{h}:{x}:{y},scale={}:{}:flags=lanczos", w * k, h * k), "-f", "image2pipe", "-vcodec", "png", "-"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("無法執行 ffmpeg：{e}"))?;
+    if o.stdout.is_empty() {
+        return Err("截不到畫面".into());
+    }
+    Ok(o.stdout)
+}
+
 mod ai {
     use base64::Engine as _;
     use keyword_title_core::autocut::image::{self, imageops, ImageFormat};
@@ -1076,6 +1105,22 @@ mod ai {
     pub struct Gemini {
         key: String,
         pub model: String,
+    }
+
+    /// 這組金鑰其他工具也在用，上限每分鐘 15 次：這裡最多每分鐘 10 次（所有執行緒共用），留餘裕給別人
+    const MAX_PER_MINUTE: u64 = 10;
+    static LAST_CALL: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+    fn wait_turn() {
+        let gap = Duration::from_millis(60_000 / MAX_PER_MINUTE);
+        let mut last = LAST_CALL.lock().unwrap();
+        if let Some(t) = *last {
+            let elapsed = t.elapsed();
+            if elapsed < gap {
+                std::thread::sleep(gap - elapsed);
+            }
+        }
+        *last = Some(std::time::Instant::now());
     }
 
     pub struct Answer {
@@ -1132,19 +1177,25 @@ mod ai {
                 "generationConfig": { "temperature": 0, "response_mime_type": "application/json" }
             });
             let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", self.model);
-            let resp = ureq::post(&url)
-                .set("x-goog-api-key", &self.key)
-                .set("Content-Type", "application/json")
-                .timeout(Duration::from_secs(90))
-                .send_string(&body.to_string());
-            let text = match resp {
-                Ok(r) => r.into_string().map_err(|e| e.to_string())?,
-                Err(ureq::Error::Status(code, r)) => {
-                    let detail = r.into_string().unwrap_or_default();
-                    let msg = serde_json::from_str::<serde_json::Value>(&detail).ok().and_then(|v| v["error"]["message"].as_str().map(String::from)).unwrap_or(detail);
-                    return Err(format!("Gemini 回應 {code}：{}", msg.chars().take(300).collect::<String>()));
+            let body = body.to_string();
+            let mut tries = 0;
+            let text = loop {
+                wait_turn();
+                let resp = ureq::post(&url).set("x-goog-api-key", &self.key).set("Content-Type", "application/json").timeout(Duration::from_secs(90)).send_string(&body);
+                match resp {
+                    Ok(r) => break r.into_string().map_err(|e| e.to_string())?,
+                    // 超過每分鐘上限（別的工具也在用）：等一下再試
+                    Err(ureq::Error::Status(429, _)) if tries < 3 => {
+                        tries += 1;
+                        std::thread::sleep(Duration::from_secs(20));
+                    }
+                    Err(ureq::Error::Status(code, r)) => {
+                        let detail = r.into_string().unwrap_or_default();
+                        let msg = serde_json::from_str::<serde_json::Value>(&detail).ok().and_then(|v| v["error"]["message"].as_str().map(String::from)).unwrap_or(detail);
+                        return Err(format!("Gemini 回應 {code}：{}", msg.chars().take(300).collect::<String>()));
+                    }
+                    Err(e) => return Err(format!("連不到 Gemini：{e}")),
                 }
-                Err(e) => return Err(format!("連不到 Gemini：{e}")),
             };
             let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("Gemini 回應看不懂：{e}"))?;
             let out = v["candidates"][0]["content"]["parts"][0]["text"].as_str().ok_or("Gemini 沒有回答")?;
