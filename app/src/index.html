@@ -316,11 +316,22 @@
       </div>
     </div>
 
+    <div class="card ac-chain-card">
+      <div class="ac-row">
+        <strong>每段串接</strong>
+        <span class="muted">正片出好就自動接上：正片 →（閃白）→ YT → promo，存到成品資料夾的「上傳」。監看中隨時可以改，改了會重新串，不影響掃描。</span>
+      </div>
+      <table class="ac-table ac-chain-table">
+        <thead><tr><th>段</th><th>Promo</th><th>串 YT</th><th>YT 網址</th><th>開始</th><th>結束</th><th>閃白</th><th>YT 狀態</th></tr></thead>
+        <tbody id="acChains"></tbody>
+      </table>
+    </div>
+
     <div class="ac-grid">
       <div class="card">
         <strong>段落</strong>
         <table class="ac-table">
-          <thead><tr><th>段</th><th>狀態</th><th>側錄位置</th><th>長度</th><th>遮罩</th><th></th></tr></thead>
+          <thead><tr><th>段</th><th>狀態</th><th>側錄位置</th><th>長度</th><th>遮罩</th><th>串接</th><th></th></tr></thead>
           <tbody id="acSegments"></tbody>
         </table>
         <div id="acAll" class="muted"></div>
@@ -454,6 +465,21 @@
           <input name="autocut_ai_model" spellcheck="false" placeholder="gemini-3.5-flash-lite" />
         </label>
         <p class="muted">規則沒把握的鏡頭（例如兩段同來源遮罩中間沒遮到、右上角來源字太小比不準），截右上角來源字給 Gemini 讀，跟靜圖的來源字相同就遮。判斷結果會存起來，同一個鏡頭不會重複問。</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>自動切段：水印</legend>
+        <label>台標
+          <input name="autocut_watermark" readonly placeholder="空白＝不壓" />
+          <button type="button" class="ghost small" data-pick-image="autocut_watermark">選擇</button>
+          <button type="button" class="ghost small" data-clear-field="autocut_watermark">清除</button>
+        </label>
+        <label>月份標
+          <input name="autocut_watermark_month" readonly placeholder="空白＝不壓" />
+          <button type="button" class="ghost small" data-pick-image="autocut_watermark_month">選擇</button>
+          <button type="button" class="ghost small" data-clear-field="autocut_watermark_month">清除</button>
+        </label>
+        <p class="muted">1920×1080 透明 PNG，整張蓋上。月份標檔名是年月（例如 202610.png）時，出片會自動改用同資料夾裡節目日期那個月的檔（11 月就用 202611.png），不用每月換。只壓在節目正片上，YT、promo 不壓；正片同時加上「單集影片預設音量」。</p>
       </fieldset>
 
       <fieldset>

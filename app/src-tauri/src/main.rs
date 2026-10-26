@@ -203,6 +203,7 @@ fn main() {
             autocut::autocut_render,
             autocut::autocut_report,
             autocut::autocut_set_titles,
+            autocut::autocut_set_chain,
             autocut::autocut_reveal
         ])
         .run(tauri::generate_context!())

@@ -594,6 +594,13 @@ input { padding: 6px 10px; }
 .ac-state { display: inline-block; padding: 0 8px; border-radius: 999px; border: 1px solid currentColor; font-size: 12px; white-space: nowrap; color: var(--muted); }
 .ac-state.ok { color: var(--accent); }
 .ac-state.bad { color: #c0392b; }
+.ac-chain-card { margin-bottom: 12px; }
+.ac-chain-table input.ac-url { width: 100%; min-width: 220px; }
+.ac-chain-table input.ac-time { width: 90px; }
+.ac-chain-table input.bad { border-color: #c0392b; }
+.ac-chain-table .ac-yt-status { font-size: 12px; white-space: nowrap; }
+.ac-chain-cell { white-space: nowrap; }
+.ac-chain-cell button { margin-left: 4px; }
 .ac-files, .ac-stages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 13px; max-height: 240px; overflow-y: auto; }
 .ac-files li { display: flex; gap: 8px; }
 .ac-files .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
