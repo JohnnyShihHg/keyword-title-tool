@@ -32,13 +32,16 @@ pub fn parse_titles(text: &str) -> Titles {
     };
     let mut out: Titles = BTreeMap::new();
     let mut cur: Option<usize> = None;
+    // 檔頭也有一行「全集」（YT 連結還沒填時只剩「全集 」），讀過段落後的「全集」才是結尾
+    let mut seen_segment = false;
     for line in text.lines() {
         let l = line.trim().trim_start_matches('\u{feff}');
-        if l == "全集" {
+        if l == "全集" && seen_segment {
             break;
         }
         if let Some(n) = num(l) {
             cur = Some(n);
+            seen_segment = true;
             continue;
         }
         if l.starts_with('=') {
@@ -98,6 +101,14 @@ mod tests {
         let t = parse_titles("1.\n中國辦公大樓大量空置\n2．\n重慶南方國際大樓空置危機\n第3段\n上海夜景大樓空置問題\n全集\n第四段\n不該讀到的第四段標題文字\n");
         assert_eq!(t.keys().copied().collect::<Vec<_>>(), [1, 2, 3]);
         assert!(parse_titles("10.\n超過九的編號不是段落標記喔\n").is_empty());
+    }
+
+    #[test]
+    fn header_without_links_is_not_the_end() {
+        // 直播當下檔頭的 YT 連結都還沒填：「全集 」trim 後就是「全集」，不能當成文稿結尾
+        let t = parse_titles("20261026關鍵標題1-6\r\n\r\n串一 \r\n串二 \r\n\r\n全集 \r\n=======\r\n\r\n第一段\r\n\r\n最狠選舉操盤手川普預告轟伊朗逼烏俄和談\r\n=======\r\n第二段\r\n\r\n徐佳青涉貪卻獲邀僑委晚宴高歌逐桌敬酒\r\n=======\r\n全集\r\n\r\n(00:00:00)Part1：不該讀到的全集章節標題文字\r\n");
+        assert_eq!(t.keys().copied().collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(t[&2].len(), 1, "結尾的全集章節不算");
     }
 
     #[test]

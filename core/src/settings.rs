@@ -69,6 +69,8 @@ pub struct Settings {
     pub autocut_output_dir: String,
     /// 偵測到完整一段就自動遮蓋出片
     pub autocut_auto_render: bool,
+    /// 只看這個時間（`21:50`）之後的側錄檔（側錄資料夾是整天的頻道錄影）；空白＝全部
+    pub autocut_since: String,
     /// AI 補判（規則沒把握的鏡頭交給 Gemini 看右上角來源字）的 API 金鑰；空白＝不用 AI
     pub autocut_ai_key: String,
     /// AI 補判用的模型
@@ -110,6 +112,7 @@ impl Default for Settings {
             autocut_stills_dir: String::new(),
             autocut_output_dir: String::new(),
             autocut_auto_render: true,
+            autocut_since: "21:50".to_string(),
             autocut_ai_key: String::new(),
             autocut_ai_model: "gemini-3.5-flash-lite".to_string(),
             autocut_watermark: String::new(),

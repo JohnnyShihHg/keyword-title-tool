@@ -62,6 +62,9 @@ pub struct AutocutConfig {
     /// 6 段齊了合成全集
     #[serde(default = "yes")]
     pub make_all: bool,
+    /// 從幾點開始的側錄才看（`21:50`）；空白＝資料夾裡全部
+    #[serde(default)]
+    pub since: Option<String>,
     /// 只輸出這幾段（不合成全集）
     #[serde(default)]
     pub only: Option<Vec<usize>>,
@@ -804,6 +807,10 @@ impl Watcher {
         if all.iter().any(|f| cache::name_timestamp(&f.0).is_some()) {
             all.retain(|f| cache::name_timestamp(&f.0).is_some());
             all.sort_by_key(|f| (cache::name_timestamp(&f.0), f.0.clone()));
+            // 側錄資料夾是整天的頻道錄影：只看檔名時間在「幾點開始」之後的檔
+            if let Some(since) = self.cfg.since.as_deref().map(|s| s.replace([':', '：'], "")).filter(|s| s.len() == 4 && s.chars().all(|c| c.is_ascii_digit())) {
+                all.retain(|f| cache::name_timestamp(&f.0).is_some_and(|t| t[8..12] >= *since));
+            }
         } else {
             all.retain(|f| !is_output_name(&f.0));
             all.sort_by(|a, b| a.0.cmp(&b.0));
