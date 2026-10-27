@@ -22,8 +22,17 @@ function acOutputDir() {
   return settings.autocut_output_dir || settings.output_dir || "";
 }
 
+/** 側錄資料夾最後一層是日期（2026_10_26）時，換成文稿頁的日期，不用每天重選 */
+function acWatchDir() {
+  const dir = settings.autocut_watch_dir || "";
+  const date = dateInput.value.trim();
+  if (!/^\d{8}$/.test(date)) return dir;
+  const day = `${date.slice(0, 4)}_${date.slice(4, 6)}_${date.slice(6)}`;
+  return dir.replace(/(^|[\\/])\d{4}_\d{2}_\d{2}([\\/]?)$/, `$1${day}$2`);
+}
+
 function acFillDirs() {
-  $("acWatchDir").value = settings.autocut_watch_dir || "";
+  $("acWatchDir").value = acWatchDir();
   $("acStillsDir").value = settings.autocut_stills_dir || "";
   $("acOutputDir").value = settings.autocut_output_dir || "";
   $("acOutputDir").placeholder = settings.output_dir ? `空白＝沿用 ${settings.output_dir}` : "尚未指定";
@@ -74,7 +83,7 @@ $("acStartBtn").addEventListener("click", async () => {
   try {
     await invoke("autocut_start", {
       config: {
-        watch_dir: settings.autocut_watch_dir,
+        watch_dir: acWatchDir(),
         stills_dir: settings.autocut_stills_dir,
         output_dir: acOutputDir(),
         titles,
@@ -484,6 +493,11 @@ document.querySelectorAll("[data-clear-field]").forEach((btn) => {
 dateInput.addEventListener("change", () => {
   if (dateInput.value.trim() !== acChainsDate) acLoadChains();
 });
+
+// 文稿頁更新後（打字、按「今天」、匯入、跨日）側錄資料夾跟著換日期
+window.onDocRefreshed = () => {
+  if (settings) acFillDirs();
+};
 
 // 設定載入／改變後更新畫面上的資料夾
 const acPrevSettingsChanged = window.onSettingsChanged;

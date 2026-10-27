@@ -138,6 +138,7 @@ async function refresh() {
   output.scrollTop = scroll;
 
   showWarnings(rendered.warnings);
+  window.onDocRefreshed?.();
 }
 
 function showWarnings(warnings) {
