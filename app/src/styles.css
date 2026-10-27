@@ -817,3 +817,32 @@ input.switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2
 .ac-account.expired .ac-account-dot { background: var(--danger); }
 .ac-account.expired #ytAccount { color: var(--danger); }
 .ac-account.expired { background: color-mix(in srgb, var(--danger) 8%, transparent); }
+.ac-share-cell { white-space: nowrap; }
+.ac-share-cell button { margin-left: 6px; }
+
+/* 壓 BAR：每段一個可收合區塊，裡面一條一條疊加 */
+.autocut-page .card.ac-bars { padding: 0; gap: 0; }
+.ac-bar-seg { border-bottom: 1px solid var(--line); }
+.ac-bar-seg:last-child { border-bottom: none; }
+.ac-bar-seg > summary { display: flex; align-items: center; gap: 10px; padding: 12px 20px; cursor: pointer; list-style: none; user-select: none; }
+.ac-bar-seg > summary::-webkit-details-marker { display: none; }
+.ac-bar-seg > summary::before { content: "›"; color: var(--muted); transition: transform .2s; }
+.ac-bar-seg[open] > summary::before { transform: rotate(90deg); }
+.ac-bar-name { font-weight: 500; }
+.ac-bar-count { font-size: 12px; padding: 1px 8px; border-radius: 999px; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.ac-bar-count:empty { display: none; }
+.ac-bar-list { display: flex; flex-direction: column; gap: 10px; padding: 0 20px 16px 40px; }
+.ac-bar-empty { font-size: 13px; }
+.ac-bar-item { display: flex; gap: 14px; align-items: flex-start; padding: 12px; border-radius: 12px; background: color-mix(in srgb, var(--muted) 6%, transparent); }
+.ac-bar-thumb { flex: 0 0 auto; width: 192px; aspect-ratio: 16 / 9; padding: 0; border-radius: 8px; overflow: hidden; border: 1px dashed var(--border); background: repeating-conic-gradient(color-mix(in srgb, var(--muted) 14%, transparent) 0 25%, transparent 0 50%) 0 0 / 12px 12px; color: var(--muted); font-size: 12px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.ac-bar-thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.ac-bar-fields { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.ac-bar-fields label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.ac-bar-fields input { color: var(--text); }
+.ac-bar-fields input.bad { border-color: var(--danger); }
+.ac-bar-chips { font-size: 12px; line-height: 1.5; }
+@media (max-width: 860px) {
+  .ac-bar-list { padding-left: 16px; padding-right: 16px; }
+  .ac-bar-item { flex-wrap: wrap; }
+  .ac-bar-thumb { width: 100%; }
+}

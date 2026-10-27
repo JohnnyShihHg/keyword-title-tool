@@ -719,6 +719,7 @@ function readSettingsForm() {
     autocut_ai_model: f.autocut_ai_model.value.trim() || settings.autocut_ai_model,
     autocut_watermark: f.autocut_watermark.value,
     autocut_watermark_month: f.autocut_watermark_month.value,
+    autocut_copy_to_share: settings.autocut_copy_to_share,
     yt_client_id: f.yt_client_id.value.trim(),
     yt_client_secret: f.yt_client_secret.value.trim(),
     yt_default_tags: f.yt_default_tags.value,

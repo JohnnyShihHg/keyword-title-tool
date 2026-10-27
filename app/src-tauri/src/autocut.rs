@@ -7,7 +7,7 @@
 
 use crate::video::{command, require_tool};
 use keyword_title_core::video::{self, Clip, Encoder, Join, RenderSpec};
-use keyword_title_core::autocut::image;
+use keyword_title_core::autocut::{bars, image};
 use keyword_title_core::autocut::plan::{self, MaskSeg, Segment};
 use keyword_title_core::autocut::stills::StillSet;
 use keyword_title_core::autocut::titles::{parse_titles, Titles};
@@ -106,6 +106,23 @@ pub struct AutocutConfig {
     /// 每段後面接什麼（開始時的設定；之後用 `autocut_set_chain` 改）
     #[serde(default)]
     pub chains: HashMap<usize, Chain>,
+    /// 每段要壓的 BAR（開始時的設定；之後用 `autocut_set_bars` 改）
+    #[serde(default)]
+    pub bars: HashMap<usize, Vec<Bar>>,
+}
+
+/// 壓 BAR：舊標題出現在標題條的時段，整張蓋上新的 BAR 圖
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Bar {
+    /// 要換掉的舊標題（跟標題條 OCR 比對）
+    #[serde(default)]
+    pub old: String,
+    /// 新的 BAR 圖：1920×1080 透明 PNG，整張蓋上
+    #[serde(default)]
+    pub image: String,
+    /// 手動指定的時段（成品的段內秒數）；有填就不用自動找的
+    #[serde(default)]
+    pub manual: Vec<(f64, f64)>,
 }
 
 fn half() -> f64 {
@@ -169,6 +186,8 @@ pub struct SegStatus {
     error: Option<String>,
     /// 串接（沒設定要接東西＝None）
     chain: Option<ChainStatus>,
+    /// 每個 BAR 實際要蓋的時段（成品的段內秒數），順序跟設定一樣；還沒能規劃＝空
+    bars: Vec<Vec<(f64, f64)>>,
 }
 
 #[derive(Clone, Serialize, Default)]
@@ -226,6 +245,8 @@ struct RenderJob {
     n: usize,
     pieces: Vec<(usize, usize)>,
     masks: Vec<(MaskSeg, String, Layout)>,
+    /// 壓 BAR：(BAR 圖, 側錄時間軸上要蓋的格數範圍)
+    bars: Vec<(String, Vec<(usize, usize)>)>,
     files: Vec<(PathBuf, f64, f64)>,
     out: PathBuf,
     work: PathBuf,
@@ -252,6 +273,8 @@ struct PlanSeg {
     recorded: f64,
     masks: usize,
     job: Option<RenderJob>,
+    /// 每個 BAR 要蓋的時段（成品的段內秒數）
+    bars: Vec<Vec<(f64, f64)>>,
 }
 
 #[derive(Clone)]
@@ -282,6 +305,8 @@ struct Shared {
     config: Mutex<Option<AutocutConfig>>,
     /// 每段後面接什麼（畫面隨時可改）
     chains: Mutex<HashMap<usize, Chain>>,
+    /// 每段要壓的 BAR（監看中可以改；Watcher 每輪比對，變了就重新規劃）
+    bars: Mutex<HashMap<usize, Vec<Bar>>>,
     /// 串接成品的狀態（Done 的指紋＝正片指紋＋串接設定）
     chain_renders: Mutex<HashMap<usize, Render>>,
     all_progress: Mutex<Option<f64>>,
@@ -315,6 +340,7 @@ impl Shared {
                     rec_end: p.rec_end,
                     recorded: p.recorded,
                     masks: p.masks,
+                    bars: p.bars.clone(),
                     ..Default::default()
                 };
                 match renders.get(&p.n) {
@@ -490,6 +516,7 @@ pub fn start(app: AppHandle, state: &AutocutState, config: AutocutConfig) -> Res
     }
     *shared.config.lock().unwrap() = Some(config.clone());
     *shared.chains.lock().unwrap() = config.chains.clone();
+    *shared.bars.lock().unwrap() = config.bars.clone();
     if config.batch {
         let p = Path::new(&config.output_dir).join(".autocut").join("batch.log");
         let _ = std::fs::remove_file(&p);
@@ -559,6 +586,10 @@ pub fn autocut_render(app: AppHandle, state: State<'_, AutocutState>, n: usize) 
     if matches!(shared.renders.lock().unwrap().get(&n), Some(Render::Queued | Render::Rendering(_))) {
         return Err(format!("第 {n} 段已經在出片佇列裡"));
     }
+    // 手動重出：串接也一定跟著重串（不然設定沒變時會沿用舊的串接成品）
+    if let Some(cfg) = shared.config.lock().unwrap().as_ref() {
+        let _ = std::fs::remove_file(chain_marker(cfg, n));
+    }
     shared.renders.lock().unwrap().insert(n, Render::Queued);
     shared.jobs.lock().unwrap().as_ref().ok_or("出片已停止")?.send(Job::Segment(job)).map_err(|e| e.to_string())?;
     shared.publish(&app);
@@ -575,6 +606,19 @@ pub fn autocut_set_chain(app: AppHandle, state: State<'_, AutocutState>, n: usiz
         None => shared.chains.lock().unwrap().remove(&n),
     };
     shared.queue_chain(n, retry.unwrap_or(false));
+    shared.publish(&app);
+}
+
+/// 改某段要壓的 BAR。監看中下一輪（15 秒內）重新規劃；已經出好的正片會變成「靜圖已更新」可以重新出片
+#[tauri::command]
+pub fn autocut_set_bars(app: AppHandle, state: State<'_, AutocutState>, n: usize, bars: Vec<Bar>) {
+    let Some(shared) = state.shared.lock().unwrap().clone().filter(|s| s.running.load(Ordering::SeqCst)) else { return };
+    let bars: Vec<Bar> = bars.into_iter().filter(|b| !b.image.trim().is_empty() && (!b.old.trim().is_empty() || !b.manual.is_empty())).collect();
+    if bars.is_empty() {
+        shared.bars.lock().unwrap().remove(&n);
+    } else {
+        shared.bars.lock().unwrap().insert(n, bars);
+    }
     shared.publish(&app);
 }
 
@@ -603,6 +647,84 @@ pub fn autocut_reveal(path: String) -> Result<(), String> {
     #[cfg(not(any(windows, target_os = "macos")))]
     let r = command(Path::new("xdg-open")).arg(if p.is_file() { p.parent().unwrap_or(p) } else { p }).spawn();
     r.map(|_| ()).map_err(|e| format!("無法開啟：{e}"))
+}
+
+// ───────────────────── 成品複製到當天的共用資料夾（給人檢查） ─────────────────────
+
+#[derive(Clone, Serialize)]
+struct ShareCopy {
+    n: usize,
+    /// copying／done／skipped（已經有同名檔，不覆蓋）／failed
+    state: &'static str,
+    progress: f64,
+    dest: String,
+    error: Option<String>,
+}
+
+/// 第 n 段成品複製成 `共用資料夾\{MMDD}關鍵\{日期}-{n}.mp4`。已經有同名檔就不動；
+/// 先寫暫存檔、複製完才改成正式檔名，檢查的人不會打開複製到一半的檔。回傳目的地路徑
+#[tauri::command]
+pub fn autocut_copy_to_share(app: AppHandle, settings: keyword_title_core::Settings, date: String, n: usize, src: String) -> Result<String, String> {
+    let txt = keyword_title_core::sync::file_path(&settings, &date).ok_or("共用資料夾設定不完整（設定頁的共用資料夾根目錄、資料夾格式）")?;
+    let dir = txt.parent().ok_or("共用資料夾設定不完整")?.to_path_buf();
+    let ext = Path::new(&src).extension().and_then(|e| e.to_str()).unwrap_or("mp4").to_string();
+    let name = format!("{date}-{n}.{ext}");
+    let dest = dir.join(&name);
+    let dest_s = dest.display().to_string();
+    let out = dest_s.clone();
+    std::thread::spawn(move || {
+        let emit = |state: &'static str, progress: f64, error: Option<String>| {
+            let _ = app.emit("share-copy", ShareCopy { n, state, progress, dest: dest_s.clone(), error });
+        };
+        if dest.exists() {
+            return emit("skipped", 0.0, None);
+        }
+        if !dir.is_dir() {
+            return emit("failed", 0.0, Some(format!("當天資料夾 {} 還沒建立", dir.display())));
+        }
+        let tmp = dir.join(format!(".~{name}.tmp"));
+        let result = copy_with_progress(Path::new(&src), &tmp, &|p| emit("copying", p, None)).and_then(|()| {
+            // 複製期間有人放了同名檔：不蓋
+            if dest.exists() {
+                return Ok(false);
+            }
+            std::fs::rename(&tmp, &dest).map(|()| true).map_err(|e| format!("改成正式檔名失敗：{e}"))
+        });
+        match result {
+            Ok(true) => emit("done", 1.0, None),
+            Ok(false) => {
+                let _ = std::fs::remove_file(&tmp);
+                emit("skipped", 0.0, None)
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                emit("failed", 0.0, Some(e))
+            }
+        }
+    });
+    Ok(out)
+}
+
+fn copy_with_progress(src: &Path, dst: &Path, progress: &dyn Fn(f64)) -> Result<(), String> {
+    use std::io::Write;
+    let mut r = std::fs::File::open(src).map_err(|e| format!("讀不到成品：{e}"))?;
+    let total = r.metadata().map_err(|e| e.to_string())?.len().max(1);
+    let mut w = std::fs::File::create(dst).map_err(|e| format!("寫不進共用資料夾：{e}"))?;
+    let mut buf = vec![0u8; 8 * 1024 * 1024];
+    let (mut done, mut last) = (0u64, Instant::now());
+    loop {
+        let k = r.read(&mut buf).map_err(|e| format!("讀取成品失敗：{e}"))?;
+        if k == 0 {
+            break;
+        }
+        w.write_all(&buf[..k]).map_err(|e| format!("寫入共用資料夾失敗：{e}"))?;
+        done += k as u64;
+        if last.elapsed() > Duration::from_secs(1) {
+            progress(done as f64 / total as f64);
+            last = Instant::now();
+        }
+    }
+    w.flush().map_err(|e| format!("寫入共用資料夾失敗：{e}"))
 }
 
 // ───────────────────────── 監看 ─────────────────────────
@@ -638,6 +760,10 @@ struct Watcher {
     /// 規劃用的資料有沒有變（新掃好的檔、靜圖、文稿）
     dirty: bool,
     last_titles: String,
+    /// 上次規劃時的壓 BAR 設定
+    last_bars: HashMap<usize, Vec<Bar>>,
+    /// 壓 BAR 時段的邊界窗口 (lo, hi, 進場?) → 對準的那一格（要解碼一小段，結果記起來）
+    bar_edges: HashMap<(usize, usize, bool), usize>,
     /// AI 補判（沒設金鑰＝None）與判斷過的結果（存在 .autocut\ai.tsv，同一個地方不重複問）
     ai: Option<ai::Gemini>,
     ai_cache: HashMap<String, (bool, String)>,
@@ -673,6 +799,8 @@ impl Watcher {
             failed: HashMap::new(),
             dirty: true,
             last_titles: String::new(),
+            last_bars: HashMap::new(),
+            bar_edges: HashMap::new(),
         })
     }
 
@@ -722,6 +850,11 @@ impl Watcher {
     fn poll(&mut self) -> Result<bool, String> {
         self.load_stills()?;
         self.load_titles()?;
+        let bars = self.shared.bars.lock().unwrap().clone();
+        if bars != self.last_bars {
+            self.last_bars = bars;
+            self.dirty = true;
+        }
         let files = self.list_files()?;
         // 依序處理錄完的檔；中間任何一個還沒錄完，後面的都等（時間軸要連續）
         let mut statuses: Vec<FileStatus> = Vec::new();
@@ -1073,7 +1206,8 @@ impl Watcher {
         }
 
         // 段落狀態：文稿有的每一段都列出來
-        let wanted = |n: usize| self.cfg.only.as_ref().is_none_or(|o| o.contains(&n));
+        let only = self.cfg.only.clone();
+        let wanted = |n: usize| only.as_ref().is_none_or(|o| o.contains(&n));
         let mut ns: Vec<usize> = self.titles.keys().copied().collect();
         ns.extend(planned.iter().map(|(s, _)| s.n).filter(|n| !self.titles.contains_key(n)));
         ns.sort();
@@ -1081,7 +1215,7 @@ impl Watcher {
         let mut plan_segs = Vec::new();
         for n in ns {
             let Some((seg, masks)) = planned.iter().find(|(s, _)| s.n == n) else {
-                plan_segs.push(PlanSeg { n, state: "waiting", rec_start: None, rec_end: None, recorded: 0.0, masks: 0, job: None });
+                plan_segs.push(PlanSeg { n, state: "waiting", rec_start: None, rec_end: None, recorded: 0.0, masks: 0, job: None, bars: Vec::new() });
                 continue;
             };
             let state = if !seg.start_ok {
@@ -1091,7 +1225,9 @@ impl Watcher {
             } else {
                 "recording"
             };
-            let job = (seg.complete() && wanted(n)).then(|| self.job(seg, masks, &files));
+            let job = (seg.complete() && wanted(n)).then(|| self.job(seg, masks, &files, &ocr));
+            // 畫面列出每個 BAR 實際要蓋的時段（段內秒數）
+            let bars = job.as_ref().map_or_else(Vec::new, |j| j.bars.iter().map(|(_, rs)| rs.iter().map(|&(a, b)| (out_time(&j.pieces, a), out_time(&j.pieces, b))).collect()).collect());
             plan_segs.push(PlanSeg {
                 n,
                 state,
@@ -1100,6 +1236,7 @@ impl Watcher {
                 recorded: if seg.end_ok { seg.duration() } else { secs(total.saturating_sub(seg.start())) },
                 masks: masks.len(),
                 job,
+                bars,
             });
         }
         // 送去出片：完整、還沒出過的段落。之前出過（工具重開）且判斷一樣就直接算完成
@@ -1157,7 +1294,7 @@ impl Watcher {
         self.shared.write_report_file(&self.cfg.output_dir);
     }
 
-    fn job(&self, seg: &Segment, masks: &[MaskSeg], files: &[(PathBuf, f64, f64)]) -> RenderJob {
+    fn job(&mut self, seg: &Segment, masks: &[MaskSeg], files: &[(PathBuf, f64, f64)], ocr: &BTreeMap<usize, String>) -> RenderJob {
         let masks: Vec<(MaskSeg, String, Layout)> = masks
             .iter()
             .map(|m| {
@@ -1179,6 +1316,21 @@ impl Watcher {
             let mtime = std::fs::metadata(p).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
             fingerprint.push_str(&format!("\nwatermark {p} {mtime}"));
         }
+        // 壓 BAR：每個 BAR 要蓋的格數範圍（只留在這段片段裡的部分）
+        let specs = self.last_bars.get(&seg.n).cloned().unwrap_or_default();
+        let mut bars = Vec::new();
+        for bar in specs.iter().filter(|b| !b.image.trim().is_empty()) {
+            let ranges = if bar.manual.is_empty() {
+                self.bar_ranges(files, ocr, seg, &bar.old)
+            } else {
+                bar.manual.iter().filter_map(|&(a, b)| Some((in_frame(&seg.pieces, a)?, in_frame(&seg.pieces, b)?))).filter(|(a, b)| b > a).collect()
+            };
+            let ranges = clip_to_pieces(&seg.pieces, &ranges);
+            let mtime = std::fs::metadata(&bar.image).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+            fingerprint.push_str(&format!("
+bar {} {mtime} {ranges:?}", bar.image));
+            bars.push((bar.image.clone(), ranges));
+        }
         // 只取這段用得到的檔（出片時不用開整天的檔）
         let (a, b) = (secs(seg.start()), secs(seg.end()));
         let files = files.iter().filter(|(_, fs, fd)| fs + fd > a && *fs < b).cloned().collect();
@@ -1186,6 +1338,7 @@ impl Watcher {
             n: seg.n,
             pieces: seg.pieces.clone(),
             masks,
+            bars,
             files,
             out: Path::new(&self.cfg.output_dir).join(format!("第{}段.mp4", seg.n)),
             work: self.work.clone(),
@@ -1229,6 +1382,55 @@ impl Watcher {
 
     /// 段落開頭修準：在標題條出現前 6 秒內，找「關鍵時刻」Logo 轉場溶接到棚內結束的那一格。
     /// 只解碼這一小段（80×45 灰階）。
+    /// 自動找舊標題出現的時段：OCR（2 秒一張）找大概位置，邊界再逐格對準
+    fn bar_ranges(&mut self, files: &[(PathBuf, f64, f64)], ocr: &BTreeMap<usize, String>, seg: &Segment, old: &str) -> Vec<(usize, usize)> {
+        bars::title_runs(ocr, old, seg.start(), seg.end())
+            .into_iter()
+            .map(|r| {
+                let start = self.bar_edge(files, r.start_lo, r.start_hi, true);
+                let end = self.bar_edge(files, r.end_lo, r.end_hi, false);
+                (start, end.max(start + 1))
+            })
+            .collect()
+    }
+
+    /// 標題條在 [lo, hi] 之間換標題的那一格。進場＝新標題出現的第一格往前多蓋 2 格；
+    /// 出場＝舊標題最後一格往後多蓋 2 格（換標題常有幾格動畫，寧可多蓋一點）。解碼失敗就蓋整個窗口
+    fn bar_edge(&mut self, files: &[(PathBuf, f64, f64)], lo: usize, hi: usize, entering: bool) -> usize {
+        if let Some(&k) = self.bar_edges.get(&(lo, hi, entering)) {
+            return k;
+        }
+        let fallback = if entering { lo } else { hi };
+        let k = self.bar_change(files, lo, hi).map_or(fallback, |c| if entering { c.saturating_sub(2).max(lo) } else { (c + 1).min(hi) });
+        self.bar_edges.insert((lo, hi, entering), k);
+        k
+    }
+
+    /// 解碼 [lo-1, hi] 的標題條（縮小灰階），回傳差異最大的那一格（換標題的第一格）
+    fn bar_change(&self, files: &[(PathBuf, f64, f64)], lo: usize, hi: usize) -> Option<usize> {
+        let s0 = lo.saturating_sub(1);
+        let count = (hi + 1).saturating_sub(s0).min(240);
+        if count < 2 {
+            return None;
+        }
+        let t0 = secs(s0);
+        let (p, fs, _) = files.iter().rev().find(|(_, fs, _)| *fs <= t0)?;
+        let (bw, bh) = (150u32, 11u32);
+        let o = command(&self.ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{:.4}", t0 - fs), "-i"])
+            .arg(p)
+            .args(["-frames:v", &count.to_string(), "-an", "-vf", &format!("bwdif=mode=send_frame:parity=tff,crop=1500:110:400:860,scale={bw}:{bh}:flags=area,format=gray"), "-f", "rawvideo", "-"])
+            .stdin(Stdio::null())
+            .output()
+            .ok()?;
+        let frames: Vec<&[u8]> = o.stdout.chunks_exact((bw * bh) as usize).collect();
+        let mut diffs = vec![0.0f32; frames.len()];
+        for k in 1..frames.len() {
+            diffs[k] = frames[k].iter().zip(frames[k - 1]).map(|(a, b)| (*a as f32 - *b as f32).abs()).sum::<f32>() / frames[k].len() as f32;
+        }
+        bars::change_frame(&diffs).map(|k| s0 + k)
+    }
+
     fn refine_start(&self, files: &[(PathBuf, f64, f64)], s: usize) -> Option<usize> {
         let (s0, count) = plan::refine_window(s);
         let t0 = secs(s0);
@@ -1243,6 +1445,45 @@ impl Watcher {
         let frames: Vec<image::GrayImage> = o.stdout.chunks_exact((LOGO_W * LOGO_H) as usize).filter_map(|c| image::GrayImage::from_raw(LOGO_W, LOGO_H, c.to_vec())).collect();
         plan::logo_end(&self.logo, &frames).map(|k| s0 + k)
     }
+}
+
+/// 側錄時間軸的格 → 成品的段內秒數（不在片段裡就貼到最近的片段邊界）
+fn out_time(pieces: &[(usize, usize)], f: usize) -> f64 {
+    let mut acc = 0.0;
+    for &(s, e) in pieces {
+        if f <= e {
+            return acc + secs(f.saturating_sub(s));
+        }
+        acc += secs(e - s);
+    }
+    acc
+}
+
+/// 成品的段內秒數 → 側錄時間軸的格
+fn in_frame(pieces: &[(usize, usize)], t: f64) -> Option<usize> {
+    let mut acc = 0.0;
+    for &(s, e) in pieces {
+        let d = secs(e - s);
+        if t <= acc + d {
+            return Some(s + ((t - acc).max(0.0) * FPS).round() as usize);
+        }
+        acc += d;
+    }
+    None
+}
+
+/// 只留下落在片段裡的部分（片段之間被剪掉的不蓋）
+fn clip_to_pieces(pieces: &[(usize, usize)], ranges: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for &(a, b) in ranges {
+        for &(s, e) in pieces {
+            let (x, y) = (a.max(s), b.min(e));
+            if y > x {
+                out.push((x, y));
+            }
+        }
+    }
+    out
 }
 
 fn is_output_name(name: &str) -> bool {
@@ -1935,13 +2176,30 @@ fn render_segment(app: &AppHandle, shared: &Shared, ffmpeg: &Path, job: &RenderJ
         }
         cur = format!("m{si}");
     }
+    // 壓 BAR：遮罩之後、水印之前，舊標題出現的時段整張蓋上新的 BAR 圖
+    let mut n_bar = 0;
+    for (bi, (img, ranges)) in job.bars.iter().enumerate() {
+        if ranges.is_empty() {
+            continue;
+        }
+        if !Path::new(img).is_file() {
+            return Err(format!("找不到 BAR 圖：{img}"));
+        }
+        args.extend(["-i".into(), img.clone()]);
+        let inp = n_in + job.masks.len() + n_bar;
+        n_bar += 1;
+        let en = ranges.iter().map(|&(a, b)| format!("between(t,{:.4},{:.4})", rel(a), rel(b))).collect::<Vec<_>>().join("+");
+        g.push(format!("[{inp}:v]scale={W}:{H},format=rgba[bar{bi}]"));
+        g.push(format!("[{cur}][bar{bi}]overlay=0:0:enable='{en}'[bo{bi}]"));
+        cur = format!("bo{bi}");
+    }
     // 水印蓋在最上面（遮罩之後），整張 1920×1080 蓋上
     for (wi, p) in job.watermarks.iter().enumerate() {
         if !Path::new(p).is_file() {
             return Err(format!("找不到水印：{p}"));
         }
         args.extend(["-i".into(), p.clone()]);
-        let inp = n_in + job.masks.len() + wi;
+        let inp = n_in + job.masks.len() + n_bar + wi;
         g.push(format!("[{inp}:v]scale={W}:{H},format=rgba[wm{wi}]"));
         g.push(format!("[{cur}][wm{wi}]overlay=0:0[wmo{wi}]"));
         cur = format!("wmo{wi}");

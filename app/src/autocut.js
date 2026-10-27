@@ -37,6 +37,7 @@ function acFillDirs() {
   $("acOutputDir").value = settings.autocut_output_dir || "";
   $("acOutputDir").placeholder = settings.output_dir ? `空白＝沿用 ${settings.output_dir}` : "尚未指定";
   $("acAutoRender").checked = settings.autocut_auto_render !== false;
+  $("acCopyShare").checked = !!settings.autocut_copy_to_share;
   $("acSince").value = settings.autocut_since ?? "";
   $("acTitlesSource").textContent = settings.sync_enabled
     ? "文稿：共用資料夾當天的 txt"
@@ -66,6 +67,65 @@ $("acSince").addEventListener("change", () => {
 $("acAutoRender").addEventListener("change", () => {
   settings.autocut_auto_render = $("acAutoRender").checked;
   persistSettings();
+});
+$("acCopyShare").addEventListener("change", () => {
+  settings.autocut_copy_to_share = $("acCopyShare").checked;
+  persistSettings();
+  if (acStatus) acShow(acStatus);
+});
+
+// ───────── 成品複製到當天的共用資料夾（{日期}-{段}.mp4，給人檢查） ─────────
+// 每個成品這次開程式只複製一次；目的地已有同名檔就不覆蓋（Rust 端判斷）
+
+let acShare = {}; // 段號 → { state, progress, dest, error }
+const acShareTried = new Set();
+
+/** 這段要複製的成品：有串接就等串接完成，沒有串接用正片 */
+function acShareSource(s) {
+  if (s.chain) return s.chain.state === "done" ? s.chain.output : "";
+  return s.state === "done" && !s.stale ? s.output : "";
+}
+
+function acCopyToShare(st) {
+  if (!settings?.autocut_copy_to_share) return;
+  const date = dateInput.value.trim();
+  if (!/^\d{8}$/.test(date)) return;
+  for (const s of st.segments) {
+    const src = acShareSource(s);
+    if (!src || acShareTried.has(src)) continue;
+    acShareTried.add(src);
+    acShare[s.n] = { state: "copying", progress: 0 };
+    invoke("autocut_copy_to_share", { settings, date, n: s.n, src }).catch((e) => {
+      acShare[s.n] = { state: "failed", error: String(e) };
+      acShow(acStatus);
+    });
+  }
+}
+
+function acShareCell(td, n) {
+  const c = acShare[n];
+  if (!c) return;
+  const [label, cls] = {
+    copying: [`複製中 ${Math.round((c.progress || 0) * 100)}%`, "ok"],
+    done: ["已複製", "done"],
+    skipped: ["已有同名檔，未複製", ""],
+    failed: ["複製失敗", "bad"],
+  }[c.state] || [c.state, ""];
+  const pill = document.createElement("span");
+  acPill(pill, label, cls, c.state === "copying" ? c.progress || 0 : null);
+  pill.title = c.error || c.dest || "";
+  td.append(pill);
+  if (c.dest && (c.state === "done" || c.state === "skipped")) {
+    const open = Object.assign(document.createElement("button"), { type: "button", className: "ghost small", textContent: "開啟" });
+    open.onclick = () => invoke("autocut_reveal", { path: c.dest });
+    td.append(open);
+  }
+}
+
+listen("share-copy", (e) => {
+  acShare[e.payload.n] = e.payload;
+  if (e.payload.state === "done") showNotice({ title: `第 ${e.payload.n} 段已複製到共用資料夾`, message: e.payload.dest });
+  if (acStatus) acShow(acStatus);
 });
 
 /** 文稿頁目前的內容（跟存成 txt 一樣的格式） */
@@ -103,6 +163,7 @@ $("acStartBtn").addEventListener("click", async () => {
         chains: Object.fromEntries(
           [1, 2, 3, 4, 5, 6].map((n) => [n, acChainPayload(n)]).filter(([, c]) => c),
         ),
+        bars: acBarsConfig(),
       },
     });
     $("acLog").textContent = "";
@@ -173,7 +234,7 @@ function acShow(st) {
       }
       const where = s.rec_start == null ? "" : `${acTime(s.rec_start)} – ${acTime(s.rec_end)}`;
       const len = s.state === "waiting" ? "" : fmtTime(s.recorded);
-      tr.innerHTML = `<td>第 ${s.n} 段</td><td><span class="ac-state"></span></td><td>${where}</td><td>${len}</td><td>${s.rec_end == null ? "" : s.masks}</td><td class="ac-chain-cell"></td><td class="ac-actions"></td>`;
+      tr.innerHTML = `<td>第 ${s.n} 段</td><td><span class="ac-state"></span></td><td>${where}</td><td>${len}</td><td>${s.rec_end == null ? "" : s.masks}</td><td class="ac-chain-cell"></td><td class="ac-share-cell"></td><td class="ac-actions"></td>`;
       acPill(tr.querySelector(".ac-state"), label, cls, s.state === "rendering" ? s.progress : null);
       if (s.error) tr.querySelector(".ac-state").title = s.error;
       const actions = tr.querySelector(".ac-actions");
@@ -185,6 +246,15 @@ function acShow(st) {
         actions.append(open);
       }
       acChainCell(tr.querySelector(".ac-chain-cell"), s, st.running);
+      // 壓 BAR：展開下面「壓 BAR」那一段
+      const barBtn = document.createElement("button");
+      barBtn.type = "button";
+      barBtn.className = "ghost small";
+      const nb = window.acBarCount?.(s.n) || 0;
+      barBtn.textContent = nb ? `壓 BAR（${nb}）` : "壓 BAR";
+      barBtn.onclick = () => window.acOpenBars?.(s.n);
+      actions.append(barBtn);
+      acShareCell(tr.querySelector(".ac-share-cell"), s.n);
       // 完整但沒出（關了自動出片）、出片失敗、靜圖更新後：讓使用者自己按
       if (st.running && (s.state === "complete" || s.state === "failed" || (s.state === "done" && s.stale))) {
         const btn = document.createElement("button");
@@ -192,14 +262,30 @@ function acShow(st) {
         btn.textContent = s.state === "complete" ? "出片" : "重新出片";
         btn.onclick = () => invoke("autocut_render", { n: s.n }).catch((e) => acMessage(String(e)));
         actions.append(btn);
+      } else if (st.running && s.state === "done") {
+        // 已經出好、設定也沒變：還是可以手動重出（例如換了 BAR 圖但檔名一樣）
+        const btn = document.createElement("button");
+        btn.className = "ghost small";
+        btn.textContent = "重新出片";
+        btn.onclick = async () => {
+          const ok = await dialog.ask(`第 ${s.n} 段已經出好了，要重新出片嗎？\n會覆蓋「第${s.n}段.mp4」，有串接的話也會重新串接。`, {
+            title: "重新出片",
+            kind: "warning",
+            okLabel: "重新出片",
+            cancelLabel: "取消",
+          });
+          if (ok) invoke("autocut_render", { n: s.n }).catch((e) => acMessage(String(e)));
+        };
+        actions.append(btn);
       }
       return tr;
     }),
   );
   if (!st.segments.length) {
-    $("acSegments").innerHTML = `<tr><td colspan="7" class="muted">按「開始監看」後，偵測到的段落會列在這裡</td></tr>`;
+    $("acSegments").innerHTML = `<tr><td colspan="8" class="muted">按「開始監看」後，偵測到的段落會列在這裡</td></tr>`;
   }
   acLabelCells($("acSegments"));
+  acCopyToShare(st);
   $("acAll").textContent =
     st.all_progress != null ? `全集合成中 ${Math.round(st.all_progress * 100)}%` : st.all ? `全集：${st.all}` : "";
 

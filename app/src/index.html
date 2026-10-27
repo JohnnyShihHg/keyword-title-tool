@@ -346,6 +346,10 @@
               <span class="ac-list-label">各段到齊自動合成全集</span>
               <input id="acMakeAll" type="checkbox" class="switch" checked />
             </label>
+            <label class="ac-list-row">
+              <span class="ac-list-label">成品複製到當天共用資料夾<small>{日期}-{段}.mp4，給人檢查；已有同名檔不覆蓋</small></span>
+              <input id="acCopyShare" type="checkbox" class="switch" />
+            </label>
           </div>
         </div>
       </section>
@@ -357,7 +361,7 @@
         </div>
         <div class="card ac-flush">
           <table class="ac-table ac-seg-table">
-            <thead><tr><th>段</th><th>狀態</th><th>側錄位置</th><th>長度</th><th>遮罩</th><th>串接</th><th></th></tr></thead>
+            <thead><tr><th>段</th><th>狀態</th><th>側錄位置</th><th>長度</th><th>遮罩</th><th>串接</th><th>共用資料夾</th><th></th></tr></thead>
             <tbody id="acSegments"></tbody>
           </table>
         </div>
@@ -374,6 +378,14 @@
             <tbody id="acChains"></tbody>
           </table>
         </div>
+      </section>
+
+      <section class="ac-section">
+        <div class="ac-section-head">
+          <h3>壓 BAR</h3>
+          <p>舊標題出現在標題條的時段，整張蓋上新的 BAR 圖（1920×1080 透明 PNG）。時段用標題條 OCR 自動找並對準到格，對不到可以手動填。改了之後已出好的正片會變「靜圖已更新」，按「重新出片」就會套上（串接也會跟著重串）。</p>
+        </div>
+        <div id="acBars" class="card ac-bars"></div>
       </section>
 
       <section class="ac-section">
@@ -677,6 +689,7 @@
   <script src="app.js"></script>
   <script src="video.js"></script>
   <script src="autocut.js"></script>
+  <script src="bars.js"></script>
   <script src="youtube.js"></script>
 </body>
 </html>

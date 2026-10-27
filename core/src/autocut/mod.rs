@@ -10,6 +10,7 @@
 //! - 要不要遮：靜圖右上角的來源字當樣板比對；或畫面跟某張靜圖夠像。
 //! - 閃光的格子（亮度突然大變）不參與判斷，沿用前一格的結果。
 
+pub mod bars;
 pub mod cache;
 pub mod frame;
 pub mod plan;

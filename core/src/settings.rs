@@ -79,6 +79,8 @@ pub struct Settings {
     pub autocut_watermark: String,
     /// 月份標（例如 `202610.png`）。檔名是年月時，出片自動換成節目日期那個月的同資料夾檔案
     pub autocut_watermark_month: String,
+    /// 每段成品（有串接就是串接成品）複製一份到當天的共用資料夾 `{日期}-{段}.mp4`，給人檢查；已有同名檔不覆蓋
+    pub autocut_copy_to_share: bool,
 
     // --- YouTube 上傳 ---
     /// Google Cloud「電腦版應用程式」OAuth 用戶端 ID；空白＝不能上傳
@@ -139,6 +141,7 @@ impl Default for Settings {
             autocut_ai_model: "gemini-3.5-flash-lite".to_string(),
             autocut_watermark: String::new(),
             autocut_watermark_month: String::new(),
+            autocut_copy_to_share: false,
             yt_client_id: String::new(),
             yt_client_secret: String::new(),
             yt_default_tags: String::new(),
