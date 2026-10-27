@@ -42,7 +42,13 @@ struct Token {
     /// UNIX 秒
     expires_at: u64,
     channel: String,
+    /// Google 不再接受 refresh token（同意畫面在「測試」狀態約 7 天就失效，或被撤銷）：要重新登入
+    #[serde(default)]
+    expired: bool,
 }
+
+/// 登入過期時的錯誤訊息；畫面靠開頭這幾個字認出來（youtube.js 的 YT_EXPIRED）
+pub const EXPIRED: &str = "YouTube 登入已過期";
 
 #[derive(Clone, Serialize)]
 struct UploadEvent {
@@ -160,16 +166,28 @@ fn token_request(form: &[(&str, &str)]) -> Result<serde_json::Value, String> {
 /// 有效的 access token（快過期就用 refresh token 換新的）
 fn access_token(app: &AppHandle, settings: &Settings) -> Result<String, String> {
     let mut t = load_token(app).ok_or("還沒登入 YouTube")?;
+    if t.expired {
+        return Err(format!("{EXPIRED}，請按「重新登入」"));
+    }
     if t.expires_at > now() + 120 && !t.access_token.is_empty() {
         return Ok(t.access_token);
     }
-    let v = token_request(&[
+    let v = match token_request(&[
         ("client_id", settings.yt_client_id.trim()),
         ("client_secret", settings.yt_client_secret.trim()),
         ("refresh_token", &t.refresh_token),
         ("grant_type", "refresh_token"),
-    ])
-    .map_err(|e| format!("YouTube 授權過期，請重新登入（{e}）"))?;
+    ]) {
+        Ok(v) => v,
+        // 400／401＝Google 說這個 refresh token 不能用了（網路斷線不算，那是別的錯誤）
+        Err(e) if e.starts_with("HTTP 400") || e.starts_with("HTTP 401") => {
+            t.expired = true;
+            t.access_token.clear();
+            save_token(app, &t)?;
+            return Err(format!("{EXPIRED}，請按「重新登入」（{e}）"));
+        }
+        Err(e) => return Err(format!("換 YouTube 授權失敗：{e}")),
+    };
     t.access_token = v["access_token"].as_str().unwrap_or_default().to_string();
     t.expires_at = now() + v["expires_in"].as_u64().unwrap_or(3600);
     save_token(app, &t)?;
@@ -258,7 +276,7 @@ fn login(app: &AppHandle, settings: &Settings, cancel: &AtomicBool) -> Result<St
     let channel = channel_title(&access)?;
     save_token(
         app,
-        &Token { refresh_token: refresh, access_token: access, expires_at: now() + v["expires_in"].as_u64().unwrap_or(3600), channel: channel.clone() },
+        &Token { refresh_token: refresh, access_token: access, expires_at: now() + v["expires_in"].as_u64().unwrap_or(3600), channel: channel.clone(), expired: false },
     )?;
     Ok(channel)
 }
@@ -267,13 +285,15 @@ fn login(app: &AppHandle, settings: &Settings, cancel: &AtomicBool) -> Result<St
 pub struct AccountStatus {
     logged_in: bool,
     channel: String,
+    /// 登入過，但 Google 已經不接受了（要重新登入）
+    expired: bool,
 }
 
 #[tauri::command]
 pub fn yt_account(app: AppHandle) -> AccountStatus {
     match load_token(&app) {
-        Some(t) => AccountStatus { logged_in: true, channel: t.channel },
-        None => AccountStatus { logged_in: false, channel: String::new() },
+        Some(t) => AccountStatus { logged_in: !t.expired, channel: t.channel, expired: t.expired },
+        None => AccountStatus { logged_in: false, channel: String::new(), expired: false },
     }
 }
 
@@ -477,7 +497,9 @@ pub async fn yt_playlists(app: AppHandle, settings: Settings) -> Result<Vec<Play
 #[tauri::command]
 pub fn yt_upload(app: AppHandle, state: State<YoutubeState>, settings: Settings, req: UploadRequest) -> Result<(), String> {
     check_client(&settings)?;
-    load_token(&app).ok_or("還沒登入 YouTube")?;
+    if load_token(&app).ok_or("還沒登入 YouTube")?.expired {
+        return Err(format!("{EXPIRED}，請按「重新登入」"));
+    }
     if !Path::new(&req.path).is_file() {
         return Err(format!("找不到檔案：{}", req.path));
     }

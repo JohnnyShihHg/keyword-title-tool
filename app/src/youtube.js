@@ -40,15 +40,36 @@ function ytMessage(text) {
 
 // ───────── 帳號 ─────────
 
+// 登入過期（同意畫面在「測試」狀態約 7 天）：Rust 端錯誤訊息以這幾個字開頭
+const YT_EXPIRED = "YouTube 登入已過期";
+let ytExpired = false;
+let ytExpiredNoticed = false;
+
 async function ytShowAccount() {
   const a = await invoke("yt_account");
   ytLoggedIn = a.logged_in;
-  $("ytAccount").textContent = a.logged_in ? a.channel : "還沒登入";
-  $("ytAccount").closest(".ac-account").classList.toggle("on", a.logged_in);
-  $("ytLoginBtn").textContent = a.logged_in ? "換帳號" : "登入 YouTube";
-  $("ytLogoutBtn").classList.toggle("hidden", !a.logged_in);
+  ytExpired = a.expired;
+  if (!a.expired) ytExpiredNoticed = false;
+  $("ytAccount").textContent = a.expired ? `${a.channel}：登入已過期，請重新登入` : a.logged_in ? a.channel : "還沒登入";
+  const bar = $("ytAccount").closest(".ac-account");
+  bar.classList.toggle("on", a.logged_in);
+  bar.classList.toggle("expired", a.expired);
+  $("ytLoginBtn").textContent = a.expired ? "重新登入" : a.logged_in ? "換帳號" : "登入 YouTube";
+  $("ytLogoutBtn").classList.toggle("hidden", !a.logged_in && !a.expired);
   $("ytPlaylistDefault").classList.toggle("hidden", !a.logged_in);
+  if (a.expired && !ytExpiredNoticed) {
+    ytExpiredNoticed = true;
+    showNotice({ title: "YouTube 登入已過期", message: "到自動切段頁按「重新登入」；登入後自動上傳會接著跑。" });
+  }
   if (a.logged_in) ytLoadPlaylists();
+  ytUpdate();
+}
+
+/** 任何 YouTube 呼叫的錯誤：是登入過期就更新帳號列（紅字＋提示一次），回傳是不是過期 */
+function ytCheckExpired(e) {
+  if (!String(e).startsWith(YT_EXPIRED)) return false;
+  if (!ytExpired) ytShowAccount();
+  return true;
 }
 
 $("ytLoginBtn").addEventListener("click", async () => {
@@ -271,6 +292,7 @@ async function ytLoadPlaylists() {
     ytPlaylists = await invoke("yt_playlists", { settings });
   } catch (e) {
     ytPlaylists = [];
+    if (ytCheckExpired(e)) return;
     ytMessage(`讀不到播放清單：${e}`);
   }
   ytPlaylists.sort((a, b) => a.title.localeCompare(b.title, "zh-Hant"));
@@ -503,8 +525,9 @@ async function ytFetchStates(ids) {
     ytRemote = { ...ytRemote, ...(await invoke("yt_video_states", { settings, ids: due })) };
     ytRemoteBusy = false;
     ytUpdate();
-  } catch {
+  } catch (e) {
     ytRemoteBusy = false; // 查不到（沒網路、配額）就先照本機紀錄顯示
+    ytCheckExpired(e);
   }
 }
 
@@ -557,6 +580,7 @@ async function ytUpload(m, path, again) {
     ytMessage("");
   } catch (e) {
     ytMessage(String(e));
+    if (ytCheckExpired(e)) ytAutoTried.delete(path); // 重新登入後自動上傳會再試
   }
 }
 
@@ -582,7 +606,8 @@ function ytMissing(m) {
 function ytWaitingFor(m) {
   if (!settings?.yt_auto_upload) return null;
   const path = ytAutoPath(m.number);
-  if (!path || ytLinkId(ytDocLink(m.number)) || ytDone[path] || ytUploads[m.number]) return null;
+  if (!path || ytLinkId(ytDocLink(m.number)) || ytDone[path] || (ytUploads[m.number] && !ytExpired)) return null;
+  if (ytExpired) return ["重新登入"]; // 過期時清單也讀不到，別誤報成「等播放清單」
   const miss = ytMissing(m);
   return miss.length ? miss : null;
 }
@@ -629,7 +654,14 @@ listen("yt-upload", (e) => {
     showNotice({ title: `第 ${u.n} 段已上傳 YouTube（私人）`, message: `https://youtu.be/${u.video_id}` });
     ytWriteLink(u.n, u.video_id);
   }
-  if (u.state === "failed") ytMessage(`第 ${u.n} 段上傳失敗：${u.error}`);
+  if (u.state === "failed") {
+    ytMessage(`第 ${u.n} 段上傳失敗：${u.error}`);
+    // 傳到一半過期：重新登入後讓自動上傳再試一次
+    if (ytCheckExpired(u.error)) {
+      ytAutoTried.delete(u.path);
+      delete ytUploads[u.n];
+    }
+  }
   ytUpdate();
 });
 

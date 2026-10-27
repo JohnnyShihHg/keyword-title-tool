@@ -813,3 +813,7 @@ input.switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2
   .ac-yt-table td.ac-actions button { display: inline-block; width: auto; }
   .ac-yt-table td.ac-actions button + button { margin: 0; }
 }
+/* YouTube 登入過期：帳號列紅字、紅點 */
+.ac-account.expired .ac-account-dot { background: var(--danger); }
+.ac-account.expired #ytAccount { color: var(--danger); }
+.ac-account.expired { background: color-mix(in srgb, var(--danger) 8%, transparent); }
