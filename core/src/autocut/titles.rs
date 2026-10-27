@@ -48,7 +48,7 @@ pub fn parse_titles(text: &str) -> Titles {
             cur = None;
             continue;
         }
-        if l.is_empty() || l.starts_with('#') || l.contains("http") {
+        if l.is_empty() || l.starts_with('#') || l.contains("http") || crate::parse::is_keywords_heading(l) || crate::parse::is_keywords_line(l) {
             continue;
         }
         if let Some(n) = cur {

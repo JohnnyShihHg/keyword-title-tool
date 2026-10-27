@@ -9,7 +9,7 @@ const AC_STATES = {
   complete: ["完整", "ok"],
   queued: ["排隊出片", "ok"],
   rendering: ["出片中", "ok"],
-  done: ["完成", "ok"],
+  done: ["完成", "done"],
   incomplete: ["不完整", "bad"],
   failed: ["失敗", "bad"],
 };
@@ -139,12 +139,28 @@ function acTime(sec) {
   return sec == null ? "…" : fmtTime(sec);
 }
 
+/** 窄視窗表格變卡片時，每格上面的小字欄名（取自表頭） */
+function acLabelCells(tbody) {
+  const heads = [...(tbody.closest("table")?.tHead?.rows[0]?.cells || [])].map((c) => c.textContent);
+  for (const tr of tbody.rows) [...tr.cells].forEach((td, i) => (td.dataset.label = td.colSpan > 1 ? "" : heads[i] ?? ""));
+}
+
+/** 狀態膠囊；progress（0–1）有值時把進度填進膠囊 */
+function acPill(el, label, cls, progress = null) {
+  el.className = `ac-state ${cls}${progress != null ? " prog" : ""}`;
+  el.textContent = label;
+  if (progress != null) el.style.setProperty("--p", progress);
+  else el.style.removeProperty("--p");
+}
+
 function acShow(st) {
   acStatus = st;
   $("acStartBtn").classList.toggle("hidden", st.running);
   $("acStopBtn").classList.toggle("hidden", !st.running);
+  $("acRunState").classList.toggle("on", st.running);
+  $("acRunState").lastElementChild.textContent = st.running ? "監看中" : "已停止";
   if (st.message) acMessage(st.message);
-  else if (st.running) acMessage("監看中，每 15 秒檢查一次側錄資料夾");
+  else if (st.running) acMessage("每 15 秒檢查一次側錄資料夾");
 
   $("acSegments").replaceChildren(
     ...st.segments.map((s) => {
@@ -157,8 +173,8 @@ function acShow(st) {
       }
       const where = s.rec_start == null ? "" : `${acTime(s.rec_start)} – ${acTime(s.rec_end)}`;
       const len = s.state === "waiting" ? "" : fmtTime(s.recorded);
-      tr.innerHTML = `<td>第 ${s.n} 段</td><td><span class="ac-state ${cls}"></span></td><td>${where}</td><td>${len}</td><td>${s.rec_end == null ? "" : s.masks}</td><td class="ac-chain-cell"></td><td class="ac-actions"></td>`;
-      tr.querySelector(".ac-state").textContent = label;
+      tr.innerHTML = `<td>第 ${s.n} 段</td><td><span class="ac-state"></span></td><td>${where}</td><td>${len}</td><td>${s.rec_end == null ? "" : s.masks}</td><td class="ac-chain-cell"></td><td class="ac-actions"></td>`;
+      acPill(tr.querySelector(".ac-state"), label, cls, s.state === "rendering" ? s.progress : null);
       if (s.error) tr.querySelector(".ac-state").title = s.error;
       const actions = tr.querySelector(".ac-actions");
       if (s.output) {
@@ -180,6 +196,10 @@ function acShow(st) {
       return tr;
     }),
   );
+  if (!st.segments.length) {
+    $("acSegments").innerHTML = `<tr><td colspan="7" class="muted">按「開始監看」後，偵測到的段落會列在這裡</td></tr>`;
+  }
+  acLabelCells($("acSegments"));
   $("acAll").textContent =
     st.all_progress != null ? `全集合成中 ${Math.round(st.all_progress * 100)}%` : st.all ? `全集：${st.all}` : "";
 
@@ -229,7 +249,7 @@ const AC_CHAIN_STATES = {
   waiting: ["等正片", ""],
   queued: ["排隊", "ok"],
   rendering: ["串接中", "ok"],
-  done: ["完成", "ok"],
+  done: ["完成", "done"],
   stale: ["設定已改", "bad"],
   failed: ["失敗", "bad"],
 };
@@ -334,13 +354,13 @@ function acBuildChainRows() {
       tr.dataset.chain = n;
       tr.innerHTML = `<td>第 ${n} 段</td>
         <td><select class="ac-promo"><option value="0">不接</option><option value="20">20 秒</option><option value="45">45 秒</option></select></td>
-        <td><input type="checkbox" class="ac-yt" /></td>
+        <td><input type="checkbox" class="ac-yt switch" /></td>
         <td class="ac-src-cell"><select class="ac-src"><option value="yt">YT</option><option value="file">檔案</option></select>
           <input class="ac-url" spellcheck="false" placeholder="https://youtu.be/…" />
           <button type="button" class="ghost small ac-pick">選擇檔案</button></td>
         <td><input class="ac-start ac-time" spellcheck="false" placeholder="開頭" /></td>
         <td><input class="ac-end ac-time" spellcheck="false" placeholder="結尾" /></td>
-        <td><input type="checkbox" class="ac-flash" /></td>
+        <td><input type="checkbox" class="ac-flash switch" /></td>
         <td class="ac-yt-status muted"></td>`;
       const q = (s) => tr.querySelector(s);
       q(".ac-promo").value = String(c.promo);
@@ -410,6 +430,7 @@ function acBuildChainRows() {
     }),
   );
   for (const n of [1, 2, 3, 4, 5, 6]) acYtStatus(n, acChains[n].ytStatus);
+  acLabelCells($("acChains"));
 }
 
 function acYtStatus(n, text) {
@@ -453,8 +474,7 @@ function acChainCell(td, s, running) {
   let [label, cls] = AC_CHAIN_STATES[ch.state] || [ch.state, ""];
   if (ch.state === "rendering" && ch.progress != null) label += ` ${Math.round(ch.progress * 100)}%`;
   const span = document.createElement("span");
-  span.className = `ac-state ${cls}`;
-  span.textContent = label;
+  acPill(span, label, cls, ch.state === "rendering" ? ch.progress : null);
   if (ch.error) span.title = ch.error;
   td.append(span);
   if (ch.output && (ch.state === "done" || ch.state === "stale")) {

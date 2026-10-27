@@ -236,6 +236,18 @@ mod tests {
     }
 
     #[test]
+    fn backend_keywords_block_round_trips() {
+        let mut input = original();
+        input.segments[0].text.push_str("\n#川普 #馬斯克#普丁\n");
+        let exported = render(&input).text;
+        assert!(exported.contains("#川普 #馬斯克#普丁\n\n後臺關鍵字\n,川普 ,馬斯克 ,普丁\n\n=======\n"), "{exported}");
+        let imported = import(&exported, &input.settings);
+        let again = render(&back_to_input(&imported, &input.settings)).text;
+        assert_eq!(again, exported, "匯入再匯出不會多一份後臺關鍵字");
+        assert_eq!(again.matches("後臺關鍵字").count(), 1);
+    }
+
+    #[test]
     fn hand_written_header_links_are_recognised() {
         let input = original();
         let body = render(&input).text;

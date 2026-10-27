@@ -283,72 +283,138 @@
   </main>
 
   <main id="page-autocut" class="page hidden autocut-page">
-    <div class="card ac-setup">
-      <div class="ac-row">
-        <strong>自動切段</strong>
-        <span class="muted">側錄每錄完一個 10 分鐘檔就掃描；偵測到完整一段就遮蓋輸出「第N段.mp4」，各段到齊合成「全集.mp4」。</span>
+    <div class="ac-wrap">
+      <!-- 頂部控制列：捲動時固定在上方（毛玻璃） -->
+      <div class="ac-hero">
+        <div class="ac-hero-text">
+          <h2>自動切段</h2>
+          <p>側錄每錄完一個 10 分鐘檔就掃描；完整一段就遮蓋輸出，各段到齊合成全集。</p>
+        </div>
+        <div class="ac-hero-side">
+          <div class="ac-hero-status">
+            <span id="acRunState" class="ac-run"><i></i><span>已停止</span></span>
+            <span id="acMessage" class="ac-message"></span>
+          </div>
+          <div class="ac-hero-actions">
+            <button type="button" id="acReportBtn" class="ghost">判斷報告</button>
+            <button type="button" id="acOpenBtn" class="ghost">成品資料夾</button>
+            <button type="button" id="acStartBtn" class="primary">開始監看</button>
+            <button type="button" id="acStopBtn" class="ghost danger hidden">停止</button>
+          </div>
+        </div>
       </div>
-      <label class="ac-dir">側錄資料夾
-        <input id="acWatchDir" readonly placeholder="尚未指定" />
-        <button type="button" class="ghost small" data-ac-pick="autocut_watch_dir">選擇</button>
-      </label>
-      <label class="ac-dir">靜圖資料夾
-        <input id="acStillsDir" readonly placeholder="空白＝跟側錄同資料夾" />
-        <button type="button" class="ghost small" data-ac-pick="autocut_stills_dir">選擇</button>
-        <button type="button" class="ghost small" data-ac-clear="autocut_stills_dir">清除</button>
-      </label>
-      <label class="ac-dir">成品資料夾
-        <input id="acOutputDir" readonly placeholder="空白＝沿用設定的輸出資料夾" />
-        <button type="button" class="ghost small" data-ac-pick="autocut_output_dir">選擇</button>
-        <button type="button" class="ghost small" data-ac-clear="autocut_output_dir">清除</button>
-      </label>
-      <div class="ac-row">
-        <label>從 <input id="acSince" class="ac-since" spellcheck="false" placeholder="21:50" /> 開始的側錄</label>
-        <label class="check"><input id="acAutoRender" type="checkbox" /> 完整一段就自動出片</label>
-        <label class="check"><input id="acMakeAll" type="checkbox" checked /> 各段到齊自動合成全集</label>
-        <span id="acTitlesSource" class="muted"></span>
-      </div>
-      <div class="ac-row">
-        <button type="button" id="acStartBtn">▶ 開始監看</button>
-        <button type="button" id="acStopBtn" class="ghost danger hidden">■ 停止</button>
-        <button type="button" id="acReportBtn" class="ghost">判斷報告</button>
-        <button type="button" id="acOpenBtn" class="ghost">開啟成品資料夾</button>
-        <span id="acMessage" class="muted"></span>
-      </div>
-    </div>
 
-    <div class="card ac-chain-card">
-      <div class="ac-row">
-        <strong>每段串接</strong>
-        <span class="muted">正片出好就自動接上：正片 →（閃白）→ 影片（YT 或檔案）→ promo，存到成品資料夾的「上傳」。只有正片 +6dB、壓台標月份標，串的影片和 promo 不動。監看中隨時可以改，改了會重新串，不影響掃描。</span>
-      </div>
-      <table class="ac-table ac-chain-table">
-        <thead><tr><th>段</th><th>Promo</th><th>串影片</th><th>來源</th><th>開始</th><th>結束</th><th>閃白</th><th>影片狀態</th></tr></thead>
-        <tbody id="acChains"></tbody>
-      </table>
-    </div>
+      <section class="ac-section">
+        <div class="ac-section-head">
+          <h3>來源與輸出</h3>
+          <span id="acTitlesSource" class="ac-note"></span>
+        </div>
+        <div class="ac-setup">
+          <div class="card ac-list">
+            <label class="ac-list-row ac-dir">
+              <span class="ac-list-label">側錄資料夾<small>跟著文稿日期自動換</small></span>
+              <input id="acWatchDir" readonly placeholder="尚未指定" />
+              <span class="ac-list-btns"><button type="button" class="ghost small" data-ac-pick="autocut_watch_dir">選擇</button></span>
+            </label>
+            <label class="ac-list-row ac-dir">
+              <span class="ac-list-label">靜圖資料夾</span>
+              <input id="acStillsDir" readonly placeholder="空白＝跟側錄同資料夾" />
+              <span class="ac-list-btns">
+                <button type="button" class="ghost small" data-ac-pick="autocut_stills_dir">選擇</button>
+                <button type="button" class="ghost small" data-ac-clear="autocut_stills_dir">清除</button>
+              </span>
+            </label>
+            <label class="ac-list-row ac-dir">
+              <span class="ac-list-label">成品資料夾</span>
+              <input id="acOutputDir" readonly placeholder="空白＝沿用設定的輸出資料夾" />
+              <span class="ac-list-btns">
+                <button type="button" class="ghost small" data-ac-pick="autocut_output_dir">選擇</button>
+                <button type="button" class="ghost small" data-ac-clear="autocut_output_dir">清除</button>
+              </span>
+            </label>
+          </div>
+          <div class="card ac-list">
+            <label class="ac-list-row">
+              <span class="ac-list-label">只看這個時間之後的側錄</span>
+              <input id="acSince" class="ac-since" spellcheck="false" placeholder="21:50" />
+            </label>
+            <label class="ac-list-row">
+              <span class="ac-list-label">完整一段就自動出片</span>
+              <input id="acAutoRender" type="checkbox" class="switch" />
+            </label>
+            <label class="ac-list-row">
+              <span class="ac-list-label">各段到齊自動合成全集</span>
+              <input id="acMakeAll" type="checkbox" class="switch" checked />
+            </label>
+          </div>
+        </div>
+      </section>
 
-    <div class="ac-grid">
-      <div class="card">
-        <strong>段落</strong>
-        <table class="ac-table">
-          <thead><tr><th>段</th><th>狀態</th><th>側錄位置</th><th>長度</th><th>遮罩</th><th>串接</th><th></th></tr></thead>
-          <tbody id="acSegments"></tbody>
-        </table>
-        <div id="acAll" class="muted"></div>
-      </div>
-      <div class="card">
-        <strong>側錄檔</strong>
-        <ul id="acFiles" class="ac-files"></ul>
-      </div>
-      <div class="card">
-        <strong>各階段耗時</strong>
-        <ul id="acStages" class="ac-stages"></ul>
-      </div>
-      <div class="card">
-        <strong>紀錄</strong>
-        <pre id="acLog" class="ac-log"></pre>
-      </div>
+      <section class="ac-section">
+        <div class="ac-section-head">
+          <h3>段落進度</h3>
+          <span id="acAll" class="ac-note"></span>
+        </div>
+        <div class="card ac-flush">
+          <table class="ac-table ac-seg-table">
+            <thead><tr><th>段</th><th>狀態</th><th>側錄位置</th><th>長度</th><th>遮罩</th><th>串接</th><th></th></tr></thead>
+            <tbody id="acSegments"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="ac-section">
+        <div class="ac-section-head">
+          <h3>每段串接</h3>
+          <p>正片出好就自動接上：正片 →（閃白）→ 影片 → promo，存到成品資料夾的「上傳」。只有正片 +6dB、壓台標月份標；監看中隨時可改，改了會重新串。</p>
+        </div>
+        <div class="card ac-flush">
+          <table class="ac-table ac-chain-table">
+            <thead><tr><th>段</th><th>Promo</th><th>串影片</th><th>來源</th><th>開始</th><th>結束</th><th>閃白</th><th>影片狀態</th></tr></thead>
+            <tbody id="acChains"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="ac-section">
+        <div class="ac-section-head">
+          <h3>上傳 YouTube</h3>
+          <p>上傳成私人影片。標題、說明從文稿帶入（含 #關鍵字），說明最後接設定頁的固定內容；標記＝預設標記＋文稿的後臺關鍵字；縮圖用共用資料夾當天的 N.jpg；傳完自動加進選的播放清單。設定頁開「自動上傳」後，成品做好就自動傳。片尾、中插、版權確認、發布請在 Studio 做。</p>
+        </div>
+        <div class="card ac-flush">
+          <div class="ac-account">
+            <span class="ac-account-dot"></span>
+            <span id="ytAccount">還沒登入</span>
+            <span id="ytMessage" class="ac-message"></span>
+            <span class="spacer"></span>
+            <div id="ytPlaylistDefault" class="hidden" title="預設播放清單（每段可以在下面各自改）"></div>
+            <button type="button" id="ytLogoutBtn" class="ghost small hidden">登出</button>
+            <button type="button" id="ytLoginBtn" class="small">登入 YouTube</button>
+          </div>
+          <table class="ac-table ac-yt-table">
+            <thead><tr><th>段</th><th>標題（文稿）</th><th>縮圖</th><th>播放清單</th><th>檔案</th><th>狀態</th><th></th></tr></thead>
+            <tbody id="ytRows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <details class="ac-section ac-details">
+        <summary class="ac-section-head"><h3>詳細資訊</h3><span class="ac-note">側錄檔、各階段耗時、紀錄</span></summary>
+        <div class="ac-grid">
+          <div class="card">
+            <strong>側錄檔</strong>
+            <ul id="acFiles" class="ac-files"></ul>
+          </div>
+          <div class="card">
+            <strong>各階段耗時</strong>
+            <ul id="acStages" class="ac-stages"></ul>
+          </div>
+          <div class="card ac-log-card">
+            <strong>紀錄</strong>
+            <pre id="acLog" class="ac-log"></pre>
+          </div>
+        </div>
+      </details>
     </div>
   </main>
 
@@ -469,6 +535,33 @@
       </fieldset>
 
       <fieldset>
+        <legend>YouTube 上傳</legend>
+        <label>OAuth 用戶端 ID
+          <input name="yt_client_id" spellcheck="false" placeholder="xxxx.apps.googleusercontent.com" />
+        </label>
+        <label>OAuth 用戶端密碼
+          <input name="yt_client_secret" type="password" autocomplete="off" spellcheck="false" />
+        </label>
+        <label class="check"><input name="yt_auto_upload" type="checkbox" /> 自動上傳：自動切段每段成品做好就上傳成私人影片（有串接就等串接完成）</label>
+        <fieldset class="sub yt-require">
+          <span class="muted">自動上傳前要備齊（沒齊就先等，齊了才傳；等的時候每分鐘看一次共用資料夾）</span>
+          <label class="check"><input name="yt_require_thumbnail" type="checkbox" /> 縮圖（共用資料夾的 N.jpg，或自己選的）</label>
+          <label class="check"><input name="yt_require_keywords" type="checkbox" /> 文稿這段的後臺關鍵字</label>
+          <label class="check"><input name="yt_require_playlist" type="checkbox" /> 必選的播放清單都已經在頻道上建好</label>
+        </fieldset>
+        <label>必選播放清單（每段一定會加；一行一個，{日期} 會換成文稿日期，例如 關鍵時刻20261026全集）
+          <textarea name="yt_required_playlists" rows="2" spellcheck="false"></textarea>
+        </label>
+        <label>預設標記
+          <textarea name="yt_default_tags" rows="3" spellcheck="false" placeholder="東森, 東森新聞, EBC, 新聞"></textarea>
+        </label>
+        <label>說明欄固定內容
+          <textarea name="yt_description_footer" rows="5" spellcheck="false" placeholder="例如：訂閱、會員、粉專連結（Studio「上傳預設設定」的說明）"></textarea>
+        </label>
+        <p class="muted">用戶端 ID、密碼在 Google Cloud 建一個「電腦版應用程式」的 OAuth 用戶端取得（要先啟用 YouTube Data API v3）。預設標記每段都會加，排在文稿的「後臺關鍵字」前面，用英文逗號分隔，合計超過 500 字時後面的截掉。說明欄固定內容接在每段說明最後（API 上傳不會套用 Studio 的上傳預設設定）。</p>
+      </fieldset>
+
+      <fieldset>
         <legend>自動切段：水印</legend>
         <label>台標
           <input name="autocut_watermark" readonly placeholder="空白＝不壓" />
@@ -584,5 +677,6 @@
   <script src="app.js"></script>
   <script src="video.js"></script>
   <script src="autocut.js"></script>
+  <script src="youtube.js"></script>
 </body>
 </html>

@@ -79,6 +79,28 @@ pub struct Settings {
     pub autocut_watermark: String,
     /// 月份標（例如 `202610.png`）。檔名是年月時，出片自動換成節目日期那個月的同資料夾檔案
     pub autocut_watermark_month: String,
+
+    // --- YouTube 上傳 ---
+    /// Google Cloud「電腦版應用程式」OAuth 用戶端 ID；空白＝不能上傳
+    pub yt_client_id: String,
+    /// 同一個 OAuth 用戶端的密碼
+    pub yt_client_secret: String,
+    /// 每段都會加上的預設標記（逗號分隔；接在該段自己填的標記後面）
+    pub yt_default_tags: String,
+    /// 接在每段說明最後的固定內容（API 上傳不會套用 Studio 的「上傳預設設定」）
+    pub yt_description_footer: String,
+    /// 預設加入的播放清單 ID（可以多個，逗號分隔）；空白＝不加。每段可以在自動切段頁各自改
+    pub yt_playlist_id: String,
+    /// 自動切段每段成品（有串接就是串接成品）做好就自動上傳成私人影片
+    pub yt_auto_upload: bool,
+    /// 自動上傳前要等縮圖（共用資料夾的 N.jpg 或自己選的）
+    pub yt_require_thumbnail: bool,
+    /// 自動上傳前要等文稿有這段的後臺關鍵字
+    pub yt_require_keywords: bool,
+    /// 自動上傳前要等必選的播放清單都在頻道上建好了
+    pub yt_require_playlist: bool,
+    /// 每段一定要加的播放清單名稱，一行一個；`{日期}` 換成文稿日期（20261026）
+    pub yt_required_playlists: String,
 }
 
 impl Default for Settings {
@@ -117,6 +139,16 @@ impl Default for Settings {
             autocut_ai_model: "gemini-3.5-flash-lite".to_string(),
             autocut_watermark: String::new(),
             autocut_watermark_month: String::new(),
+            yt_client_id: String::new(),
+            yt_client_secret: String::new(),
+            yt_default_tags: String::new(),
+            yt_description_footer: String::new(),
+            yt_playlist_id: String::new(),
+            yt_auto_upload: false,
+            yt_require_thumbnail: true,
+            yt_require_keywords: true,
+            yt_require_playlist: true,
+            yt_required_playlists: "✨關鍵時刻【最新上傳】\n關鍵時刻{日期}全集".to_string(),
         }
     }
 }

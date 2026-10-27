@@ -1,4 +1,4 @@
-use crate::parse::parse_segment;
+use crate::parse::{hashtags, parse_segment, KEYWORDS_HEADING};
 use crate::settings::Settings;
 use crate::timecode::{self, Timecode};
 use serde::{Deserialize, Serialize};
@@ -198,6 +198,13 @@ fn layout(date: &str, parts: &[Part], doc: &DocumentInput) -> String {
             out.push(format!("{}.", p.number));
         }
         out.extend(p.lines.iter().cloned());
+        // 後臺關鍵字：這段 #關鍵字 換成 `,川普 ,馬斯克`（YouTube 後台「標記」用）
+        let keywords: Vec<String> = p.lines.iter().flat_map(|l| hashtags(l)).collect();
+        if !keywords.is_empty() {
+            out.push(String::new());
+            out.push(KEYWORDS_HEADING.to_string());
+            out.push(keywords.iter().map(|k| format!(",{k}")).collect::<Vec<_>>().join(" "));
+        }
         out.push(String::new());
         out.push(DIVIDER.to_string());
     }

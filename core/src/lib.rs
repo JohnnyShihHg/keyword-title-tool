@@ -13,6 +13,7 @@ pub mod settings;
 pub mod sync;
 pub mod timecode;
 pub mod video;
+pub mod youtube;
 
 pub use render::{render, DocumentInput, Rendered, SegmentInput, Warning};
 pub use settings::Settings;

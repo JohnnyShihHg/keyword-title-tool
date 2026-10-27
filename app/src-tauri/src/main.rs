@@ -3,6 +3,7 @@
 mod autocut;
 mod sync;
 mod video;
+mod youtube;
 
 use keyword_title_core::render::{self, DocumentInput, Rendered};
 use keyword_title_core::Settings;
@@ -155,6 +156,7 @@ fn main() {
         .plugin(tauri_plugin_process::init())
         .manage(video::VideoState::default())
         .manage(autocut::AutocutState::default())
+        .manage(youtube::YoutubeState::default())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if CLOSING.swap(true, Ordering::SeqCst) {
@@ -204,7 +206,17 @@ fn main() {
             autocut::autocut_report,
             autocut::autocut_set_titles,
             autocut::autocut_set_chain,
-            autocut::autocut_reveal
+            autocut::autocut_reveal,
+            youtube::yt_account,
+            youtube::yt_login,
+            youtube::yt_logout,
+            youtube::yt_meta,
+            youtube::yt_uploaded,
+            youtube::yt_cancel,
+            youtube::yt_open,
+            youtube::yt_video_states,
+            youtube::yt_playlists,
+            youtube::yt_upload
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

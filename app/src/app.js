@@ -719,6 +719,17 @@ function readSettingsForm() {
     autocut_ai_model: f.autocut_ai_model.value.trim() || settings.autocut_ai_model,
     autocut_watermark: f.autocut_watermark.value,
     autocut_watermark_month: f.autocut_watermark_month.value,
+    yt_client_id: f.yt_client_id.value.trim(),
+    yt_client_secret: f.yt_client_secret.value.trim(),
+    yt_default_tags: f.yt_default_tags.value,
+    yt_description_footer: f.yt_description_footer.value,
+    yt_auto_upload: f.yt_auto_upload.checked,
+    yt_require_thumbnail: f.yt_require_thumbnail.checked,
+    yt_require_keywords: f.yt_require_keywords.checked,
+    yt_require_playlist: f.yt_require_playlist.checked,
+    yt_required_playlists: f.yt_required_playlists.value,
+    // 播放清單在自動切段頁選（youtube.js），這裡原樣保留
+    yt_playlist_id: settings.yt_playlist_id,
   };
 }
 

@@ -2,6 +2,33 @@ use crate::fullwidth::to_fullwidth;
 
 /// 開場標記：下一行標題就是這段的段標題。
 const OPENING_MARKER: &str = "開場";
+/// 段落最後的「後臺關鍵字」區塊（標題、`,川普 ,馬斯克…` 那行）是排版時從 #關鍵字 產生的
+pub const KEYWORDS_HEADING: &str = "後臺關鍵字";
+
+/// `後臺關鍵字`／`後台關鍵字` 標題行
+pub fn is_keywords_heading(line: &str) -> bool {
+    matches!(line.trim(), "後臺關鍵字" | "後台關鍵字")
+}
+
+/// `,川普 ,馬斯克` 那種後臺關鍵字行
+pub fn is_keywords_line(line: &str) -> bool {
+    let l = line.trim();
+    l.starts_with(',') || l.starts_with('，')
+}
+
+/// 一行 `#川普 #馬斯克#普丁` 裡的關鍵字（不是 # 開頭的行回傳空）
+pub fn hashtags(line: &str) -> Vec<String> {
+    let l = line.trim();
+    if !(l.starts_with('#') || l.starts_with('＃')) {
+        return Vec::new();
+    }
+    l.split(|c: char| c == '#' || c == '＃' || c.is_whitespace()).filter(|t| !t.is_empty()).map(str::to_string).collect()
+}
+
+/// 後臺關鍵字行 `,川普 ,馬斯克` → 關鍵字
+pub fn keywords_in_line(line: &str) -> Vec<String> {
+    line.split([',', '，']).map(str::trim).filter(|t| !t.is_empty()).map(str::to_string).collect()
+}
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ParsedSegment {
@@ -30,7 +57,8 @@ pub fn parse_segment(raw: &str, max_speaker_chars: usize) -> ParsedSegment {
     let mut odd_quote_lines = Vec::new();
 
     for line in raw.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        if is_section_marker(line) {
+        // 節次標記；匯入舊 txt 時帶進來的後臺關鍵字區塊（排版時會重新產生）
+        if is_section_marker(line) || is_keywords_heading(line) || is_keywords_line(line) {
             continue;
         }
         if line == OPENING_MARKER {
