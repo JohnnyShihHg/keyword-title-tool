@@ -46,22 +46,27 @@ impl Mask {
         Mask { w, h, bits, bbox: (col.unwrap_or(0), row.unwrap_or(0)), count }
     }
 
-    /// 來源字有幾行：有亮點（≥ 2 點）的列分成幾塊，中間空 3 列以上才算分開
+    /// 來源字有幾行：有亮點（≥ 2 點）的列分成幾塊，中間空 3 列以上才算分開。
+    /// 亮點不到最大那塊一成的不算一行：範圍最上面會切到「東森新聞」台標的字腳（幾點），
+    /// 最下面常有背景的亮邊（10/28 第 3 段 lenskart 靜圖：台標 4 點、字 1342 點、背景 51 點，
+    /// 被算成 3 行，「翻攝 Youtube」就沒被當成通用字）
     pub fn text_lines(&self) -> usize {
-        let mut lines = 0;
+        let mut blocks: Vec<usize> = Vec::new();
         let mut blank = usize::MAX;
         for y in 0..self.h {
-            let on = (0..self.w).filter(|&x| self.bits[y * self.w + x]).count() >= 2;
-            if on {
+            let n = (0..self.w).filter(|&x| self.bits[y * self.w + x]).count();
+            if n >= 2 {
                 if blank >= 3 {
-                    lines += 1;
+                    blocks.push(0);
                 }
+                *blocks.last_mut().unwrap() += n;
                 blank = 0;
             } else {
                 blank = blank.saturating_add(1);
             }
         }
-        lines
+        let max = blocks.iter().copied().max().unwrap_or(0);
+        blocks.iter().filter(|&&n| n * 10 >= max).count()
     }
 
     /// 以外框左上角對齊（±2 px），回傳最大 IoU
@@ -233,6 +238,21 @@ mod tests {
             let i = ((BAR.1 + r) * CW + BAR.0 + x) * 3;
             c[i..i + 3].copy_from_slice(&rgb);
         }
+    }
+
+    #[test]
+    fn text_lines_ignore_logo_tip_and_background_streak() {
+        // 字：一行在 y 15..40；第二行（兩行來源字）在 y 50..75
+        let label = |x: usize, y: usize| (20..160).contains(&x) && (15..40).contains(&y) && (x / 3 + y) % 4 == 0;
+        let second = |x: usize, y: usize| (10..170).contains(&x) && (50..75).contains(&y) && (x / 3 + y) % 4 == 0;
+        // 最上面一列台標字腳 4 點、最下面兩列背景亮邊
+        let noise = |x: usize, y: usize| (y == 0 && (60..64).contains(&x)) || (y >= 88 && (30..56).contains(&x));
+        let m = |f: &dyn Fn(usize, usize) -> bool| Mask::from_fn(180, 90, |x, y| if f(x, y) { 230.0 } else { 40.0 });
+        assert_eq!(m(&|x, y| label(x, y)).text_lines(), 1);
+        assert_eq!(m(&|x, y| label(x, y) || noise(x, y)).text_lines(), 1, "雜訊不算一行");
+        assert_eq!(m(&|x, y| label(x, y) || second(x, y)).text_lines(), 2);
+        assert_eq!(m(&|x, y| label(x, y) || second(x, y) || noise(x, y)).text_lines(), 2);
+        assert_eq!(m(&|_, _| false).text_lines(), 0);
     }
 
     #[test]
