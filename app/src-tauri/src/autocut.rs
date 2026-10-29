@@ -13,7 +13,7 @@ use keyword_title_core::autocut::stills::StillSet;
 use keyword_title_core::autocut::titles::{parse_titles, Titles};
 use keyword_title_core::autocut::{cache, frame, secs, tc, FrameInfo, Layout, BAND, BOX, CANVAS_BYTES, FPS, H, LOGO_H, LOGO_W, START_DELAY, W};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
@@ -894,6 +894,8 @@ struct Watcher {
     /// AI 補判（沒設金鑰＝None）與判斷過的結果（存在 .autocut\ai.tsv，同一個地方不重複問）
     ai: Option<ai::Gemini>,
     ai_cache: HashMap<String, (bool, String)>,
+    /// 已經自動重新出片過的 (段, 判斷結果指紋)：同一個結果只自動重出一次
+    rerendered: HashSet<(usize, String)>,
 }
 
 impl Watcher {
@@ -928,6 +930,7 @@ impl Watcher {
             last_titles: String::new(),
             last_bars: HashMap::new(),
             bar_edges: HashMap::new(),
+            rerendered: HashSet::new(),
         })
     }
 
@@ -1371,21 +1374,40 @@ impl Watcher {
                 bars,
             });
         }
-        // 送去出片：完整、還沒出過的段落。之前出過（工具重開）且判斷一樣就直接算完成
+        // 送去出片：完整、還沒出過的段落。之前出過（工具重開）且判斷一樣就直接算完成。
+        // 出過但判斷變了（開播後才加入、搬移靜圖等）→ 自動重新出片：10/28 第 3 段電工的靜圖在段落出好後才加，
+        // 只標「靜圖已更新」等人按，結果成品沒遮到
         let mut to_send = Vec::new();
         {
             let mut renders = self.shared.renders.lock().unwrap();
             for p in &plan_segs {
                 let Some(job) = &p.job else { continue };
-                if renders.contains_key(&p.n) {
+                let done_fp = match renders.get(&p.n) {
+                    Some(Render::Done { fingerprint, .. }) => Some(fingerprint.clone()),
+                    Some(_) => continue, // 排隊中、出片中、失敗（失敗要人按重新出片）
+                    None => done_marker(job),
+                };
+                let done = |fp: String| Render::Done { output: job.out.display().to_string(), fingerprint: fp };
+                if done_fp.as_deref() == Some(job.fingerprint.as_str()) {
+                    renders.insert(p.n, done(job.fingerprint.clone()));
                     continue;
                 }
-                if let Some(fp) = done_marker(job) {
-                    renders.insert(p.n, Render::Done { output: job.out.display().to_string(), fingerprint: fp });
-                } else if self.cfg.auto_render {
-                    renders.insert(p.n, Render::Queued);
-                    to_send.push(job.clone());
+                if !self.cfg.auto_render {
+                    if let Some(fp) = done_fp {
+                        renders.insert(p.n, done(fp));
+                    }
+                    continue;
                 }
+                if let Some(fp) = done_fp {
+                    // 同一個判斷結果只自動重出一次，判斷來回變的時候不會一直重出
+                    if !self.rerendered.insert((p.n, job.fingerprint.clone())) {
+                        renders.insert(p.n, done(fp));
+                        continue;
+                    }
+                    self.log(format!("第 {} 段的靜圖或判斷結果改了，自動重新出片", p.n));
+                }
+                renders.insert(p.n, Render::Queued);
+                to_send.push(job.clone());
             }
         }
         let ns: Vec<usize> = plan_segs.iter().map(|p| p.n).collect();
