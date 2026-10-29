@@ -6,3 +6,4 @@ app/src-tauri/gen/schemas/macOS-schema.json
 node_modules/
 .DS_Store
 Thumbs.db
+app/src-tauri/gen/schemas/windows-schema.json

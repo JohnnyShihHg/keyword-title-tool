@@ -444,6 +444,7 @@ async function ytUpdate() {
     else if (up?.state === "canceled") label = "已取消";
     else if (deleted) [label, cls] = [docId ? "文稿連結的影片找不到" : "YouTube 上已刪除", "bad"];
     else if (id) [label, cls] = [remote || !docId ? `已上傳（${ytPrivacyLabel(remote)}）` : "已上傳", "done"];
+    else if (settings?.yt_auto_upload && ytAutoStopped(n)) label = "已停止自動上傳";
     else if (ytWaitingFor(m)) [label, cls] = [`等${ytWaitingFor(m).join("、")}`, "wait"];
     else label = path ? "未上傳" : "";
     el.status.replaceChildren();
@@ -458,11 +459,20 @@ async function ytUpdate() {
     el.actions.replaceChildren();
     const button = (text, cls, onclick) => el.actions.append(Object.assign(document.createElement("button"), { type: "button", className: cls, textContent: text, onclick }));
     if (up?.state === "uploading") {
-      button("取消", "ghost small danger", () => invoke("yt_cancel", { n }));
+      // 取消也記成「停止自動上傳」：不然工具重開後自動上傳會再傳一次
+      button("取消", "ghost small danger", () => {
+        if (settings?.yt_auto_upload) ytSetAutoStopped(n, true);
+        invoke("yt_cancel", { n });
+      });
       continue;
     }
     if (id) button("開 Studio", "ghost small", () => invoke("yt_open", { videoId: id }).catch((e) => ytMessage(String(e))));
     if (path) button(id ? "再傳一次" : "上傳", id ? "ghost small" : "small", () => ytUpload(m, path, !!id));
+    // 自動上傳開著、這段還沒傳：可以單獨停掉（例如遮蓋失效要重出），其他段照常自動傳
+    if (settings?.yt_auto_upload && !id) {
+      if (ytAutoStopped(n)) button("恢復自動上傳", "ghost small", () => ytSetAutoStopped(n, false));
+      else button("停止自動上傳", "ghost small danger", () => ytSetAutoStopped(n, true));
+    }
   }
   ytFetchStates(Object.values(ytRowEls).map((el) => el.videoId).filter(Boolean));
   ytAutoUpload();
@@ -588,6 +598,20 @@ async function ytUpload(m, path, again) {
 const ytAutoTried = new Set();
 
 /** 自動上傳用的檔：只認自動切段做出來的成品（不傳自己選的檔），有串接就等串接完成 */
+/** 這一段被按了「停止自動上傳」（單集，依日期存；手動「上傳」照常可以按） */
+function ytAutoStopped(n) {
+  return !!ytLoad("ytAutoStop")[n];
+}
+
+function ytSetAutoStopped(n, stopped) {
+  const all = ytLoad("ytAutoStop");
+  if (stopped) all[n] = true;
+  else delete all[n];
+  ytSave("ytAutoStop", all);
+  ytMessage(stopped ? `第 ${n} 段停止自動上傳` : `第 ${n} 段恢復自動上傳`);
+  ytUpdate();
+}
+
 function ytAutoPath(n) {
   const s = acStatus?.segments?.find((x) => x.n === n);
   return s?.chain ? (s.chain.state === "done" ? s.chain.output : "") : s?.state === "done" && !s.stale ? s.output : "";
@@ -604,7 +628,7 @@ function ytMissing(m) {
 
 /** 這段在等資料（成品好了、還沒傳、資料沒齊）：回傳缺的東西，不是在等就回傳 null */
 function ytWaitingFor(m) {
-  if (!settings?.yt_auto_upload) return null;
+  if (!settings?.yt_auto_upload || ytAutoStopped(m.number)) return null;
   const path = ytAutoPath(m.number);
   if (!path || ytLinkId(ytDocLink(m.number)) || ytDone[path] || (ytUploads[m.number] && !ytExpired)) return null;
   if (ytExpired) return ["重新登入"]; // 過期時清單也讀不到，別誤報成「等播放清單」
@@ -617,7 +641,7 @@ async function ytAutoUpload() {
   for (const m of ytMeta) {
     const path = ytAutoPath(m.number);
     // 文稿這段已經有 YT 連結＝已經傳過（可能是別台電腦或 Studio 手動傳的），不自動再傳
-    if (!path || ytLinkId(ytDocLink(m.number)) || ytDone[path] || ytAutoTried.has(path) || ytUploads[m.number]?.state === "uploading") continue;
+    if (!path || ytAutoStopped(m.number) || ytLinkId(ytDocLink(m.number)) || ytDone[path] || ytAutoTried.has(path) || ytUploads[m.number]?.state === "uploading") continue;
     if (ytMissing(m).length) continue; // 資料還沒齊，先等（狀態欄顯示「等…」）
     ytAutoTried.add(path);
     const done = await invoke("yt_uploaded", { paths: [path] }).catch(() => ({}));

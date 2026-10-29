@@ -34,6 +34,7 @@ function acWatchDir() {
 function acFillDirs() {
   $("acWatchDir").value = acWatchDir();
   $("acStillsDir").value = settings.autocut_stills_dir || "";
+  if (typeof acLoadStills === "function") acLoadStills(); // 替換畫面（stills.js）跟著換資料夾
   $("acOutputDir").value = settings.autocut_output_dir || "";
   $("acOutputDir").placeholder = settings.output_dir ? `空白＝沿用 ${settings.output_dir}` : "尚未指定";
   $("acAutoRender").checked = settings.autocut_auto_render !== false;

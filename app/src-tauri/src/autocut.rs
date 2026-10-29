@@ -649,6 +649,133 @@ pub fn autocut_reveal(path: String) -> Result<(), String> {
     r.map(|_| ()).map_err(|e| format!("無法開啟：{e}"))
 }
 
+// ───────────────────── 替換畫面（靜圖）：資料夾＝每段都比，「第N段」子資料夾＝只給那段 ─────────────────────
+
+/// 刪掉的靜圖搬到這裡（不掃、可以找回來）
+const STILLS_REMOVED: &str = "_已移除";
+
+/// 靜圖資料夾本身（""）＋各段子資料夾（「第N段」）
+fn still_dirs(dir: &Path) -> std::io::Result<Vec<(String, PathBuf)>> {
+    let mut out = vec![(String::new(), dir.to_path_buf())];
+    for e in std::fs::read_dir(dir)?.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if e.path().is_dir() && keyword_title_core::autocut::stills::segment_of_dir(&name).is_some() {
+            out.push((name, e.path()));
+        }
+    }
+    Ok(out)
+}
+
+fn is_still(p: &Path) -> bool {
+    let ext = p.extension().and_then(|x| x.to_str()).map(|x| x.to_lowercase());
+    matches!(ext.as_deref(), Some("jpg" | "jpeg" | "png"))
+}
+
+fn still_files(dir: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_file() && is_still(p)).collect();
+    v.sort();
+    v
+}
+
+/// 段號 → 那段的子資料夾（0＝靜圖資料夾本身，每段都比）
+fn segment_dir(dir: &Path, n: usize) -> PathBuf {
+    if n == 0 {
+        return dir.to_path_buf();
+    }
+    // 已經有「第二段」這種寫法的就沿用
+    still_dirs(dir)
+        .ok()
+        .and_then(|v| v.into_iter().find(|(name, _)| keyword_title_core::autocut::stills::segment_of_dir(name) == Some(n)))
+        .map_or_else(|| dir.join(format!("第{n}段")), |(_, p)| p)
+}
+
+/// 靜圖資料夾裡的圖：段號（0＝每段都比）→ 路徑
+#[tauri::command]
+pub fn stills_list(dir: String) -> Result<BTreeMap<usize, Vec<String>>, String> {
+    let dir = Path::new(&dir);
+    let mut out = BTreeMap::new();
+    for (sub, p) in still_dirs(dir).map_err(|e| format!("讀不到靜圖資料夾：{e}"))? {
+        let n = keyword_title_core::autocut::stills::segment_of_dir(&sub).unwrap_or(0);
+        out.entry(n).or_insert_with(Vec::new).extend(still_files(&p).into_iter().map(|p| p.display().to_string()));
+    }
+    Ok(out)
+}
+
+/// 把圖複製進第 n 段（0＝每段都比）；在靜圖資料夾裡的就是搬過去。同名的加 (2)、(3)。回傳新路徑
+#[tauri::command]
+pub fn stills_add(dir: String, n: usize, paths: Vec<String>) -> Result<Vec<String>, String> {
+    let root = Path::new(&dir);
+    let to = segment_dir(root, n);
+    std::fs::create_dir_all(&to).map_err(|e| format!("建不了資料夾 {}：{e}", to.display()))?;
+    let inside: Vec<PathBuf> = still_dirs(root).unwrap_or_default().into_iter().map(|(_, p)| p).collect();
+    let mut out = Vec::new();
+    for src in paths.iter().map(PathBuf::from).filter(|p| is_still(p)) {
+        if src.parent() == Some(to.as_path()) {
+            out.push(src.display().to_string());
+            continue;
+        }
+        let stem = src.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        let ext = src.extension().unwrap_or_default().to_string_lossy().to_string();
+        let mut dst = to.join(src.file_name().unwrap_or_default());
+        let mut k = 2;
+        while dst.exists() {
+            dst = to.join(format!("{stem} ({k}).{ext}"));
+            k += 1;
+        }
+        let moving = src.parent().is_some_and(|p| inside.iter().any(|d| d == p));
+        if moving {
+            std::fs::rename(&src, &dst).map_err(|e| format!("搬不動 {}：{e}", src.display()))?;
+        } else {
+            std::fs::copy(&src, &dst).map_err(|e| format!("複製不了 {}：{e}", src.display()))?;
+        }
+        out.push(dst.display().to_string());
+    }
+    Ok(out)
+}
+
+/// 從靜圖資料夾拿掉：搬到「_已移除」（不刪檔，放錯可以去那裡找回來）
+#[tauri::command]
+pub fn stills_remove(dir: String, path: String) -> Result<(), String> {
+    let src = PathBuf::from(&path);
+    let trash = Path::new(&dir).join(STILLS_REMOVED);
+    std::fs::create_dir_all(&trash).map_err(|e| format!("建不了資料夾：{e}"))?;
+    let name = src.file_name().ok_or("不是檔案")?;
+    let mut dst = trash.join(name);
+    let mut k = 2;
+    while dst.exists() {
+        dst = trash.join(format!("{} ({k}).{}", src.file_stem().unwrap_or_default().to_string_lossy(), src.extension().unwrap_or_default().to_string_lossy()));
+        k += 1;
+    }
+    std::fs::rename(&src, &dst).map_err(|e| format!("移不走 {}：{e}", src.display()))
+}
+
+/// 資料夾裡檔名（去掉副檔名、空白）以 `prefix` 開頭的圖；`range` 有給就只要後面接的編號在範圍內的
+#[tauri::command]
+pub fn stills_find(dir: String, prefix: String, range: Option<(u32, u32)>) -> Result<Vec<String>, String> {
+    let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).flat_map(|c| c.to_lowercase()).collect::<String>();
+    let want = squash(&prefix);
+    let rd = std::fs::read_dir(&dir).map_err(|e| format!("讀不到 {dir}：{e}"))?;
+    let mut out: Vec<String> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && is_still(p))
+        .filter(|p| {
+            let stem = squash(&p.file_stem().unwrap_or_default().to_string_lossy());
+            let Some(rest) = stem.strip_prefix(&want) else { return false };
+            match range {
+                None => true,
+                Some((a, b)) => {
+                    let num: String = rest.trim_start_matches(|c: char| !c.is_ascii_digit()).chars().take_while(|c| c.is_ascii_digit()).collect();
+                    num.parse::<u32>().is_ok_and(|k| k >= a && k <= b)
+                }
+            }
+        })
+        .map(|p| p.display().to_string())
+        .collect();
+    out.sort();
+    Ok(out)
+}
+
 // ───────────────────── 成品複製到當天的共用資料夾（給人檢查） ─────────────────────
 
 #[derive(Clone, Serialize)]
@@ -953,20 +1080,17 @@ impl Watcher {
 
     fn load_stills(&mut self) -> Result<(), String> {
         let dir = if self.cfg.stills_dir.trim().is_empty() { self.cfg.watch_dir.clone() } else { self.cfg.stills_dir.clone() };
-        let rd = std::fs::read_dir(&dir).map_err(|e| format!("讀不到靜圖資料夾：{e}"))?;
-        let mut files: Vec<(String, PathBuf, String)> = rd
-            .filter_map(|e| e.ok())
-            .filter_map(|e| {
-                let p = e.path();
-                let ext = p.extension().and_then(|x| x.to_str()).map(|x| x.to_lowercase());
-                if !matches!(ext.as_deref(), Some("jpg" | "jpeg" | "png")) {
-                    return None;
-                }
-                let m = e.metadata().ok()?;
+        // 資料夾裡的＝每段都比；「第N段」子資料夾裡的＝只給第 N 段（顯示名稱帶「第N段/」）
+        let mut files: Vec<(String, PathBuf, String)> = Vec::new();
+        for (sub, p) in still_dirs(Path::new(&dir)).map_err(|e| format!("讀不到靜圖資料夾：{e}"))? {
+            for p in still_files(&p) {
+                let Ok(m) = std::fs::metadata(&p) else { continue };
                 let mtime = m.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis());
-                Some((e.file_name().to_string_lossy().to_string(), p, format!("{}:{mtime}", m.len())))
-            })
-            .collect();
+                let file = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let name = if sub.is_empty() { file } else { format!("{sub}/{file}") };
+                files.push((name, p, format!("{}:{mtime}", m.len())));
+            }
+        }
         files.sort_by(|a, b| a.1.cmp(&b.1));
         let key: String = files.iter().map(|f| format!("{}|{}\n", f.0, f.2)).collect();
         if key == self.stills_key {
@@ -988,8 +1112,11 @@ impl Watcher {
         });
         self.stills_key = key;
         let sig = set.signature();
-        self.log(format!("靜圖 {} 張、來源字樣板 {} 個", set.stills.len(), set.templates.len()));
+        let bound = set.stills.iter().filter(|s| s.segment.is_some()).count();
+        self.log(format!("靜圖 {} 張（指定段落 {bound} 張）、來源字樣板 {} 個", set.stills.len(), set.templates.len()));
         self.stills = set;
+        // 只是搬到別段（簽名不變、不用重掃）也要重新規劃
+        self.dirty = true;
         if sig != self.signature {
             if !first {
                 self.log("靜圖改過，重新掃描已掃過的檔（OCR 沿用）");
@@ -1145,23 +1272,28 @@ impl Watcher {
         let mut log = String::new();
         let mut segs = plan::plan_segments(&frames, &ocr, &self.titles, &mut log);
         // 完整的段落：開頭對到 Logo 轉場結束那一格（要解碼一小段，結果記起來）
+        // 最後一段廣告後接回來的那一片也一樣要對
         for seg in segs.iter_mut().filter(|s| s.complete()) {
-            let s = seg.start();
-            let k = match self.refined.get(&s) {
-                Some(k) => *k,
-                None => {
-                    let k = self.refine_start(&files, s);
-                    self.refined.insert(s, k);
-                    k
+            let after_break: Vec<usize> = (0..seg.pieces.len()).filter(|&p| plan::piece_after_break(seg, p)).collect();
+            for p in after_break {
+                let s = seg.pieces[p].0;
+                let what = if p == 0 { "開頭" } else { "廣告後接回" };
+                let k = match self.refined.get(&s) {
+                    Some(k) => *k,
+                    None => {
+                        let k = self.refine_start(&files, s);
+                        self.refined.insert(s, k);
+                        k
+                    }
+                };
+                match k {
+                    Some(s2) => {
+                        let s2 = s2 + START_DELAY;
+                        log.push_str(&format!("  第 {} 段{what}：{} → {}（Logo 轉場結束）\n", seg.n, tc(secs(s)), tc(secs(s2))));
+                        seg.pieces[p].0 = s2;
+                    }
+                    None => log.push_str(&format!("  第 {} 段{what}：找不到 Logo 轉場，維持 {}\n", seg.n, tc(secs(s)))),
                 }
-            };
-            match k {
-                Some(s2) => {
-                    let s2 = s2 + START_DELAY;
-                    log.push_str(&format!("  第 {} 段開頭：{} → {}（Logo 轉場結束）\n", seg.n, tc(secs(s)), tc(secs(s2))));
-                    seg.pieces[0].0 = s2;
-                }
-                None => log.push_str(&format!("  第 {} 段開頭：找不到 Logo 轉場，維持 {}\n", seg.n, tc(secs(s)))),
             }
         }
         let mut planned: Vec<(Segment, Vec<MaskSeg>)> = segs

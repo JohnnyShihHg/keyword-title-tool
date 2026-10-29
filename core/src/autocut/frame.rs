@@ -46,6 +46,24 @@ impl Mask {
         Mask { w, h, bits, bbox: (col.unwrap_or(0), row.unwrap_or(0)), count }
     }
 
+    /// 來源字有幾行：有亮點（≥ 2 點）的列分成幾塊，中間空 3 列以上才算分開
+    pub fn text_lines(&self) -> usize {
+        let mut lines = 0;
+        let mut blank = usize::MAX;
+        for y in 0..self.h {
+            let on = (0..self.w).filter(|&x| self.bits[y * self.w + x]).count() >= 2;
+            if on {
+                if blank >= 3 {
+                    lines += 1;
+                }
+                blank = 0;
+            } else {
+                blank = blank.saturating_add(1);
+            }
+        }
+        lines
+    }
+
     /// 以外框左上角對齊（±2 px），回傳最大 IoU
     pub fn iou(&self, other: &Mask) -> f32 {
         if self.count == 0 || other.count == 0 {

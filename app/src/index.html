@@ -380,18 +380,48 @@
         </div>
       </section>
 
-      <section class="ac-section">
-        <div class="ac-section-head">
-          <h3>壓 BAR</h3>
-          <p>舊標題出現在標題條的時段，整張蓋上新的 BAR 圖（1920×1080 透明 PNG）。時段用標題條 OCR 自動找並對準到格，對不到可以手動填。改了之後已出好的正片會變「靜圖已更新」，按「重新出片」就會套上（串接也會跟著重串）。</p>
+      <details id="acReplace" class="ac-section ac-details">
+        <summary class="ac-section-head"><h3>替換畫面</h3><span id="acReplaceNote" class="ac-note">遮蓋用的靜圖、壓 BAR</span></summary>
+        <div class="ac-sub">
+          <div class="ac-sub-head">
+            <h4>替換畫面</h4>
+            <p>要遮的畫面放進哪一段，就只在那一段比對（不會蓋到別段長得像的畫面）。「每段都比」是直接放在靜圖資料夾裡的舊用法。圖片直接拖進某一段也可以。</p>
+            <span class="spacer"></span>
+            <button type="button" id="acStillsRefresh" class="ghost small">重新整理</button>
+            <button type="button" id="acStillsPasteBtn" class="small">＋ 貼 LINE 訊息加入</button>
+          </div>
+          <div id="acStillsPaste" class="card ac-stills-paste hidden">
+            <textarea id="acStillsMsg" rows="5" spellcheck="false" placeholder="把 LINE 的遮蓋訊息整段貼進來，例如：&#10;22-敬平-iphone duo頻傳災情 翻攝X、微博，上述兩位疑創作者請幫遮&#10;可用提供的截圖畫面替換&#10;22-敬平-iphone duo頻傳災情01-03&#10;\\10.3.20.33\yt上傳\1027關鍵\替換畫面"></textarea>
+            <div class="ac-stills-found">
+              <div class="ac-stills-guess">
+                <label>放到<select id="acStillsSeg"></select></label>
+                <span id="acStillsWhy" class="muted"></span>
+              </div>
+              <div id="acStillsCands" class="ac-stills-grid"></div>
+              <div class="ac-stills-actions">
+                <span id="acStillsFoundMsg" class="muted"></span>
+                <span class="spacer"></span>
+                <button type="button" id="acStillsPickBtn" class="ghost small">自己選圖片</button>
+                <button type="button" id="acStillsCancelBtn" class="ghost small">取消</button>
+                <button type="button" id="acStillsAddBtn" class="small" disabled>加入</button>
+              </div>
+            </div>
+          </div>
+          <div id="acStills" class="card ac-bars"></div>
         </div>
-        <div id="acBars" class="card ac-bars"></div>
-      </section>
+        <div class="ac-sub">
+          <div class="ac-sub-head">
+            <h4>壓 BAR</h4>
+            <p>舊標題出現在標題條的時段，整張蓋上新的 BAR 圖（1920×1080 透明 PNG）。時段用標題條 OCR 自動找並對準到格，對不到可以手動填。改了之後已出好的正片會變「靜圖已更新」，按「重新出片」就會套上（串接也會跟著重串）。</p>
+          </div>
+          <div id="acBars" class="card ac-bars"></div>
+        </div>
+      </details>
 
       <section class="ac-section">
         <div class="ac-section-head">
           <h3>上傳 YouTube</h3>
-          <p>上傳成私人影片。標題、說明從文稿帶入（含 #關鍵字），說明最後接設定頁的固定內容；標記＝預設標記＋文稿的後臺關鍵字；縮圖用共用資料夾當天的 N.jpg；傳完自動加進選的播放清單。設定頁開「自動上傳」後，成品做好就自動傳。片尾、中插、版權確認、發布請在 Studio 做。</p>
+          <p>上傳成私人影片。標題、說明從文稿帶入（含 #關鍵字），說明最後接設定頁的固定內容；標記＝預設標記＋文稿的後臺關鍵字；縮圖用共用資料夾當天的 N.jpg；傳完自動加進選的播放清單。設定頁開「自動上傳」後，成品做好就自動傳；某一段不想傳（例如遮蓋失效要重出）按那段的「停止自動上傳」，其他段照常。片尾、中插、版權確認、發布請在 Studio 做。</p>
         </div>
         <div class="card ac-flush">
           <div class="ac-account">
@@ -690,6 +720,7 @@
   <script src="video.js"></script>
   <script src="autocut.js"></script>
   <script src="bars.js"></script>
+  <script src="stills.js"></script>
   <script src="youtube.js"></script>
 </body>
 </html>

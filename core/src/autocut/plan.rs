@@ -131,26 +131,62 @@ pub fn plan_segments(frames: &[FrameInfo], ocr: &BTreeMap<usize, String>, titles
     let edge_ok_start = |s: usize| splits.contains(&s) || (s >= 5 * fps && nonprog(s - 5 * fps, s) >= 0.8);
     let edge_ok_end = |e: usize| splits.contains(&e) || (e + 5 * fps <= n && nonprog(e, e + 5 * fps) >= 0.8);
 
-    // 一段只取第一個區塊；之後又出現同一段的標題（節目後的預告、重播）不收
+    // 一段只取第一個區塊；之後又出現同一段的標題（節目後的預告、重播）不收。
+    // 例外：文稿最後一段收尾常連進兩次廣告（10/27 第 6 段：播 2 分多 → 廣告 4 分半 → 又播 1 分多 → 收黑），
+    // 中間沒有別段、隔不到 LAST_GAP_SECS 又出現的是同一段的下半部，直接接起來（不加轉場）
+    let last = titles.keys().max().copied();
     let mut segs: BTreeMap<usize, Segment> = BTreeMap::new();
-    for (g, s, e) in pieces.iter().copied() {
+    for (k, (g, s, e)) in pieces.iter().copied().enumerate() {
         match segs.get_mut(&g) {
             None => {
                 segs.insert(g, Segment { n: g, pieces: vec![(s, e)], start_ok: true, end_ok: true });
             }
             Some(seg) if seg.pieces.last().is_some_and(|p| p.1 == s) => seg.pieces.push((s, e)),
+            Some(seg) if Some(g) == last && pieces[k - 1].0 == g && secs(s - seg.end()) <= LAST_GAP_SECS => {
+                log.push_str(&format!("    → 第 {g} 段（最後一段）廣告後在 {} 繼續，接在後面\n", tc(secs(s))));
+                seg.pieces.push((s, e));
+            }
             Some(_) => log.push_str(&format!("    → 第 {g} 段在 {} 又出現（預告／重播），不收\n", tc(secs(s)))),
         }
     }
     for seg in segs.values_mut() {
         seg.start_ok = edge_ok_start(seg.start());
-        seg.end_ok = edge_ok_end(seg.end());
-        // 結尾：人工習慣比切進廣告轉場早約 6 格收
-        if let Some(p) = seg.pieces.last_mut() {
+        seg.end_ok = if Some(seg.n) == last { last_end_ok(frames, seg.end()) } else { edge_ok_end(seg.end()) };
+        // 結尾：人工習慣比切進廣告轉場早約 6 格收（中間隔著廣告的每一片都是）
+        let ends: Vec<usize> = (0..seg.pieces.len()).filter(|&k| k + 1 == seg.pieces.len() || seg.pieces[k].1 != seg.pieces[k + 1].0).collect();
+        for k in ends {
+            let p = &mut seg.pieces[k];
             p.1 = p.1.saturating_sub(END_TRIM).max(p.0 + 1);
         }
     }
     segs.into_values().collect()
+}
+
+/// 最後一段廣告後還可能回來：隔多久內又出現算同一段；結尾後錄滿這麼久都沒回來也算結束
+pub const LAST_GAP_SECS: f64 = 8.0 * 60.0;
+/// 收黑：整張畫面平均亮度低於 BLACK_LUMA、連續 BLACK_SECS 秒（廣告之間偶爾閃一兩格黑不算）
+pub const BLACK_LUMA: f32 = 24.0;
+pub const BLACK_SECS: f64 = 5.0;
+
+/// 最後一段的結尾：進廣告還不算完，要看到收黑；或結尾後已經錄滿 LAST_GAP_SECS 都沒回來（例如 2400 直接接新聞）
+pub fn last_end_ok(frames: &[FrameInfo], e: usize) -> bool {
+    if e + (LAST_GAP_SECS * FPS) as usize <= frames.len() {
+        return true;
+    }
+    let need = (BLACK_SECS * FPS) as usize;
+    let mut run = 0;
+    for f in &frames[e.min(frames.len())..] {
+        run = if f.luma < BLACK_LUMA { run + 1 } else { 0 };
+        if run >= need {
+            return true;
+        }
+    }
+    false
+}
+
+/// 這一片的開頭要不要對 Logo 轉場：第一片、或前面隔著廣告的（區塊裡 OCR 換段接上的不用）
+pub fn piece_after_break(seg: &Segment, k: usize) -> bool {
+    k == 0 || seg.pieces[k - 1].1 + END_TRIM < seg.pieces[k].0
 }
 
 /// 段落開頭修準要解碼的範圍：標題條出現前 6 秒起、解 (s − s0 + 2 秒) 格。回傳 (起始格, 格數)
@@ -169,15 +205,23 @@ pub fn logo_end(logo: &GrayImage, frames: &[GrayImage]) -> Option<usize> {
 }
 
 /// 來源字命中：IoU 夠高；或 IoU 普通但畫面也跟那個來源的靜圖有幾分像
-/// （「翻攝 X ○○」不同主題外形很像，只看字形會把機器人當成忍者）
+/// （「翻攝 X ○○」不同主題外形很像，只看字形會把機器人當成忍者）。
+/// 只有一行的來源字（「翻攝 X」）完全不當證據，只看畫面（SIM_NCC）：10/27 普吉島淹水的「翻攝 X」
+/// 跟 iPhone 新聞的一模一樣，只看字形把淹水畫面整段蓋成 iPhone 的靜圖；
+/// 「字形＋畫面有幾分像（0.6）」也還會在淹水畫面剛好有點像的一瞬間誤遮
 pub fn label_hit(f: &FrameInfo, set: &StillSet) -> bool {
     if f.tmpl < 0 {
+        return false;
+    }
+    let t = &set.templates[f.tmpl as usize];
+    // 樣板底下的靜圖都是別段的（`StillSet::for_segment`）
+    if t.generic || t.stills.is_empty() {
         return false;
     }
     if f.iou >= LABEL_IOU_STRONG {
         return true;
     }
-    f.iou >= LABEL_IOU && set.templates[f.tmpl as usize].stills.iter().any(|&k| f.sims[k] >= 0.6)
+    f.iou >= LABEL_IOU && t.stills.iter().any(|&k| f.sims[k] >= 0.6)
 }
 
 /// 版型平滑：前後都是同一種版型、中間只維持不到 1.5 秒的另一種版型 → 當成前後那種（判斷偶爾抖一下不算數）
@@ -276,7 +320,7 @@ pub fn plan_masks(frames: &[FrameInfo], set: &StillSet, range: (usize, usize)) -
                 let t = *votes.iter().max_by_key(|(_, c)| **c).unwrap().0;
                 set.templates[t as usize].stills.clone()
             } else {
-                (0..stills.len()).collect()
+                (0..stills.len()).filter(|&k| !set.is_off(k)).collect()
             };
             let same: Vec<usize> = pool.iter().cloned().filter(|&k| stills[k].layout == layout).collect();
             let pool = if same.is_empty() { pool } else { same };
@@ -309,7 +353,26 @@ pub fn plan_masks(frames: &[FrameInfo], set: &StillSet, range: (usize, usize)) -
 
 /// 一段的所有遮罩（每個片段分開規劃）
 pub fn segment_masks(frames: &[FrameInfo], set: &StillSet, seg: &Segment) -> Vec<MaskSeg> {
+    if let Some((frames, set)) = for_segment(frames, set, seg) {
+        return segment_masks(&frames, &set, seg);
+    }
     seg.pieces.iter().flat_map(|&p| plan_masks(frames, set, p)).collect()
+}
+
+/// 只用這一段能用的靜圖（`StillSet::for_segment`）：段內每格跟別段靜圖的相似度改成 -1（當成完全不像）。
+/// 沒有別段的靜圖要排除回傳 None
+fn for_segment(frames: &[FrameInfo], set: &StillSet, seg: &Segment) -> Option<(Vec<FrameInfo>, StillSet)> {
+    let set = set.for_segment(seg.n)?;
+    let (a, b) = (seg.start(), seg.end().min(frames.len()));
+    let mut frames = frames.to_vec();
+    for f in &mut frames[a..b] {
+        for (k, v) in f.sims.iter_mut().enumerate() {
+            if set.is_off(k) {
+                *v = -1.0;
+            }
+        }
+    }
+    Some((frames, set))
 }
 
 // ───────────────────────── 交給 AI 判斷的鏡頭 ─────────────────────────
@@ -351,6 +414,9 @@ fn samples(s: usize, e: usize) -> Vec<usize> {
 
 /// 找出這一段裡要問 AI 的地方。`masks` 是 `segment_masks` 的結果（依時間排序）。
 pub fn ai_candidates(frames: &[FrameInfo], set: &StillSet, seg: &Segment, masks: &[MaskSeg]) -> Vec<AiCandidate> {
+    if let Some((frames, set)) = for_segment(frames, set, seg) {
+        return ai_candidates(&frames, &set, seg, masks);
+    }
     let fps = FPS as usize;
     let mut out = Vec::new();
     let template_of = |k: usize| set.stills[k].template;
@@ -358,7 +424,9 @@ pub fn ai_candidates(frames: &[FrameInfo], set: &StillSet, seg: &Segment, masks:
     // ① 兩段同來源遮罩之間的空檔
     for w in masks.windows(2) {
         let (m1, m2) = (&w[0], &w[1]);
-        let same_source = m1.still == m2.still || (template_of(m1.still).is_some() && template_of(m1.still) == template_of(m2.still));
+        // 只有一行的來源字（「翻攝 X」）不算同一個來源的證據，要同一張靜圖
+        let generic = |k: usize| template_of(k).is_some_and(|t| set.templates[t].generic);
+        let same_source = m1.still == m2.still || (template_of(m1.still).is_some() && template_of(m1.still) == template_of(m2.still) && !generic(m1.still));
         let gap = m2.start.saturating_sub(m1.end);
         if !same_source || m1.layout != m2.layout || gap == 0 || gap as f64 > AI_GAP_MAX_SECS * FPS || !in_piece(m1.end, m2.start) {
             continue;
@@ -381,7 +449,8 @@ pub fn ai_candidates(frames: &[FrameInfo], set: &StillSet, seg: &Segment, masks:
         let weak: Vec<bool> = (s..e)
             .map(|i| {
                 let f = &frames[i];
-                let iou_weak = f.tmpl >= 0 && f.iou >= AI_WEAK_IOU;
+                // AI 是看來源字判斷的：只有一行的來源字（「翻攝 X」）問了也一定說相同，不問
+                let iou_weak = f.tmpl >= 0 && f.iou >= AI_WEAK_IOU && !set.templates[f.tmpl as usize].generic && !set.templates[f.tmpl as usize].stills.is_empty();
                 let sim_weak = f.sims.iter().any(|&v| v >= AI_WEAK_SIM);
                 f.program && !covered(i) && (iou_weak || sim_weak)
             })
@@ -396,7 +465,7 @@ pub fn ai_candidates(frames: &[FrameInfo], set: &StillSet, seg: &Segment, masks:
             let mut votes: BTreeMap<i16, usize> = BTreeMap::new();
             let mut score = vec![0f32; set.stills.len()];
             for f in &frames[a..b] {
-                if f.tmpl >= 0 && f.iou >= AI_WEAK_IOU {
+                if f.tmpl >= 0 && f.iou >= AI_WEAK_IOU && !set.templates[f.tmpl as usize].generic && !set.templates[f.tmpl as usize].stills.is_empty() {
                     *votes.entry(f.tmpl).or_default() += 1;
                 }
                 for (k, v) in f.sims.iter().enumerate() {
@@ -404,7 +473,7 @@ pub fn ai_candidates(frames: &[FrameInfo], set: &StillSet, seg: &Segment, masks:
                 }
             }
             let mut stills: Vec<usize> = votes.iter().max_by_key(|(_, c)| **c).map(|(t, _)| set.templates[*t as usize].stills.clone()).unwrap_or_default();
-            if let Some(best) = (0..set.stills.len()).filter(|&k| set.stills[k].layout == layout).max_by(|x, y| score[*x].total_cmp(&score[*y])) {
+            if let Some(best) = (0..set.stills.len()).filter(|&k| set.stills[k].layout == layout && !set.is_off(k)).max_by(|x, y| score[*x].total_cmp(&score[*y])) {
                 if score[best] / ((b - a) as f32) >= AI_WEAK_SIM && !stills.contains(&best) {
                     stills.push(best);
                 }
@@ -474,7 +543,9 @@ pub fn report_segments(segs: &[(Segment, Vec<MaskSeg>)], set: &StillSet) -> Stri
 pub fn report_coverage(frames: &[FrameInfo], segs: &[(Segment, Vec<MaskSeg>)], set: &StillSet) -> String {
     let mut r = String::from("\n== 覆蓋檢查 ==（靜圖｜側錄中最像的位置｜相似度｜狀態）\n");
     for (k, s) in set.stills.iter().enumerate() {
-        if let Some((i, f)) = frames.iter().enumerate().max_by(|a, b| a.1.sims[k].total_cmp(&b.1.sims[k])) {
+        // 只給某一段的靜圖：只在那段裡找
+        let own = |i: usize| s.segment.is_none_or(|n| segs.iter().any(|(g, _)| g.n == n && g.pieces.iter().any(|(a, b)| i >= *a && i < *b)));
+        if let Some((i, f)) = frames.iter().enumerate().filter(|(i, _)| own(*i)).max_by(|a, b| a.1.sims[k].total_cmp(&b.1.sims[k])) {
             let in_seg = segs.iter().find(|(g, _)| g.pieces.iter().any(|(a, b)| i >= *a && i < *b));
             let masked = segs.iter().any(|(_, ms)| ms.iter().any(|m| i >= m.start && i < m.end));
             let state = match (in_seg, masked) {
@@ -523,9 +594,28 @@ mod tests {
     fn one_still_set() -> StillSet {
         let mask = Mask::from_fn(4, 4, |_, _| 0.0);
         StillSet {
-            stills: vec![Still { name: "s.jpg".into(), path: "/s.jpg".into(), layout: Layout::Full, template: Some(0), small: GrayImage::new(80, 45) }],
-            templates: vec![Template { layout: Layout::Full, mask, stills: vec![0] }],
+            stills: vec![Still { name: "s.jpg".into(), path: "/s.jpg".into(), segment: None, layout: Layout::Full, template: Some(0), small: GrayImage::new(80, 45) }],
+            templates: vec![Template { layout: Layout::Full, mask, stills: vec![0], generic: false }],
+            off: Vec::new(),
         }
+    }
+
+    #[test]
+    fn stills_of_other_segments_are_ignored() {
+        // 10/27：第 2 段 iPhone 的靜圖（翻攝 X）蓋到第 3 段普吉島淹水。放進「第2段」子資料夾後第 3 段完全不比
+        let mut set = one_still_set();
+        set.stills[0].segment = Some(2);
+        let mut f = frame(true);
+        f.tmpl = 0;
+        f.iou = 0.95;
+        f.sims = vec![0.95];
+        let n = 6 * FPS as usize;
+        let frames: Vec<FrameInfo> = (0..n).map(|_| f.clone()).collect();
+        let seg = |g: usize| Segment { n: g, pieces: vec![(0, n)], start_ok: true, end_ok: true };
+        assert_eq!(segment_masks(&frames, &set, &seg(2)).len(), 1, "自己這段照樣遮");
+        assert!(segment_masks(&frames, &set, &seg(3)).is_empty(), "別段的靜圖不遮");
+        set.stills[0].segment = None;
+        assert_eq!(segment_masks(&frames, &set, &seg(3)).len(), 1, "共用的每段都比");
     }
 
     #[test]
@@ -553,6 +643,25 @@ mod tests {
     }
 
     #[test]
+    fn one_line_label_needs_picture_too() {
+        // 10/27：普吉島淹水的「翻攝 X」跟 iPhone 新聞靜圖的「翻攝 X」字形一樣，畫面完全不像
+        let mut set = one_still_set();
+        set.templates[0].generic = true;
+        let mut f = frame(true);
+        f.tmpl = 0;
+        f.iou = 0.95;
+        f.sims = vec![0.1];
+        assert!(!label_hit(&f, &set), "只有一行的來源字，字形再像也不能單獨遮");
+        f.sims = vec![0.7];
+        assert!(!label_hit(&f, &set), "畫面有幾分像也不算（10/27 淹水畫面一瞬間 0.70）");
+        // 真的是那支影片：畫面跟靜圖幾乎一樣，靠畫面相似（plan_masks 的 SIM_NCC）照樣遮
+        f.sims = vec![SIM_NCC];
+        let n = 4 * FPS as usize;
+        let frames: Vec<FrameInfo> = (0..n).map(|_| f.clone()).collect();
+        assert_eq!(plan_masks(&frames, &set, (0, n)).len(), 1, "畫面幾乎一樣照樣遮");
+    }
+
+    #[test]
     fn label_hit_rules() {
         let set = one_still_set();
         let mut f = frame(true);
@@ -571,14 +680,15 @@ mod tests {
         assert!(!label_hit(&f, &set), "沒有樣板");
     }
 
-    const TITLES: &str = "第一段\n川普關稅大棒再揮向盟友\n=======\n第二段\n伊朗忍者部隊潛入以色列境內\n";
+    /// 第三段只是讓第二段不是最後一段（最後一段的結尾規則不一樣，另外測）
+    const TITLES: &str = "第一段\n川普關稅大棒再揮向盟友\n=======\n第二段\n伊朗忍者部隊潛入以色列境內\n=======\n第三段\n中國人口將跌破十四億失業仍暴增\n";
 
     /// 時間軸：廣告 a 秒 → 節目 b 秒 → 廣告 c 秒 …，OCR 每 2 秒一張，節目裡填 `seg` 段的標題
     fn timeline(parts: &[(bool, usize, usize)]) -> (Vec<FrameInfo>, BTreeMap<usize, String>) {
         let fps = FPS as usize;
         let mut frames = Vec::new();
         let mut ocr = BTreeMap::new();
-        let text = |seg: usize| if seg == 1 { "川普關稅大棒再揮向盟友" } else { "伊朗忍者部隊潛入以色列境內" };
+        let text = |seg: usize| ["", "川普關稅大棒再揮向盟友", "伊朗忍者部隊潛入以色列境內", "中國人口將跌破十四億失業仍暴增"][seg];
         for &(program, sec, seg) in parts {
             let start = frames.len();
             for i in 0..sec * fps {
@@ -635,6 +745,47 @@ mod tests {
         let ocr3: BTreeMap<usize, String> = ocr.iter().filter(|(k, _)| **k >= 20 * fps).map(|(k, v)| (k - 20 * fps, v.clone())).collect();
         let segs = plan_segments(&frames[20 * fps..], &ocr3, &titles, &mut String::new());
         assert!(!segs[0].start_ok);
+    }
+
+    #[test]
+    fn last_segment_joins_after_ads_and_waits_for_black() {
+        // 10/27 第 6 段：播 → 廣告 → 又播 → 廣告 → 收黑
+        let titles = parse_titles(TITLES);
+        let fps = FPS as usize;
+        let (mut frames, ocr) = timeline(&[(false, 10, 0), (true, 60, 2), (false, 10, 0), (true, 60, 3), (false, 270, 0), (true, 80, 3), (false, 10, 0), (false, 60, 0)]);
+        let black = (10 + 60 + 10 + 60 + 270 + 80 + 10) * fps;
+        frames[black..].iter_mut().for_each(|f| f.luma = 16.0);
+        let mut log = String::new();
+        let segs = plan_segments(&frames, &ocr, &titles, &mut log);
+        let last = segs.iter().find(|s| s.n == 3).unwrap();
+        assert_eq!(last.pieces.len(), 2, "廣告後回來的接在後面：{log}");
+        assert_eq!(last.pieces[0], (80 * fps, 140 * fps - END_TRIM), "第一片結尾也提早收");
+        assert_eq!(last.pieces[1], (410 * fps, 490 * fps - END_TRIM));
+        assert!(piece_after_break(last, 0) && piece_after_break(last, 1));
+        assert!(last.complete());
+
+        // 第一次進廣告就停在這裡：還沒收黑，不能算完整（以前會在這裡就出片）
+        let cut = (10 + 60 + 10 + 60 + 30) * fps;
+        let ocr2: BTreeMap<usize, String> = ocr.range(..cut).map(|(k, v)| (*k, v.clone())).collect();
+        let segs = plan_segments(&frames[..cut], &ocr2, &titles, &mut String::new());
+        let last = segs.iter().find(|s| s.n == 3).unwrap();
+        assert!(last.start_ok && !last.end_ok);
+        // 收黑還不到 5 秒也還不算
+        let segs = plan_segments(&frames[..black + 4 * fps], &ocr, &titles, &mut String::new());
+        assert!(!segs.iter().find(|s| s.n == 3).unwrap().end_ok);
+        // 沒收黑（2400 直接接別的節目）：結尾後錄滿 8 分鐘也算結束
+        frames.iter_mut().for_each(|f| f.luma = 100.0);
+        frames.extend((0..LAST_GAP_SECS as usize * fps).map(|_| frame(false)));
+        assert!(plan_segments(&frames, &ocr, &titles, &mut String::new()).iter().find(|s| s.n == 3).unwrap().complete());
+    }
+
+    #[test]
+    fn earlier_segment_reappearing_is_not_joined() {
+        // 第 1 段在後面又出現（預告／重播）：只有最後一段會接回來
+        let titles = parse_titles(TITLES);
+        let (frames, ocr) = timeline(&[(false, 10, 0), (true, 60, 1), (false, 10, 0), (true, 40, 1), (false, 10, 0)]);
+        let segs = plan_segments(&frames, &ocr, &titles, &mut String::new());
+        assert_eq!(segs[0].pieces.len(), 1);
     }
 
     #[test]
