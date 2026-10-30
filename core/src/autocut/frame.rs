@@ -46,61 +46,104 @@ impl Mask {
         Mask { w, h, bits, bbox: (col.unwrap_or(0), row.unwrap_or(0)), count }
     }
 
-    /// 來源字有幾行：有亮點（≥ 2 點）的列分成幾塊，中間空 3 列以上才算分開。
-    /// 亮點不到最大那塊一成的不算一行：範圍最上面會切到「東森新聞」台標的字腳（幾點），
-    /// 最下面常有背景的亮邊（10/28 第 3 段 lenskart 靜圖：台標 4 點、字 1342 點、背景 51 點，
-    /// 被算成 3 行，「翻攝 Youtube」就沒被當成通用字）
+    /// 來源字有幾行。範圍最上面會切到「東森新聞」台標的字腳、亮的背景（天空、街景）也會被當成亮點，
+    /// 所以要像一行字才算：有 ≥ 3 個亮點的列連成一塊（中間斷 3 列以內算同一塊），至少 6 列高、
+    /// 平均每列 ≥ 8 點（雙框字小，≥ 4 點）；第二行以後要緊接在上一行下面（間隔 ≤ 15 列）。
+    /// （10/28 第 3 段 lenskart 靜圖「翻攝 Youtube」以前被算成 3 行，單行來源字被當成證據，到處誤遮）
     pub fn text_lines(&self) -> usize {
-        let mut blocks: Vec<usize> = Vec::new();
-        let mut blank = usize::MAX;
-        for y in 0..self.h {
-            let n = (0..self.w).filter(|&x| self.bits[y * self.w + x]).count();
-            if n >= 2 {
-                if blank >= 3 {
-                    blocks.push(0);
-                }
-                *blocks.last_mut().unwrap() += n;
-                blank = 0;
-            } else {
-                blank = blank.saturating_add(1);
+        self.line_spans().len()
+    }
+
+    /// 每一行字的列範圍（起, 訖），規則見 `text_lines`
+    pub fn line_spans(&self) -> Vec<(usize, usize)> {
+        let counts: Vec<usize> = (0..self.h).map(|y| (0..self.w).filter(|&x| self.bits[y * self.w + x]).count()).collect();
+        let min_mean = if self.w < ROI_FULL.2 as usize { 4.0 } else { 8.0 };
+        // 一塊一塊：(起, 訖)
+        let mut blocks: Vec<(usize, usize)> = Vec::new();
+        for y in (0..self.h).filter(|&y| counts[y] >= 3) {
+            match blocks.last_mut() {
+                Some(b) if y - b.1 <= 4 => b.1 = y,
+                _ => blocks.push((y, y)),
             }
         }
-        let max = blocks.iter().copied().max().unwrap_or(0);
-        blocks.iter().filter(|&&n| n * 10 >= max).count()
+        let mut lines: Vec<(usize, usize)> = Vec::new();
+        for (a, b) in blocks {
+            let h = b - a + 1;
+            let mean = counts[a..=b].iter().sum::<usize>() as f32 / h as f32;
+            if h < 6 || mean < min_mean || lines.last().is_some_and(|l| a - l.1 > 15) {
+                continue;
+            }
+            lines.push((a, b));
+        }
+        lines
     }
 
     /// 以外框左上角對齊（±2 px），回傳最大 IoU
     pub fn iou(&self, other: &Mask) -> f32 {
+        self.iou_parts(other, self.h).0
+    }
+
+    /// 兩行以上的來源字：(整個的 IoU, 第二行以下逐字比最差的那個字的 IoU)，都在整個 IoU 最大的對齊位置算。
+    /// `self` 是樣板，`split` 用樣板的座標（第二行開頭）。
+    /// - 只看整個：「翻攝 抖音／藍澤鵬程」跟「翻攝 抖音／北京無人機新規」第一行一樣就 0.62（10/29 第 5 段 6:22 誤遮）
+    /// - 第二行整行一起比：「中國觀音無人機」跟「中國仙鶴無人機」7 個字有 5 個一樣，還有 0.69；
+    ///   同一支影片背景雜的時候也只有 0.70～0.76，分不開。切成一個字寬一塊逐塊比，不一樣的字那塊會掉很多
+    pub fn iou_parts(&self, other: &Mask, split: usize) -> (f32, f32) {
         if self.count == 0 || other.count == 0 {
-            return 0.0;
+            return (0.0, 0.0);
         }
         let (lo, hi) = (self.count.min(other.count) as f32, self.count.max(other.count) as f32);
         if lo / hi < 0.3 {
-            return lo / hi; // IoU 不可能超過這個比例，省得逐點比
+            return (lo / hi, 0.0); // IoU 不可能超過這個比例，省得逐點比
         }
+        let on_self = |x: i32, y: i32| self.bits[y as usize * self.w + x as usize];
+        let on_other = |x: i32, y: i32| x >= 0 && y >= 0 && (x as usize) < other.w && (y as usize) < other.h && other.bits[y as usize * other.w + x as usize];
         let base_x = other.bbox.0 as i32 - self.bbox.0 as i32;
         let base_y = other.bbox.1 as i32 - self.bbox.1 as i32;
-        let mut best = 0f32;
+        let (mut full, mut at) = (0f32, (base_x, base_y));
         for dy in -2..=2 {
             for dx in -2..=2 {
                 let (ox, oy) = (base_x + dx, base_y + dy);
                 let mut inter = 0usize;
                 for y in 0..self.h as i32 {
-                    let y2 = y + oy;
-                    if y2 < 0 || y2 as usize >= other.h {
-                        continue;
-                    }
                     for x in 0..self.w as i32 {
-                        let x2 = x + ox;
-                        if x2 >= 0 && (x2 as usize) < other.w && self.bits[y as usize * self.w + x as usize] && other.bits[y2 as usize * other.w + x2 as usize] {
+                        if on_self(x, y) && on_other(x + ox, y + oy) {
                             inter += 1;
                         }
                     }
                 }
-                best = best.max(inter as f32 / (self.count + other.count - inter) as f32);
+                let v = inter as f32 / (self.count + other.count - inter) as f32;
+                if v > full {
+                    (full, at) = (v, (ox, oy));
+                }
             }
         }
-        best
+        // 第二行以下：樣板有字的範圍切成一個字寬（≈ 行高）一塊
+        let (ox, oy) = at;
+        let split = split.min(self.h) as i32;
+        let rows: Vec<i32> = (split..self.h as i32).filter(|&y| (0..self.w as i32).any(|x| on_self(x, y))).collect();
+        let cols: Vec<i32> = (0..self.w as i32).filter(|&x| (split..self.h as i32).any(|y| on_self(x, y))).collect();
+        let (Some(&y0), Some(&y1), Some(&x0), Some(&x1)) = (rows.first(), rows.last(), cols.first(), cols.last()) else { return (full, 0.0) };
+        let char_w = ((y1 - y0 + 1) as f32 * 0.9).max(8.0) as i32;
+        let n = (((x1 - x0 + 1) as f32 / char_w as f32).round() as i32).max(1);
+        let mut worst = 1f32;
+        for k in 0..n {
+            let (a, b) = (x0 + (x1 - x0 + 1) * k / n, x0 + (x1 - x0 + 1) * (k + 1) / n);
+            let (mut s, mut o, mut inter) = (0usize, 0usize, 0usize);
+            for y in y0..=y1 {
+                for x in a..b {
+                    let (p, q) = (on_self(x, y), on_other(x + ox, y + oy));
+                    s += p as usize;
+                    o += q as usize;
+                    inter += (p && q) as usize;
+                }
+            }
+            if s < 15 {
+                continue; // 筆畫太少（字縫、標點）
+            }
+            worst = worst.min(inter as f32 / (s + o - inter) as f32);
+        }
+        (full, worst)
     }
 }
 
@@ -201,7 +244,7 @@ pub fn judge(buf: &[u8], set: &StillSet) -> (FrameInfo, GrayImage) {
     let (mut tmpl, mut iou) = (-1i16, 0f32);
     for (k, t) in set.templates.iter().enumerate() {
         if t.layout == layout {
-            let v = t.mask.iou(&label_mask);
+            let v = t.score(&label_mask);
             if v > iou {
                 iou = v;
                 tmpl = k as i16;
@@ -294,6 +337,63 @@ mod tests {
         assert!((a.iou(&b) - 1.0).abs() < 1e-6, "外框對齊後位移不影響");
         let empty = Mask::from_fn(100, 70, |_, _| 40.0);
         assert_eq!(a.iou(&empty), 0.0);
+    }
+
+    #[test]
+    fn text_lines_ignore_bright_background() {
+        // 滿版來源字區 180×90：每列亮點數照 10/28 實測的樣子做
+        let mask = |rows: &[(usize, usize, usize)]| {
+            let mut bits = vec![false; 180 * 90];
+            for &(a, b, n) in rows {
+                for y in a..=b {
+                    bits[y * 180..y * 180 + n].fill(true);
+                }
+            }
+            Mask { w: 180, h: 90, count: bits.iter().filter(|b| **b).count(), bits, bbox: (0, 0) }
+        };
+        // 「翻攝 Youtube」＋下面零星亮點、離很遠的一塊亮背景、最底下兩列
+        assert_eq!(mask(&[(15, 39, 50), (50, 50, 4), (59, 60, 10), (73, 82, 25), (88, 89, 40)]).text_lines(), 1);
+        // 兩行（「翻攝 X」＋「藍澤鵬程」）
+        assert_eq!(mask(&[(15, 40, 50), (50, 74, 60)]).text_lines(), 2);
+        // 雙框（110 寬）第一行很淡也算
+        let mut dual = Mask { w: 110, h: 75, bits: vec![false; 110 * 75], bbox: (0, 0), count: 0 };
+        for y in 17..=31 {
+            dual.bits[y * 110..y * 110 + if y % 2 == 0 { 3 } else { 6 }].fill(true);
+        }
+        for y in 41..=55 {
+            dual.bits[y * 110..y * 110 + 20].fill(true);
+        }
+        assert_eq!(dual.text_lines(), 2);
+    }
+
+    #[test]
+    fn two_line_labels_compare_the_second_line_char_by_char() {
+        // 「翻攝 抖音／中國仙鶴無人機」對「翻攝 抖音／中國觀音無人機」：第一行一樣、第二行 7 個字差 2 個
+        let glyph = |x: usize, y: usize, k: usize, alt: bool| {
+            // 每個字 22×22 格子裡畫一個跟 k 有關的筆畫圖案；alt＝換成別的字
+            let (cx, cy) = (x % 24, y % 30);
+            let s = if alt { k * 7 + 3 } else { k * 3 };
+            cx < 22 && cy < 22 && ((cx + cy * s) % 5 == 0 || (cx * (s + 1) + cy) % 7 == 0)
+        };
+        let label = |alt: &[usize]| {
+            Mask::from_fn(180, 90, |x, y| {
+                let line1 = (14..36).contains(&y) && (20..20 + 24 * 5).contains(&x) && glyph(x - 20, y - 14, (x - 20) / 24, false);
+                let line2 = (50..72).contains(&y) && (4..4 + 24 * 7).contains(&x) && {
+                    let k = (x - 4) / 24;
+                    glyph(x - 4, y - 50, k + 10, alt.contains(&k))
+                };
+                if line1 || line2 { 230.0 } else { 40.0 }
+            })
+        };
+        let tmpl = label(&[]);
+        let spans = tmpl.line_spans();
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        let split = spans[1].0 - 2;
+        let (full, worst) = tmpl.iou_parts(&label(&[]), split);
+        assert!(full > 0.95 && worst > 0.95, "同一個來源字：{full} {worst}");
+        let (full, worst) = tmpl.iou_parts(&label(&[2, 3]), split);
+        assert!(full > 0.6, "整個比還是很像：{full}");
+        assert!(worst < 0.5, "逐字比，不一樣的字那塊掉很多：{worst}");
     }
 
     #[test]

@@ -6,7 +6,7 @@ use super::titles::{which_segment, Titles};
 use super::{secs, tc, FrameInfo, Layout, CUT_DIFF, END_TRIM, FLASH_LUMA, FPS, LABEL_IOU, LABEL_IOU_STRONG, SIM_NCC};
 use image::GrayImage;
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// 布林序列 → 區段：間隔 ≤ fill_gap 的補起來，短於 min_len 的丟掉
 pub fn runs(flags: &[bool], fill_gap: usize, min_len: usize) -> Vec<(usize, usize)> {
@@ -74,6 +74,43 @@ pub struct MaskSeg {
 
 pub fn is_cut(frames: &[FrameInfo], i: usize) -> bool {
     frames[i].cut_diff > CUT_DIFF
+}
+
+/// 整個鏡頭遮的時候，最多從命中的格往前後各延伸幾秒（鏡頭切換漏判時不會一路遮下去）
+pub const SHOT_EXTEND_SECS: f64 = 15.0;
+/// 整個鏡頭遮的時候，「還看得到同一個來源字」的門檻（比 LABEL_IOU 寬：只是確認還在同一支影片，不是拿來單獨判斷）
+pub const SHOT_LABEL_IOU: f32 = 0.4;
+
+/// 換鏡頭：畫面差很多，而且不是閃光（亮度突然大變、1 秒內又回到原本的亮度，例如爆炸、閃光燈）。
+/// 閃光的開頭（之後亮度回來）和結尾（回到閃光前的亮度）都不算
+pub fn is_shot_cut(frames: &[FrameInfo], i: usize) -> bool {
+    if i == 0 || !is_cut(frames, i) {
+        return false;
+    }
+    let (before, now) = (frames[i - 1].luma, frames[i].luma);
+    if (now - before).abs() > FLASH_LUMA {
+        let fps = FPS as usize;
+        let starts = frames[i + 1..(i + fps).min(frames.len())].iter().any(|f| (f.luma - before).abs() < FLASH_LUMA / 2.0);
+        let ends = frames[i.saturating_sub(fps)..i - 1].iter().any(|f| (f.luma - now).abs() < FLASH_LUMA / 2.0);
+        return !starts && !ends;
+    }
+    true
+}
+
+/// range 裡的鏡頭（起, 訖）
+pub fn shots(frames: &[FrameInfo], (r0, r1): (usize, usize)) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut a = r0;
+    for i in r0 + 1..r1 {
+        if is_shot_cut(frames, i) {
+            out.push((a, i));
+            a = i;
+        }
+    }
+    if a < r1 {
+        out.push((a, r1));
+    }
+    out
 }
 
 /// 節目區塊 → 依 OCR 分成第幾段。`ocr`：側錄時間軸上的格 → 標題條 OCR 文字。
@@ -218,6 +255,7 @@ pub fn label_hit(f: &FrameInfo, set: &StillSet) -> bool {
     if t.generic || t.stills.is_empty() {
         return false;
     }
+    // 兩行的來源字 f.iou 已經是逐字比最差的那個字（`Template::score`），只差兩個字的也會掉到 0.6 以下
     if f.iou >= LABEL_IOU_STRONG {
         return true;
     }
@@ -257,6 +295,44 @@ pub fn plan_masks(frames: &[FrameInfo], set: &StillSet, range: (usize, usize)) -
     let mut lay: Vec<Layout> = frames[r0..r1].iter().map(|f| f.layout).collect();
     smooth_layouts(&mut lay);
     let layout_at = |i: usize| lay[i - r0];
+    // 滿版：有一格畫面跟靜圖幾乎一樣，整個鏡頭都遮（截圖只是那支影片的一兩格，
+    // 10/28 攤販監視器爆炸那幾秒畫面變亮、人在動，跟截圖不像就露出來了）。雙框只有左框在換，看不出鏡頭切換，不套用。
+    // 靜圖有來源字的：只延伸到還看得到同一個來源字的格（中間斷 1 秒內不算斷）。
+    // 10/29 第 5 段 1:04–1:14 棚內電子板慢慢放大到仙鶴無人機的畫面，沒有硬切，整塊電子板被當成同一個鏡頭遮掉
+    let lim = (SHOT_EXTEND_SECS * FPS) as usize;
+    for (a, b) in shots(frames, (r0, r1)) {
+        let matched: Vec<usize> = (a..b).filter(|&i| layout_at(i) == Layout::Full && frames[i].sims.iter().any(|&s| s >= SIM_NCC)).collect();
+        let (Some(&m0), Some(&m1)) = (matched.first(), matched.last()) else { continue };
+        let labels: BTreeSet<usize> = matched.iter().flat_map(|&i| (0..stills.len()).filter(move |&k| frames[i].sims[k] >= SIM_NCC)).filter_map(|k| stills[k].template).collect();
+        let same_label = |i: usize| {
+            let f = &frames[i];
+            labels.is_empty() || (f.tmpl >= 0 && f.iou >= SHOT_LABEL_IOU && labels.iter().any(|&t| set.same_label(t, f.tmpl as usize)))
+        };
+        let (lo, hi) = (a.max(m0.saturating_sub(lim)), b.min(m1 + lim));
+        // 從命中的格往外走，最後一個還有同一個來源字的格；連續 1 秒沒有就停
+        let reach = |range: &mut dyn Iterator<Item = usize>| {
+            let (mut last, mut miss) = (None, 0);
+            for i in range {
+                if same_label(i) {
+                    last = Some(i);
+                    miss = 0;
+                } else {
+                    miss += 1;
+                    if miss > fps {
+                        break;
+                    }
+                }
+            }
+            last
+        };
+        let start = reach(&mut (lo..m0).rev()).unwrap_or(m0);
+        let end = reach(&mut (m1 + 1..hi)).map_or(m1 + 1, |i| i + 1);
+        for i in start..end {
+            if layout_at(i) == Layout::Full {
+                hit[i - r0] = true;
+            }
+        }
+    }
     let evidence = |f: &FrameInfo| label_hit(f, set) || f.sims.iter().any(|&s| s >= SIM_NCC);
 
     let mut segs: Vec<MaskSeg> = Vec::new();
@@ -337,11 +413,13 @@ pub fn plan_masks(frames: &[FrameInfo], set: &StillSet, range: (usize, usize)) -
         }
     }
     // 雙框：左框通常是同一支素材連續播，來源字、相似度會斷斷續續。
-    // 兩段雙框遮罩相隔 ≤ 8 秒、中間一直是雙框 → 併成一段，不讓中間露出原畫面
+    // 兩段雙框遮罩相隔 ≤ 8 秒、中間一直是雙框 → 併成一段，不讓中間露出原畫面。
+    // 滿版：同一張靜圖（同一支影片）的兩段遮罩相隔 ≤ 8 秒、中間一直是滿版 → 也併起來（中間多半是同一支影片的其他鏡頭）
     let mut merged: Vec<MaskSeg> = Vec::new();
     for m in segs {
         if let Some(last) = merged.last_mut() {
-            if last.layout == Layout::Dual && m.layout == Layout::Dual && m.start >= last.end && m.start - last.end <= 8 * fps && (last.end..m.start).all(|i| layout_at(i) == Layout::Dual) {
+            let near = m.layout == last.layout && m.start >= last.end && m.start - last.end <= 8 * fps && (last.end..m.start).all(|i| layout_at(i) == m.layout);
+            if near && (m.layout == Layout::Dual || m.still == last.still) {
                 last.end = m.end;
                 continue;
             }
@@ -595,8 +673,9 @@ mod tests {
         let mask = Mask::from_fn(4, 4, |_, _| 0.0);
         StillSet {
             stills: vec![Still { name: "s.jpg".into(), path: "/s.jpg".into(), segment: None, layout: Layout::Full, template: Some(0), small: GrayImage::new(80, 45) }],
-            templates: vec![Template { layout: Layout::Full, mask, stills: vec![0], generic: false }],
+            templates: vec![Template { layout: Layout::Full, mask, stills: vec![0], generic: false, split: None }],
             off: Vec::new(),
+            kin: Vec::new(),
         }
     }
 
@@ -845,6 +924,107 @@ mod tests {
         assert!((m[0].iou - 0.8).abs() < 1e-6);
         // 範圍外的不遮
         assert!(plan_masks(&frames, &set, (0, 10 * fps)).is_empty());
+    }
+
+    #[test]
+    fn whole_shot_is_masked_and_flash_is_not_a_cut() {
+        // 10/28 第 3 段攤販監視器：鏡頭 10～24 秒，只有 12～14 秒跟截圖幾乎一樣；18 秒爆炸閃光（亮度暴衝又回來）
+        let set = one_still_set();
+        let fps = FPS as usize;
+        let mut frames: Vec<FrameInfo> = (0..40 * fps)
+            .map(|_| {
+                let mut f = frame(true);
+                f.sims = vec![0.3];
+                f
+            })
+            .collect();
+        frames[10 * fps].cut_diff = 60.0;
+        frames[24 * fps].cut_diff = 60.0;
+        // 整個鏡頭都看得到同一個來源字（字形 0.42：不夠單獨當證據，夠確認還在同一支影片）
+        for f in &mut frames[10 * fps..24 * fps] {
+            f.tmpl = 0;
+            f.iou = 0.42;
+        }
+        for f in &mut frames[12 * fps..14 * fps] {
+            f.sims = vec![0.95];
+        }
+        frames[18 * fps].cut_diff = 45.0;
+        for f in &mut frames[18 * fps..18 * fps + 5] {
+            f.luma = 200.0;
+        }
+        frames[18 * fps + 5].cut_diff = 45.0;
+        assert!(!is_shot_cut(&frames, 18 * fps), "閃光不算換鏡頭");
+        assert!(is_shot_cut(&frames, 24 * fps));
+        let m = plan_masks(&frames, &set, (0, frames.len()));
+        assert_eq!(m.len(), 1, "{m:?}");
+        assert_eq!((m[0].start, m[0].end), (10 * fps, 24 * fps), "整個鏡頭都遮，包含爆炸那幾秒");
+        assert!(!m[0].by_label);
+    }
+
+    #[test]
+    fn whole_shot_stops_where_the_source_label_disappears() {
+        // 10/29 第 5 段 1:04–1:14：棚內電子板（沒有來源字）10 秒慢慢放大到素材，中間沒有硬切；
+        // 素材（有來源字）20～25 秒，21 秒跟截圖一樣 → 電子板不遮
+        let set = one_still_set();
+        let fps = FPS as usize;
+        let mut frames: Vec<FrameInfo> = (0..40 * fps)
+            .map(|_| {
+                let mut f = frame(true);
+                f.sims = vec![0.2];
+                f
+            })
+            .collect();
+        frames[10 * fps].cut_diff = 60.0;
+        frames[25 * fps].cut_diff = 60.0;
+        for f in &mut frames[20 * fps..25 * fps] {
+            f.tmpl = 0;
+            f.iou = 0.5;
+        }
+        for f in &mut frames[21 * fps..22 * fps] {
+            f.sims = vec![0.95];
+        }
+        let m = plan_masks(&frames, &set, (0, frames.len()));
+        assert_eq!(m.len(), 1, "{m:?}");
+        assert_eq!((m[0].start, m[0].end), (20 * fps, 25 * fps), "只遮有來源字的部分");
+        // 素材沒有來源字（靜圖也沒有樣板）→ 照舊整個鏡頭遮
+        let mut set = set;
+        set.stills[0].template = None;
+        let m = plan_masks(&frames, &set, (0, frames.len()));
+        assert_eq!((m[0].start, m[0].end), (10 * fps, 25 * fps));
+    }
+
+    #[test]
+    fn same_still_masks_close_together_merge() {
+        // 10/28 電工：同一支影片中間夾一個不像的鏡頭（5 秒）→ 接起來（靜圖沒有來源字：整個鏡頭遮不受來源字限制）
+        let mut set = one_still_set();
+        set.stills[0].template = None;
+        let fps = FPS as usize;
+        let mut frames: Vec<FrameInfo> = (0..40 * fps)
+            .map(|_| {
+                let mut f = frame(true);
+                f.sims = vec![0.1];
+                f
+            })
+            .collect();
+        for k in [10, 14, 19, 23] {
+            frames[k * fps].cut_diff = 60.0;
+        }
+        for i in (11 * fps..12 * fps).chain(20 * fps..21 * fps) {
+            frames[i].sims = vec![0.95];
+        }
+        let m = plan_masks(&frames, &set, (0, frames.len()));
+        assert_eq!(m.len(), 1, "{m:?}");
+        assert_eq!((m[0].start, m[0].end), (10 * fps, 23 * fps));
+        // 隔太遠（> 8 秒）不接
+        for f in &mut frames[20 * fps..21 * fps] {
+            f.sims = vec![0.1];
+        }
+        frames[33 * fps].cut_diff = 60.0;
+        frames[36 * fps].cut_diff = 60.0;
+        for f in &mut frames[34 * fps..35 * fps] {
+            f.sims = vec![0.95];
+        }
+        assert_eq!(plan_masks(&frames, &set, (0, frames.len())).len(), 2);
     }
 
     /// 10/20 第 2 段 8:42–9:00：雙框特寫（像靜圖）有遮、中間遠景（不像、來源字比不到）沒遮，

@@ -26,6 +26,21 @@ pub struct Template {
     pub stills: Vec<usize>,
     /// 只有一行（「翻攝 X」「翻攝 微博」沒有說明）：別的素材常常一模一樣，字形像不能當證據
     pub generic: bool,
+    /// 兩行以上：第二行從樣板的第幾列開始（比對時第二行也要像，見 `Mask::iou_parts`）
+    pub split: Option<usize>,
+}
+
+impl Template {
+    /// 這一格的來源字跟樣板像不像：兩行以上取「整個」和「第二行以下」比較低的那個
+    pub fn score(&self, label: &Mask) -> f32 {
+        match self.split {
+            Some(split) => {
+                let (full, below) = self.mask.iou_parts(label, split);
+                full.min(below)
+            }
+            None => self.mask.iou(label),
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -34,7 +49,12 @@ pub struct StillSet {
     pub templates: Vec<Template>,
     /// `for_segment` 排除掉的靜圖（別段的）；空的＝全部可用
     pub off: Vec<bool>,
+    /// 樣板 a、b 是不是同一個來源字（同一個樣板，或字形 IoU ≥ 0.5：同一個來源字的靜圖背景不同，沒併成一個樣板）
+    pub kin: Vec<Vec<bool>>,
 }
+
+/// 來源字比對算法的版本（label-v3：兩行來源字第二行逐字比）
+const SIGNATURE_VERSION: &str = "label-v3";
 
 /// 檔名（不含資料夾）
 fn file_name(path: &str) -> &str {
@@ -82,8 +102,11 @@ impl StillSet {
                         Some(k)
                     }
                     None => {
-                        let generic = m.text_lines() <= 1;
-                        templates.push(Template { layout, mask: m, stills: vec![idx], generic });
+                        let lines = m.line_spans();
+                        let generic = lines.len() <= 1;
+                        // 第二行開頭往上留 2 列（對齊有 ±2 px 的誤差）
+                        let split = lines.get(1).map(|l| l.0.saturating_sub(2));
+                        templates.push(Template { layout, mask: m, stills: vec![idx], generic, split });
                         Some(templates.len() - 1)
                     }
                 }
@@ -95,7 +118,15 @@ impl StillSet {
             let segment = segment_of_path(&path);
             stills.push(Still { name, path, segment, layout, template, small });
         }
-        StillSet { stills, templates, off: Vec::new() }
+        let kin = (0..templates.len())
+            .map(|a| (0..templates.len()).map(|b| a == b || (templates[a].layout == templates[b].layout && templates[a].mask.iou(&templates[b].mask) >= 0.5)).collect())
+            .collect();
+        StillSet { stills, templates, off: Vec::new(), kin }
+    }
+
+    /// 樣板 a、b 是不是同一個來源字
+    pub fn same_label(&self, a: usize, b: usize) -> bool {
+        a == b || self.kin.get(a).and_then(|r| r.get(b)).copied().unwrap_or(false)
     }
 
     /// 第 n 段能用的靜圖：共用的（直接放在資料夾裡）＋放在這段子資料夾的。
@@ -109,7 +140,7 @@ impl StillSet {
             return None;
         }
         let templates = self.templates.iter().map(|t| Template { stills: t.stills.iter().copied().filter(|&k| !off[k]).collect(), ..t.clone() }).collect();
-        Some(StillSet { stills: self.stills.clone(), templates, off })
+        Some(StillSet { stills: self.stills.clone(), templates, off, kin: self.kin.clone() })
     }
 
     pub fn is_off(&self, k: usize) -> bool {
@@ -117,12 +148,10 @@ impl StillSet {
     }
 
     /// 快取簽名：每張靜圖的檔名＋版型＋樣板編號。靜圖增減、換圖造成判斷改變，簽名就不同
+    /// 開頭是比對算法的版本：每格來源字比對的算法改了就換，舊的掃描快取全部作廢重掃
     pub fn signature(&self) -> String {
-        self.stills
-            .iter()
-            .map(|s| format!("{}|{}|{}", file_name(&s.path), s.layout == Layout::Dual, s.template.map(|t| t as i64).unwrap_or(-1)))
-            .collect::<Vec<_>>()
-            .join("\n")
+        let stills = self.stills.iter().map(|s| format!("{}|{}|{}", file_name(&s.path), s.layout == Layout::Dual, s.template.map(|t| t as i64).unwrap_or(-1)));
+        std::iter::once(SIGNATURE_VERSION.to_string()).chain(stills).collect::<Vec<_>>().join("\n")
     }
 
     /// 報告開頭的靜圖清單
@@ -171,7 +200,7 @@ mod tests {
         assert_eq!(set.stills[2].template, Some(1));
         assert_eq!(set.stills[3].template, None, "沒有來源字");
         assert_eq!(set.templates[0].stills, vec![0, 1]);
-        assert!(set.signature().starts_with("a.jpg|false|0\nb.jpg|false|0"));
+        assert!(set.signature().starts_with("label-v3\na.jpg|false|0\nb.jpg|false|0"));
         assert!(set.for_segment(1).is_none(), "沒有放進段落子資料夾的，不用排除");
     }
 
