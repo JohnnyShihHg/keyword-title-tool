@@ -213,11 +213,13 @@ async function acParseStills() {
   else if (p.topics.length || half) {
     const [a, b] = acSegmentScores(p.topics).filter((s) => !code || code.segs.includes(s.n));
     const scores = a?.hits ? `第 ${a.n} 段對到 ${a.hits} 個詞${b?.hits ? `、第 ${b.n} 段 ${b.hits} 個` : ""}` : "標題對不到，文稿還沒進來？";
-    why = `${half ? `${half}，` : ""}判斷不出是哪一段（${scores}），請自己選`;
-  }
+    why = `沒有命中段落：${half ? `${half}，` : ""}判斷不出是哪一段（${scores}），請自己選`;
+  } else if ($("acStillsMsg").value.trim()) why = "沒有命中段落：訊息開頭沒有 22／23 編號、也看不出主題，請自己選";
   $("acStillsSeg").value = n ? String(n) : "";
   acFillCands();
   $("acStillsWhy").textContent = why;
+  // 沒命中、或編號和標題對不起來 → 紅字，不然會以為貼進去就好了
+  $("acStillsWhy").className = !n && why ? "bad" : why.includes("請確認") ? "bad" : "muted";
 
   let found = [];
   let msg = "";
@@ -239,6 +241,7 @@ async function acParseStills() {
   const manual = acStillCands.filter((c) => c.manual);
   acStillCands = [...manual, ...found.filter((path) => !manual.some((c) => c.path === path)).map((path) => ({ path }))];
   $("acStillsFoundMsg").textContent = msg;
+  $("acStillsFoundMsg").className = msg && !found.length ? "bad" : "muted";
   acFillCands();
 }
 
@@ -253,6 +256,7 @@ function acFillCands() {
   );
   $("acStillsAddBtn").disabled = !acStillCands.length || $("acStillsSeg").value === "";
   $("acStillsAddBtn").textContent = acStillCands.length ? `加入 ${acStillCands.length} 張` : "加入";
+  $("acStillsSeg").classList.toggle("bad", !!acStillCands.length && $("acStillsSeg").value === "");
 }
 
 function acAddCands(paths) {
@@ -260,14 +264,22 @@ function acAddCands(paths) {
   acFillCands();
 }
 
-function acClosePaste() {
-  $("acStillsPaste").classList.add("hidden");
+/** 清空框裡的內容（加入後留著框，可以接著貼下一則） */
+function acResetPaste() {
+  acStillParseSeq++; // 還在找圖的結果不要再填回來
+  clearTimeout(acStillParseTimer);
   $("acStillsMsg").value = "";
   $("acStillsWhy").textContent = "";
   $("acStillsFoundMsg").textContent = "";
+  $("acStillsFoundMsg").className = "muted";
   $("acStillsSeg").value = "";
   acStillCands = [];
   acFillCands();
+}
+
+function acClosePaste() {
+  $("acStillsPaste").classList.add("hidden");
+  acResetPaste();
 }
 
 // 預設不選：猜不出來就要人自己選，不會默默放錯段
@@ -295,7 +307,11 @@ $("acStillsAddBtn").addEventListener("click", async () => {
   const paths = acStillCands.map((c) => c.path);
   if (!paths.length) return;
   await acAddStills(n, paths);
-  acClosePaste();
+  // 框不關，讓人接著貼下一則；要關按「關閉」
+  acResetPaste();
+  $("acStillsFoundMsg").textContent = `已加入 ${paths.length} 張到${acStillSegName(n)}，可以接著貼下一則`;
+  $("acStillsFoundMsg").className = "good";
+  $("acStillsMsg").focus();
 });
 $("acStillsRefresh").addEventListener("click", acLoadStills);
 $("acReplace").addEventListener("toggle", () => {
