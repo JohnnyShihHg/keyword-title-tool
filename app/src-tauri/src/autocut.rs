@@ -9,6 +9,7 @@ use crate::video::{command, require_tool};
 use keyword_title_core::video::{self, Clip, Encoder, Join, RenderSpec};
 use keyword_title_core::autocut::{bars, image};
 use keyword_title_core::autocut::plan::{self, MaskSeg, Segment};
+use keyword_title_core::autocut::seam::{self, Seam};
 use keyword_title_core::autocut::stills::StillSet;
 use keyword_title_core::autocut::titles::{parse_titles, Titles};
 use keyword_title_core::autocut::{cache, frame, secs, tc, FrameInfo, Layout, BAND, BOX, CANVAS_BYTES, FPS, H, LOGO_H, LOGO_W, START_DELAY, W};
@@ -896,6 +897,10 @@ struct Watcher {
     ai_cache: HashMap<String, (bool, String)>,
     /// 已經自動重新出片過的 (段, 判斷結果指紋)：同一個結果只自動重出一次
     rerendered: HashSet<(usize, String)>,
+    /// 側錄接縫的聲音比對結果（存在 .autocut\seams.tsv）：「前檔|大小|後檔|大小」→ 結果
+    seams: HashMap<String, Seam>,
+    /// 上次規劃時每個檔結尾拿掉幾格（變了的話時間軸會移，之前對準的格數要重找）
+    last_trims: Vec<usize>,
 }
 
 impl Watcher {
@@ -909,7 +914,10 @@ impl Watcher {
         };
         let model = cfg.ai_model.clone().filter(|m| !m.trim().is_empty()).unwrap_or_else(|| "gemini-3.5-flash-lite".into());
         let ai_cache = ai::load_cache(&work.join("ai.tsv"));
+        let seams = load_seams(&work.join("seams.tsv"));
         Ok(Watcher {
+            seams,
+            last_trims: Vec::new(),
             ai: key.map(|k| ai::Gemini::new(k, model)),
             ai_cache,
             app,
@@ -1264,15 +1272,27 @@ impl Watcher {
         let mut frames: Vec<FrameInfo> = Vec::new();
         let mut ocr: BTreeMap<usize, String> = BTreeMap::new();
         let mut files: Vec<(PathBuf, f64, f64)> = Vec::new();
-        for s in &self.scanned {
-            let off = frames.len();
-            // 每 2 秒一張：第 k 張＝這個檔第 2k 秒
-            ocr.extend(s.ocr.iter().map(|(k, text)| (off + ((*k * 2) as f64 * FPS) as usize, text.clone())));
-            // 整體時間軸＝各檔格數依序相加（不用秒數相加，每檔是 17,984 格＝600.066 秒）
-            files.push((s.path.clone(), secs(off), secs(s.frames.len())));
-            frames.extend(s.frames.iter().cloned());
-        }
+        // 接縫：下一檔開頭重複了前一檔最後一秒多 → 前一檔結尾拿掉那幾格（兩份一模一樣，拿哪份都一樣；
+        // 拿前一檔的，後面每個檔的「檔內時間＝時間軸−檔開頭」照舊成立，出片、截圖都不用改）
         let mut log = String::new();
+        let seams: Vec<Option<Seam>> = (0..self.scanned.len().saturating_sub(1)).map(|i| self.seam(i)).collect();
+        let trims: Vec<usize> = (0..self.scanned.len()).map(|i| seams.get(i).copied().flatten().map_or(0, |s| s.trim_frames())).collect();
+        if trims.iter().zip(&self.last_trims).any(|(a, b)| a != b) || trims.iter().skip(self.last_trims.len()).any(|&t| t > 0) {
+            // 時間軸移了：之前對準的 Logo 轉場、BAR 邊界都要重找
+            self.refined.clear();
+            self.bar_edges.clear();
+        }
+        self.last_trims = trims.clone();
+        for (s, &trim) in self.scanned.iter().zip(&trims) {
+            let off = frames.len();
+            let keep = s.frames.len().saturating_sub(trim);
+            // 每 2 秒一張：第 k 張＝這個檔第 2k 秒
+            ocr.extend(s.ocr.iter().map(|(k, text)| (((*k * 2) as f64 * FPS) as usize, text)).filter(|(f, _)| *f < keep).map(|(f, text)| (off + f, text.clone())));
+            // 整體時間軸＝各檔格數依序相加（不用秒數相加，每檔是 17,984 格＝600.066 秒）
+            files.push((s.path.clone(), secs(off), secs(keep)));
+            frames.extend(s.frames[..keep].iter().cloned());
+        }
+        log.push_str(&self.seam_report(&seams));
         let mut segs = plan::plan_segments(&frames, &ocr, &self.titles, &mut log);
         // 完整的段落：開頭對到 Logo 轉場結束那一格（要解碼一小段，結果記起來）
         // 最後一段廣告後接回來的那一片也一樣要對
@@ -1446,6 +1466,82 @@ impl Watcher {
 
     fn write_report(&self) {
         self.shared.write_report_file(&self.cfg.output_dir);
+    }
+
+    /// 第 i 個和第 i+1 個檔的接縫：下一檔開頭有沒有重複上一檔結尾（聲音比對，結果記起來）。取不到聲音＝None
+    fn seam(&mut self, i: usize) -> Option<Seam> {
+        let (a, b) = (&self.scanned[i], &self.scanned[i + 1]);
+        let key = format!("{}|{}|{}|{}", a.name, a.size, b.name, b.size);
+        if let Some(s) = self.seams.get(&key) {
+            return Some(*s);
+        }
+        let tail = seam_audio(&self.ffmpeg, &a.path, true);
+        let head = seam_audio(&self.ffmpeg, &b.path, false);
+        let (tail, head) = match (tail, head) {
+            (Ok(t), Ok(h)) => (t, h),
+            (Err(e), _) | (_, Err(e)) => {
+                self.log(format!("★ 接縫 {} → {}：取不到聲音（{e}），不檢查", a.name, b.name));
+                return None;
+            }
+        };
+        let mut s = seam::overlap(&tail, &head);
+        // 聲音說重複 → 畫面再確認，格數以畫面為準
+        if let Seam::Overlap { score, .. } = s {
+            let guess = s.trim_frames();
+            let n = guess + seam::VIDEO_SLACK + 2;
+            let k = match (seam_frames(&self.ffmpeg, &a.path, true, n), seam_frames(&self.ffmpeg, &b.path, false, n)) {
+                (Ok(t), Ok(h)) => seam::video_overlap(&t, &h, guess),
+                _ => None,
+            };
+            s = match k {
+                Some(k) => {
+                    self.log(format!("接縫 {} → {}：開頭重複了前一檔最後 {k} 格（{:.2} 秒），拿掉", a.name, b.name, secs(k)));
+                    Seam::Overlap { secs: secs(k), score }
+                }
+                None => {
+                    self.log(format!("接縫 {} → {}：聲音像重複（{score:.2}）但畫面不像，不拿掉", a.name, b.name));
+                    Seam::Clean { best: score }
+                }
+            };
+        } else if s == Seam::Silent {
+            // 開頭沒聲音：只看畫面（靜止畫面判斷不了就維持「比不出來」）；score 記 0＝只靠畫面
+            let n = seam::VIDEO_ONLY_MAX;
+            if let (Ok(t), Ok(h)) = (seam_frames(&self.ffmpeg, &a.path, true, n), seam_frames(&self.ffmpeg, &b.path, false, n)) {
+                if let Some(k) = seam::video_only_overlap(&t, &h) {
+                    self.log(format!("接縫 {} → {}：開頭沒聲音，畫面看出重複了前一檔最後 {k} 格（{:.2} 秒），拿掉", a.name, b.name, secs(k)));
+                    s = Seam::Overlap { secs: secs(k), score: 0.0 };
+                }
+            }
+        }
+        append_seam(&self.work.join("seams.tsv"), &key, &s);
+        self.seams.insert(key, s);
+        Some(s)
+    }
+
+    /// 判斷報告的接縫段：有重複（已拿掉）、檔名時間看起來少錄、比不出來的才列
+    fn seam_report(&self, seams: &[Option<Seam>]) -> String {
+        let mut lines = Vec::new();
+        for (i, s) in seams.iter().enumerate() {
+            let (a, b) = (&self.scanned[i], &self.scanned[i + 1]);
+            let at = tc(secs(self.scanned[..=i].iter().map(|x| x.frames.len()).sum::<usize>()));
+            let gap = seam::gap_secs(&a.name, secs(a.frames.len()), &b.name);
+            let what = match s {
+                Some(s @ Seam::Overlap { secs, score }) if *score > 0.0 => format!("後一檔開頭重複 {} 格（{secs:.2} 秒，聲音 {score:.2}、畫面確認），已拿掉", s.trim_frames()),
+                Some(s @ Seam::Overlap { secs, .. }) => format!("後一檔開頭重複 {} 格（{secs:.2} 秒，開頭沒聲音、畫面比對），已拿掉", s.trim_frames()),
+                Some(Seam::Silent) => "開頭沒聲音、畫面也看不出來（靜止或黑畫面），沒檢查到".into(),
+                None => "取不到聲音，沒檢查".into(),
+                Some(Seam::Clean { .. }) => match gap {
+                    Some(g) if g > 1.5 => format!("檔名時間看起來少錄約 {g:.1} 秒（補不回來，照樣出片）"),
+                    _ => continue,
+                },
+            };
+            lines.push(format!("  側錄 {at}：{} → {}：{what}\n", a.name, b.name));
+        }
+        let n = seams.len();
+        if lines.is_empty() {
+            return if n > 0 { format!("  側錄接縫 {n} 個：都正常\n") } else { String::new() };
+        }
+        format!("  側錄接縫 {n} 個，要注意的：\n{}", lines.concat())
     }
 
     fn job(&mut self, seg: &Segment, masks: &[MaskSeg], files: &[(PathBuf, f64, f64)], ocr: &BTreeMap<usize, String>) -> RenderJob {
@@ -1642,6 +1738,85 @@ fn clip_to_pieces(pieces: &[(usize, usize)], ranges: &[(usize, usize)]) -> Vec<(
 
 fn is_output_name(name: &str) -> bool {
     name == "全集.mp4" || name.strip_prefix('第').and_then(|s| s.strip_suffix("段.mp4")).is_some_and(|n| n.parse::<usize>().is_ok())
+}
+
+/// 接縫比對用的聲音：結尾（`tail`）取最後 TAIL_SECS 秒、開頭取最前 HEAD_SECS 秒，轉 8kHz 單聲道 s16le
+fn seam_audio(ffmpeg: &Path, path: &Path, tail: bool) -> Result<Vec<i16>, String> {
+    let mut cmd = command(ffmpeg);
+    cmd.args(["-hide_banner", "-loglevel", "error"]);
+    if tail {
+        cmd.args(["-sseof", &format!("-{}", seam::TAIL_SECS)]);
+    }
+    cmd.arg("-i").arg(path);
+    if !tail {
+        cmd.args(["-t", &seam::HEAD_SECS.to_string()]);
+    }
+    let o = cmd
+        .args(["-map", "0:a:0", "-vn", "-ac", "1", "-ar", &seam::SR.to_string(), "-f", "s16le", "-"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("無法執行 ffmpeg：{e}"))?;
+    if o.stdout.len() < 2 * seam::SR / 2 {
+        return Err(String::from_utf8_lossy(&o.stderr).trim().chars().take(200).collect());
+    }
+    Ok(o.stdout.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect())
+}
+
+/// 接縫確認用的畫面：結尾最後 `n` 格或開頭最前 `n` 格，64×36 灰階
+fn seam_frames(ffmpeg: &Path, path: &Path, tail: bool, n: usize) -> Result<Vec<Vec<u8>>, String> {
+    const SZ: usize = 64 * 36;
+    let mut cmd = command(ffmpeg);
+    cmd.args(["-hide_banner", "-loglevel", "error"]);
+    if tail {
+        // 多取一點再留最後 n 格（-sseof 對到的是附近的關鍵格）
+        cmd.args(["-sseof", &format!("-{:.2}", secs(n) + 1.0)]);
+    }
+    cmd.arg("-i").arg(path);
+    if !tail {
+        cmd.args(["-frames:v", &n.to_string()]);
+    }
+    let o = cmd
+        .args(["-an", "-vf", "scale=64:36:flags=area,format=gray", "-f", "rawvideo", "-"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("無法執行 ffmpeg：{e}"))?;
+    let mut frames: Vec<Vec<u8>> = o.stdout.chunks_exact(SZ).map(|c| c.to_vec()).collect();
+    if frames.len() < n {
+        return Err("畫面不夠".into());
+    }
+    if tail {
+        frames.drain(..frames.len() - n);
+    }
+    Ok(frames)
+}
+
+fn load_seams(path: &Path) -> HashMap<String, Seam> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    text.lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            let num = |i: usize| f.get(i)?.parse::<f64>().ok();
+            let s = match *f.get(1)? {
+                "overlap" => Seam::Overlap { secs: num(2)?, score: num(3)? },
+                "clean" => Seam::Clean { best: num(3)? },
+                "silent" => Seam::Silent,
+                _ => return None,
+            };
+            Some((f[0].to_string(), s))
+        })
+        .collect()
+}
+
+fn append_seam(path: &Path, key: &str, s: &Seam) {
+    let line = match s {
+        Seam::Overlap { secs, score } => format!("{key}\toverlap\t{secs:.4}\t{score:.3}\n"),
+        Seam::Clean { best } => format!("{key}\tclean\t0\t{best:.3}\n"),
+        Seam::Silent => format!("{key}\tsilent\t0\t0\n"),
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        use std::io::Write;
+        let _ = f.write_all(line.as_bytes());
+    }
 }
 
 fn read_titles_file(p: &Path) -> Result<String, String> {

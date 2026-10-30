@@ -14,6 +14,7 @@ pub mod bars;
 pub mod cache;
 pub mod frame;
 pub mod plan;
+pub mod seam;
 pub mod stills;
 pub mod titles;
 
