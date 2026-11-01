@@ -41,6 +41,7 @@ function acFillDirs() {
   $("acCopyShare").checked = !!settings.autocut_copy_to_share;
   $("acSince").value = settings.autocut_since ?? "";
   $("acEndCutoff").value = settings.autocut_end_cutoff ?? "";
+  $("acRotateSecs").value = settings.autocut_rotate_secs ?? 7;
   $("acTitlesSource").textContent = settings.sync_enabled
     ? "文稿：共用資料夾當天的 txt"
     : "文稿：文稿頁目前的內容（開播後改標題也會跟著更新）";
@@ -64,6 +65,10 @@ document.querySelectorAll("[data-ac-clear]").forEach((btn) => {
 });
 $("acEndCutoff").addEventListener("change", () => {
   settings.autocut_end_cutoff = $("acEndCutoff").value.trim();
+  persistSettings();
+});
+$("acRotateSecs").addEventListener("change", () => {
+  settings.autocut_rotate_secs = Math.max(0, Number($("acRotateSecs").value) || 0);
   persistSettings();
 });
 $("acSince").addEventListener("change", () => {
@@ -157,6 +162,7 @@ $("acStartBtn").addEventListener("click", async () => {
         make_all: $("acMakeAll").checked,
         since: $("acSince").value.trim() || null,
         end_cutoff: $("acEndCutoff").value.trim() || null,
+        rotate_secs: Math.max(0, Number($("acRotateSecs").value) || 0),
         ai_key: settings.autocut_ai_key || null,
         ai_model: settings.autocut_ai_model || null,
         // 正片加工（跟影片頁單集一樣）、串接、全集用

@@ -473,6 +473,31 @@ fn for_segment(frames: &[FrameInfo], set: &StillSet, seg: &Segment) -> Option<(V
     Some((frames, set))
 }
 
+/// 遮罩輪播：同來源的靜圖不只一張時，每 `every` 秒換下一張（輪完從頭），切成接在一起的幾段。
+/// 只有一張、`every` ≤ 0 → 原樣。結尾剩不到 2 秒不另外換一張，併進前一張
+pub fn rotate_mask(set: &StillSet, m: &MaskSeg, every: f64) -> Vec<MaskSeg> {
+    let pool = set.rotation_pool(m.still);
+    let step = (every * FPS) as usize;
+    if pool.len() < 2 || step == 0 {
+        return vec![m.clone()];
+    }
+    let mut out: Vec<MaskSeg> = Vec::new();
+    let mut at = m.start;
+    while at < m.end {
+        let end = if m.end - at < step + (2.0 * FPS) as usize { m.end } else { at + step };
+        out.push(MaskSeg { start: at, end, still: pool[out.len() % pool.len()], ..m.clone() });
+        at = end;
+    }
+    out
+}
+
+/// 一段的遮罩套上輪播（只用這段能用的靜圖）
+pub fn rotate_masks(set: &StillSet, n: usize, masks: &[MaskSeg], every: f64) -> Vec<MaskSeg> {
+    let own = set.for_segment(n);
+    let set = own.as_ref().unwrap_or(set);
+    masks.iter().flat_map(|m| rotate_mask(set, m, every)).collect()
+}
+
 // ───────────────────────── 交給 AI 判斷的鏡頭 ─────────────────────────
 
 /// 規則沒把握的一段畫面：取幾格右上角來源字給 AI 看，問「跟這些靜圖的來源字是不是同一個」
@@ -613,14 +638,21 @@ pub fn apply_ai(frames: &[FrameInfo], masks: &mut Vec<MaskSeg>, c: &AiCandidate)
 // ───────────────────────── 報告 ─────────────────────────
 
 /// 「== 段落 ==」那一節
-pub fn report_segments(segs: &[(Segment, Vec<MaskSeg>)], set: &StillSet) -> String {
+pub fn report_segments(segs: &[(Segment, Vec<MaskSeg>)], set: &StillSet, rotate_secs: f64) -> String {
     let mut r = String::from("\n== 段落 ==\n");
     for (seg, masks) in segs {
         r.push_str(&format!("第 {} 段{}：長 {}，遮罩 {} 段\n", seg.n, if seg.complete() { "" } else { "（不完整，不輸出）" }, tc(seg.duration()), masks.len()));
         for (s, e) in &seg.pieces {
             r.push_str(&format!("  側錄 {} – {}\n", tc(secs(*s)), tc(secs(*e))));
         }
+        let own = set.for_segment(seg.n);
+        let seg_set = own.as_ref().unwrap_or(set);
         for m in masks {
+            let turns = rotate_mask(seg_set, m, rotate_secs);
+            let mut used: Vec<usize> = turns.iter().map(|t| t.still).collect();
+            used.sort_unstable();
+            used.dedup();
+            let rotate = if used.len() > 1 { format!(" ｜ 輪播 {} 張、換 {} 次", used.len(), turns.len() - 1) } else { String::new() };
             let why = if m.ai && m.iou == 0.0 && m.by_label {
                 "AI 判斷（來源字相同）".to_string()
             } else {
@@ -631,7 +663,12 @@ pub fn report_segments(segs: &[(Segment, Vec<MaskSeg>)], set: &StillSet) -> Stri
                     if m.ai { "＋AI 接上空檔" } else { "" }
                 )
             };
-            r.push_str(&format!("    遮 {} – {} ｜ {} ｜ {} ｜ {}\n", tc(secs(m.start)), tc(secs(m.end)), m.layout.zh(), why, set.stills[m.still].name));
+            r.push_str(&format!("    遮 {} – {} ｜ {} ｜ {} ｜ {}{rotate}\n", tc(secs(m.start)), tc(secs(m.end)), m.layout.zh(), why, set.stills[m.still].name));
+            if used.len() > 1 {
+                for k in used.iter().filter(|&&k| k != m.still) {
+                    r.push_str(&format!("      輪播：{}\n", set.stills[*k].name));
+                }
+            }
         }
     }
     r
@@ -692,7 +729,7 @@ mod tests {
     fn one_still_set() -> StillSet {
         let mask = Mask::from_fn(4, 4, |_, _| 0.0);
         StillSet {
-            stills: vec![Still { name: "s.jpg".into(), path: "/s.jpg".into(), segment: None, layout: Layout::Full, template: Some(0), small: GrayImage::new(80, 45) }],
+            stills: vec![Still { name: "s.jpg".into(), path: "/s.jpg".into(), segment: None, layout: Layout::Full, template: Some(0), source: StillSet::build(vec![("x.jpg".into(), "/x.jpg".into(), image::RgbImage::new(crate::autocut::W, crate::autocut::H))]).stills[0].source.clone(), small: GrayImage::new(80, 45) }],
             templates: vec![Template { layout: Layout::Full, mask, stills: vec![0], generic: false, split: None }],
             off: Vec::new(),
             kin: Vec::new(),

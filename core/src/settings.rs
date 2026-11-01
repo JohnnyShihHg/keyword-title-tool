@@ -73,6 +73,8 @@ pub struct Settings {
     pub autocut_since: String,
     /// 最後一段：側錄過了這個時間（`23:59:30`）節目還沒回來就算結束；空白＝不用（只看收黑、錄滿 8 分鐘）
     pub autocut_end_cutoff: String,
+    /// 遮罩輪播：同來源的靜圖每幾秒換一張；0＝不輪播
+    pub autocut_rotate_secs: f64,
     /// AI 補判（規則沒把握的鏡頭交給 Gemini 看右上角來源字）的 API 金鑰；空白＝不用 AI
     pub autocut_ai_key: String,
     /// AI 補判用的模型
@@ -140,6 +142,7 @@ impl Default for Settings {
             autocut_auto_render: true,
             autocut_since: "21:50".to_string(),
             autocut_end_cutoff: "23:59:30".to_string(),
+            autocut_rotate_secs: 7.0,
             autocut_ai_key: String::new(),
             autocut_ai_model: "gemini-3.5-flash-lite".to_string(),
             autocut_watermark: String::new(),

@@ -69,6 +69,9 @@ pub struct AutocutConfig {
     /// 最後一段：側錄過了這個時間（`23:59:30`）節目還沒回來就算結束；沒給＝不用
     #[serde(default)]
     pub end_cutoff: Option<String>,
+    /// 遮罩輪播：同來源的靜圖每幾秒換一張；沒給＝不輪播
+    #[serde(default)]
+    pub rotate_secs: Option<f64>,
     /// 只輸出這幾段（不合成全集）
     #[serde(default)]
     pub only: Option<Vec<usize>>,
@@ -1469,7 +1472,7 @@ impl Watcher {
             r.push_str(&format!("  第 {n} 段：{} 行標題\n", l.len()));
         }
         r.push_str(&log);
-        r.push_str(&plan::report_segments(&planned, &self.stills));
+        r.push_str(&plan::report_segments(&planned, &self.stills, self.cfg.rotate_secs.unwrap_or(0.0)));
         if !self.stills.stills.is_empty() && !frames.is_empty() {
             r.push_str(&plan::report_coverage(&frames, &planned, &self.stills));
         }
@@ -1563,7 +1566,7 @@ impl Watcher {
     }
 
     fn job(&mut self, seg: &Segment, masks: &[MaskSeg], files: &[(PathBuf, f64, f64)], ocr: &BTreeMap<usize, String>) -> RenderJob {
-        let masks: Vec<(MaskSeg, String, Layout)> = masks
+        let masks: Vec<(MaskSeg, String, Layout)> = plan::rotate_masks(&self.stills, seg.n, masks, self.cfg.rotate_secs.unwrap_or(0.0))
             .iter()
             .map(|m| {
                 let s = &self.stills.stills[m.still];
@@ -2502,11 +2505,19 @@ fn render_segment(app: &AppHandle, shared: &Shared, ffmpeg: &Path, job: &RenderJ
     };
     let mut g = vec![format!("{cat}concat=n={n_in}:v=1:a=1[vc][ac]"), "[vc]bwdif=mode=send_frame:parity=tff,setsar=1[v0]".to_string()];
     let mut cur = "v0".to_string();
-    for (si, (m, still_path, still_layout)) in job.masks.iter().enumerate() {
-        args.extend(["-i".into(), still_path.clone()]);
+    // 同一張圖、同一種遮法的時段併成一個 overlay（輪播時一張圖會出現很多次，不用每次都開一個輸入）
+    let mut still_groups: Vec<(&String, Layout, Layout, Vec<&MaskSeg>)> = Vec::new();
+    for (m, still_path, still_layout) in &job.masks {
+        match still_groups.iter_mut().find(|g| g.0 == still_path && g.2 == m.layout) {
+            Some(g) => g.3.push(m),
+            None => still_groups.push((still_path, *still_layout, m.layout, vec![m])),
+        }
+    }
+    for (si, (still_path, still_layout, layout, ms)) in still_groups.iter().enumerate() {
+        args.extend(["-i".into(), (*still_path).clone()]);
         let inp = n_in + si;
-        let en = format!("enable='between(t,{:.4},{:.4})'", rel(m.start), rel(m.end));
-        match m.layout {
+        let en = format!("enable='{}'", ms.iter().map(|m| format!("between(t,{:.4},{:.4})", rel(m.start), rel(m.end))).collect::<Vec<_>>().join("+"));
+        match layout {
             Layout::Full => {
                 g.push(format!("[{inp}:v]scale={W}:{H},format=yuv420p,split[p{si}a][p{si}b]"));
                 g.push(format!("[p{si}a]crop={W}:{}:0:0[t{si}]", BAND.0));
@@ -2533,7 +2544,7 @@ fn render_segment(app: &AppHandle, shared: &Shared, ffmpeg: &Path, job: &RenderJ
             return Err(format!("找不到 BAR 圖：{img}"));
         }
         args.extend(["-i".into(), img.clone()]);
-        let inp = n_in + job.masks.len() + n_bar;
+        let inp = n_in + still_groups.len() + n_bar;
         n_bar += 1;
         let en = ranges.iter().map(|&(a, b)| format!("between(t,{:.4},{:.4})", rel(a), rel(b))).collect::<Vec<_>>().join("+");
         g.push(format!("[{inp}:v]scale={W}:{H},format=rgba[bar{bi}]"));
@@ -2546,7 +2557,7 @@ fn render_segment(app: &AppHandle, shared: &Shared, ffmpeg: &Path, job: &RenderJ
             return Err(format!("找不到水印：{p}"));
         }
         args.extend(["-i".into(), p.clone()]);
-        let inp = n_in + job.masks.len() + n_bar + wi;
+        let inp = n_in + still_groups.len() + n_bar + wi;
         g.push(format!("[{inp}:v]scale={W}:{H},format=rgba[wm{wi}]"));
         g.push(format!("[{cur}][wm{wi}]overlay=0:0[wmo{wi}]"));
         cur = format!("wmo{wi}");
