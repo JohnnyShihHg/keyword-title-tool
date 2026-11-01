@@ -347,10 +347,10 @@ const AC_CHAIN_STATES = {
   failed: ["失敗", "bad"],
 };
 
-/** 預設：第三、六段串 YT（閃白）；其他段接 45 秒 promo */
+/** 預設：每段都接 45 秒 promo；第三、六段另外串 YT（閃白） */
 function acChainDefault(n) {
   const yt = n === 3 || n === 6;
-  return { promo: yt ? 0 : 45, yt_mode: yt, src: "yt", url: "", ytPath: "", file: "", startText: "", endText: "", start: null, end: null, flash: true, ytStatus: "" };
+  return { promo: 45, yt_mode: yt, src: "yt", url: "", ytPath: "", file: "", startText: "", endText: "", start: null, end: null, flash: true, ytStatus: "" };
 }
 
 /** 要串的影片：YT 下載好的檔，或直接選的檔案 */
