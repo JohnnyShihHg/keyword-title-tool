@@ -221,6 +221,26 @@ pub fn last_end_ok(frames: &[FrameInfo], e: usize) -> bool {
     false
 }
 
+/// `23:59:30`／`23:59` → 當天第幾秒；空白或看不懂回傳 None（不用這個條件）
+pub fn parse_clock(s: &str) -> Option<u32> {
+    let p: Vec<u32> = s.trim().replace('：', ":").split(':').map(|x| x.parse().ok()).collect::<Option<_>>()?;
+    match p[..] {
+        [h, m] if h < 24 && m < 60 => Some(h * 3600 + m * 60),
+        [h, m, s] if h < 24 && m < 60 && s < 60 => Some(h * 3600 + m * 60 + s),
+        _ => None,
+    }
+}
+
+/// 最後一段靠時鐘判斷結束：側錄已經錄過 `cutoff`，標題條消失後也看得到 5 秒以上的非節目畫面。
+/// 10/5～10/30 平日 18 天：節目都在 23:57:55～23:58:09 結束、最後一次廣告最晚 23:57:22 回來；
+/// 但收尾有 5 天沒收黑（風景定格），當天資料夾又只錄到 00:00:40，收黑、錄滿 8 分鐘都等不到
+/// （中間廣告的片頭底圖也會定格 4 分多，不能用定格判斷）。
+/// `timeline_end` 是時間軸最後一格的時鐘（秒，過午夜會超過 86400）
+pub fn clock_end_ok(frames: &[FrameInfo], e: usize, timeline_end: f64, cutoff: u32) -> bool {
+    let need = 5 * FPS as usize;
+    timeline_end >= cutoff as f64 && e + need <= frames.len() && frames[e..e + need].iter().filter(|f| !f.program).count() * 10 >= need * 8
+}
+
 /// 這一片的開頭要不要對 Logo 轉場：第一片、或前面隔著廣告的（區塊裡 OCR 換段接上的不用）
 pub fn piece_after_break(seg: &Segment, k: usize) -> bool {
     k == 0 || seg.pieces[k - 1].1 + END_TRIM < seg.pieces[k].0
@@ -824,6 +844,25 @@ mod tests {
         let ocr3: BTreeMap<usize, String> = ocr.iter().filter(|(k, _)| **k >= 20 * fps).map(|(k, v)| (k - 20 * fps, v.clone())).collect();
         let segs = plan_segments(&frames[20 * fps..], &ocr3, &titles, &mut String::new());
         assert!(!segs[0].start_ok);
+    }
+
+    #[test]
+    fn clock_ends_last_segment_only_past_cutoff() {
+        assert_eq!(parse_clock("23:59:30"), Some(86370));
+        assert_eq!(parse_clock("23：59"), Some(86340));
+        assert_eq!(parse_clock(""), None);
+        assert_eq!(parse_clock("25:00"), None);
+        let fps = FPS as usize;
+        let cutoff = 86370;
+        // 節目到第 60 秒，之後非節目（中間廣告或收尾，亮度不黑）
+        let (frames, _) = timeline(&[(true, 60, 3), (false, 180, 0)]);
+        let e = 60 * fps;
+        assert!(!clock_end_ok(&frames, e, 86369.0, cutoff), "還沒到時間：可能是中間廣告，要等");
+        assert!(clock_end_ok(&frames, e, 86370.0, cutoff), "過了時間、節目沒回來＝結束");
+        assert!(clock_end_ok(&frames, e, 86440.0, cutoff), "錄過午夜也算");
+        assert!(!clock_end_ok(&frames[..e + 3 * fps], e, 86440.0, cutoff), "標題條消失才 3 秒，可能只是素材斷在節目中間");
+        let (on_air, _) = timeline(&[(true, 240, 3)]);
+        assert!(!clock_end_ok(&on_air, e, 86440.0, cutoff), "節目還在播（超時）不算");
     }
 
     #[test]

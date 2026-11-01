@@ -66,6 +66,9 @@ pub struct AutocutConfig {
     /// 從幾點開始的側錄才看（`21:50`）；空白＝資料夾裡全部
     #[serde(default)]
     pub since: Option<String>,
+    /// 最後一段：側錄過了這個時間（`23:59:30`）節目還沒回來就算結束；沒給＝不用
+    #[serde(default)]
+    pub end_cutoff: Option<String>,
     /// 只輸出這幾段（不合成全集）
     #[serde(default)]
     pub only: Option<Vec<usize>>,
@@ -1294,6 +1297,21 @@ impl Watcher {
         }
         log.push_str(&self.seam_report(&seams));
         let mut segs = plan::plan_segments(&frames, &ocr, &self.titles, &mut log);
+        // 最後一段沒收黑、也等不到錄滿 8 分鐘：看側錄的時鐘（檔名開始時間＋檔案長度）
+        let clock = self.scanned.last().and_then(|s| {
+            let t = cache::name_timestamp(&s.name)?;
+            let n = |r: std::ops::Range<usize>| t[r].parse::<u32>().ok();
+            Some((n(8..10)? * 3600 + n(10..12)? * 60 + n(12..14)?) as f64 + secs(s.frames.len()))
+        });
+        if let (Some(cutoff), Some(end), Some(last)) = (self.cfg.end_cutoff.as_deref().and_then(plan::parse_clock), clock, self.titles.keys().max().copied()) {
+            if let Some(seg) = segs.iter_mut().find(|s| s.n == last && s.start_ok && !s.end_ok) {
+                if plan::clock_end_ok(&frames, seg.end(), end, cutoff) {
+                    seg.end_ok = true;
+                    log.push_str(&format!("    → 第 {last} 段（最後一段）：側錄已過 {}，節目沒回來，算結束
+", self.cfg.end_cutoff.as_deref().unwrap_or("").trim()));
+                }
+            }
+        }
         // 完整的段落：開頭對到 Logo 轉場結束那一格（要解碼一小段，結果記起來）
         // 最後一段廣告後接回來的那一片也一樣要對
         for seg in segs.iter_mut().filter(|s| s.complete()) {

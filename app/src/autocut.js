@@ -40,6 +40,7 @@ function acFillDirs() {
   $("acAutoRender").checked = settings.autocut_auto_render !== false;
   $("acCopyShare").checked = !!settings.autocut_copy_to_share;
   $("acSince").value = settings.autocut_since ?? "";
+  $("acEndCutoff").value = settings.autocut_end_cutoff ?? "";
   $("acTitlesSource").textContent = settings.sync_enabled
     ? "文稿：共用資料夾當天的 txt"
     : "文稿：文稿頁目前的內容（開播後改標題也會跟著更新）";
@@ -60,6 +61,10 @@ document.querySelectorAll("[data-ac-clear]").forEach((btn) => {
     acFillDirs();
     persistSettings();
   });
+});
+$("acEndCutoff").addEventListener("change", () => {
+  settings.autocut_end_cutoff = $("acEndCutoff").value.trim();
+  persistSettings();
 });
 $("acSince").addEventListener("change", () => {
   settings.autocut_since = $("acSince").value.trim();
@@ -151,6 +156,7 @@ $("acStartBtn").addEventListener("click", async () => {
         auto_render: settings.autocut_auto_render !== false,
         make_all: $("acMakeAll").checked,
         since: $("acSince").value.trim() || null,
+        end_cutoff: $("acEndCutoff").value.trim() || null,
         ai_key: settings.autocut_ai_key || null,
         ai_model: settings.autocut_ai_model || null,
         // 正片加工（跟影片頁單集一樣）、串接、全集用
