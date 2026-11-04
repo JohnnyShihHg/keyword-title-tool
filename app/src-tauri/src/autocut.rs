@@ -1628,8 +1628,8 @@ bar {} {mtime} {ranges:?}", bar.image));
     fn ai_decide_many(&mut self, files: &[(PathBuf, f64, f64)], cands: &[plan::AiCandidate]) -> Vec<Result<(bool, String, bool), String>> {
         let key_of = |c: &plan::AiCandidate| {
             let names: Vec<&str> = c.stills.iter().map(|&k| self.stills.stills[k].name.as_str()).collect();
-            // 相鄰鏡頭 0.6.20 起要全部格都說相同才算：鍵加上「|all」，0.6.19 用過半數判斷的舊結果不再沿用
-            let rule = if c.kind == plan::AiKind::Scene { "|all" } else { "" };
+            // 相鄰鏡頭的判斷規則改過就換鍵，舊結果不再沿用：0.6.20「|all」全部格都說相同；0.6.21「|studio」另外排除攝影棚
+            let rule = if c.kind == plan::AiKind::Scene { "|studio" } else { "" };
             format!("{}|{}|{:?}|{:?}|{}{rule}", c.start, c.end, c.kind, c.layout, names.join(","))
         };
         let keys: Vec<String> = cands.iter().map(key_of).collect();
@@ -1872,9 +1872,15 @@ fn ai_eval(ffmpeg: &Path, stills: &StillSet, gemini: &ai::Gemini, files: &[(Path
     let targets: Vec<Vec<u8>> = c.samples.iter().map(|&f| if whole { grab_whole(ffmpeg, files, f) } else { grab_crop(ffmpeg, files, f, c.layout) }).collect::<Result<_, _>>()?;
     let ans = if whole { gemini.compare_scene(&refs, &targets)? } else { gemini.compare(&refs, &targets)? };
     // 相鄰鏡頭要每一格都說同一場才接（11/02 第 1 段 15:16.8：三格都描述成棚內來賓，卻有兩格回答相同）
+    // 0.6.21：而且沒有任何一格是攝影棚（11/02 第 1 段 13:53、15:16.8：三格都描述成棚內主持人／來賓在大螢幕前講解，
+    // 卻都回答同一場——棚內螢幕上播著辯論會）
     let yes = ans.same.iter().filter(|b| **b).count();
-    let same = if whole { !ans.same.is_empty() && yes == ans.same.len() } else { yes * 2 > ans.same.len().max(1) };
-    let note = format!("參考「{}」、讀到 {}", ans.reference, ans.texts.iter().map(|t| format!("「{t}」")).collect::<Vec<_>>().join(""));
+    let studio = ans.studio.iter().any(|b| *b);
+    let same = if whole { !ans.same.is_empty() && yes == ans.same.len() && !studio } else { yes * 2 > ans.same.len().max(1) };
+    let mut note = format!("參考「{}」、讀到 {}", ans.reference, ans.texts.iter().map(|t| format!("「{t}」")).collect::<Vec<_>>().join(""));
+    if whole && studio {
+        note.push_str("（看得到攝影棚，不接）");
+    }
     Ok((same, note))
 }
 
@@ -1946,6 +1952,8 @@ mod ai {
         pub reference: String,
         pub texts: Vec<String>,
         pub same: Vec<bool>,
+        /// 相鄰鏡頭的題目：這一格看得到攝影棚（主持人、來賓、棚內螢幕）
+        pub studio: Vec<bool>,
     }
 
     /// 給 AI 看的右上角範圍 x y w h 與放大倍數（比規則用的範圍寬：一行長字、兩行字都放得進去）
@@ -1994,7 +2002,9 @@ mod ai {
                  第 1～{r} 張是參考圖：節目裡播出的一支外部素材（例如某一場辯論會、記者會、活動現場）。第 {a}～{b} 張是要判斷的畫面。\n\
                  請逐張判斷要判斷的畫面，是不是「同一場活動／同一支素材」的畫面：同一個場地、佈景、同樣的人物與服裝，只是換了鏡頭角度、遠近或時間點，就算相同；\
                  右上角的來源標示不同沒關係。棚內主持人／來賓的畫面、別的新聞事件、同一個人在別的場合，都算不同。\n\
-                 只回傳 JSON：{{\"ref\":\"一句話描述參考圖的場景\",\"targets\":[{{\"text\":\"一句話描述這張畫面\",\"same\":true}}]}}，targets 依序共 {n} 個。",
+                 另外逐張判斷 studio：畫面裡看得到電視台攝影棚（主持人、來賓、棚內佈景、棚內大螢幕或觸控螢幕）就是 true——\
+                 就算棚內螢幕上正在播參考素材、或主持人正在講解參考素材的照片，也是 true；只有整個畫面都是外部素材本身才是 false。\n\
+                 只回傳 JSON：{{\"ref\":\"一句話描述參考圖的場景\",\"targets\":[{{\"text\":\"一句話描述這張畫面\",\"studio\":false,\"same\":true}}]}}，targets 依序共 {n} 個。",
                 r = refs.len(),
                 a = refs.len() + 1,
                 b = refs.len() + targets.len(),
@@ -2058,6 +2068,8 @@ mod ai {
                 reference: a["ref"].as_str().unwrap_or("").to_string(),
                 texts: targets.iter().map(|t| t["text"].as_str().unwrap_or("").to_string()).collect(),
                 same: targets.iter().map(|t| t["same"].as_bool().unwrap_or(false)).collect(),
+                // 來源字的題目沒有這個欄位 → false
+                studio: targets.iter().map(|t| t["studio"].as_bool().unwrap_or(false)).collect(),
             })
         }
     }
