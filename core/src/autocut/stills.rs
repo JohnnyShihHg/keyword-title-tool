@@ -315,7 +315,7 @@ mod tests {
         let mut one_line = set.clone();
         one_line.templates.iter_mut().for_each(|t| t.generic = true);
         assert_eq!(one_line.rotation_pool(0), vec![0], "只有一行的來源字看不出是不是同一個來源");
-        let m = crate::autocut::plan::MaskSeg { start: 0, end: (17.0 * crate::autocut::FPS) as usize, layout: Layout::Full, still: 0, by_label: true, iou: 0.9, ai: false };
+        let m = crate::autocut::plan::MaskSeg { start: 0, end: (17.0 * crate::autocut::FPS) as usize, layout: Layout::Full, still: 0, by_label: true, iou: 0.9, ai: false, note: None };
         let fps = crate::autocut::FPS;
         let turns = crate::autocut::plan::rotate_mask(&set, &m, 7.0);
         assert_eq!(turns.iter().map(|t| t.still).collect::<Vec<_>>(), vec![0, 1, 2]);

@@ -70,6 +70,9 @@ pub struct MaskSeg {
     /// 規則沒把握、交給 AI 判斷後補上的
     #[serde(default)]
     pub ai: bool,
+    /// 報告裡額外說明這段是怎麼補上的（夾心空檔、AI 接上相鄰鏡頭）
+    #[serde(skip)]
+    pub note: Option<&'static str>,
 }
 
 pub fn is_cut(frames: &[FrameInfo], i: usize) -> bool {
@@ -428,7 +431,7 @@ pub fn plan_masks(frames: &[FrameInfo], set: &StillSet, range: (usize, usize)) -
                     continue;
                 }
             }
-            segs.push(MaskSeg { start: i, end: j, layout, still, by_label, iou: max_iou, ai: false });
+            segs.push(MaskSeg { start: i, end: j, layout, still, by_label, iou: max_iou, ai: false, note: None });
             i = j;
         }
     }
@@ -454,7 +457,53 @@ pub fn segment_masks(frames: &[FrameInfo], set: &StillSet, seg: &Segment) -> Vec
     if let Some((frames, set)) = for_segment(frames, set, seg) {
         return segment_masks(&frames, &set, seg);
     }
-    seg.pieces.iter().flat_map(|&p| plan_masks(frames, set, p)).collect()
+    seg.pieces.iter().flat_map(|&p| fill_sandwich_gaps(frames, &plan_masks(frames, set, p))).collect()
+}
+
+/// 夾心空檔最長幾秒（前後都在遮，中間這幾秒直接補）
+pub const SANDWICH_SECS: f64 = 8.0;
+pub const SANDWICH_NOTE: &str = "補上夾在中間的空檔";
+
+/// 夾心空檔：兩段遮罩之間只隔 ≤ 8 秒、中間都是節目畫面 → 直接遮，不管前後是不是同一張靜圖、同一種版型、同一個來源字。
+/// 11/02 第 2 段 3:52–3:56：前面滿版（畫面提供 TVBS.三立）、後面雙框，中間 4 秒辯論會近景來源字是一行的
+/// 「翻攝 TVBS新聞 youtube」（一行的來源字不當證據），前後版型又不同、不會問 AI → 整段露出動態畫面。
+/// 中間的畫面依版型分段：跟前一段同版型就接到前一段、跟後一段同版型就接到後一段，
+/// 都不同就用同版型那一邊的靜圖另開一段；前後都沒有同版型的就不遮
+pub fn fill_sandwich_gaps(frames: &[FrameInfo], masks: &[MaskSeg]) -> Vec<MaskSeg> {
+    let lim = (SANDWICH_SECS * FPS) as usize;
+    let mut out: Vec<MaskSeg> = Vec::new();
+    for m in masks {
+        let mut m = m.clone();
+        if let Some(prev) = out.last().cloned() {
+            let (g0, g1) = (prev.end, m.start);
+            let program = |a: usize, b: usize| frames[a..b].iter().filter(|f| f.program).count() * 10 >= (b - a) * 9;
+            if g1 > g0 && g1 - g0 <= lim && g1 <= frames.len() && program(g0, g1) {
+                let mut lay: Vec<Layout> = frames[g0..g1].iter().map(|f| f.layout).collect();
+                smooth_layouts(&mut lay);
+                let mut i = g0;
+                while i < g1 {
+                    let l = lay[i - g0];
+                    let mut j = i;
+                    while j < g1 && lay[j - g0] == l {
+                        j += 1;
+                    }
+                    let last = out.last_mut().unwrap();
+                    if last.layout == l && last.end == i {
+                        last.end = j;
+                        last.note = Some(SANDWICH_NOTE);
+                    } else if j == g1 && m.layout == l {
+                        m.start = i;
+                        m.note = Some(SANDWICH_NOTE);
+                    } else if let Some(src) = [&prev, &m].into_iter().find(|s| s.layout == l).cloned() {
+                        out.push(MaskSeg { start: i, end: j, ai: false, note: Some(SANDWICH_NOTE), ..src });
+                    }
+                    i = j;
+                }
+            }
+        }
+        out.push(m);
+    }
+    out
 }
 
 /// 只用這一段能用的靜圖（`StillSet::for_segment`）：段內每格跟別段靜圖的相似度改成 -1（當成完全不像）。
@@ -519,7 +568,16 @@ pub enum AiKind {
     Gap,
     /// 來源字比對分數在灰色地帶（0.15～0.62）、或畫面有幾分像（0.5～0.8）但沒達到門檻
     Weak,
+    /// 滿版遮罩前後緊接著的鏡頭：問 AI「是不是同一場活動／同一支素材的畫面」（看整張畫面，不看來源字）。
+    /// 11/02 第 2 段 8:25、8:34、10:52：辯論會同一場的其他鏡頭，來源字換成一行的「翻攝 TVBS新聞 youtube」、
+    /// 或鏡頭跟靜圖不像，整個鏡頭露出來
+    Scene,
 }
+
+/// 相鄰鏡頭最長看幾秒（沒找到鏡頭切換就只看這麼長）、最短幾秒才問
+pub const SCENE_MAX_SECS: f64 = 15.0;
+pub const SCENE_MIN_SECS: f64 = 1.0;
+pub const SCENE_NOTE: &str = "AI 接上相鄰鏡頭（同一場畫面）";
 
 /// 空檔最長幾秒還問 AI（太長多半中間換了別的內容）
 pub const AI_GAP_MAX_SECS: f64 = 60.0;
@@ -610,6 +668,33 @@ pub fn ai_candidates(frames: &[FrameInfo], set: &StillSet, seg: &Segment, masks:
     }
     // 空檔全部問；灰色地帶只問前幾處
     out.truncate(gaps + AI_MAX_WEAK_PER_SEGMENT);
+    // ③ 滿版遮罩前後緊接著的鏡頭（雙框只有左框在換，看不出鏡頭切換，不問）
+    let lim = (SCENE_MAX_SECS * FPS) as usize;
+    let min_len = (SCENE_MIN_SECS * FPS) as usize;
+    for (k, m) in masks.iter().enumerate() {
+        if m.layout != Layout::Full {
+            continue;
+        }
+        let prev_end = if k > 0 { masks[k - 1].end } else { 0 };
+        let next_start = masks.get(k + 1).map_or(frames.len(), |n| n.start).min(frames.len());
+        // 前面：往前找最近的鏡頭切換（最多 15 秒、不跨過前一段遮罩）
+        let lo = m.start.saturating_sub(lim).max(prev_end);
+        let before = ((lo + 1..m.start).rev().find(|&i| is_shot_cut(frames, i)).unwrap_or(lo), m.start);
+        // 後面：到下一個鏡頭切換為止
+        let hi = (m.end + lim).min(next_start);
+        let after = (m.end, (m.end + 1..hi).find(|&i| is_shot_cut(frames, i)).unwrap_or(hi));
+        for (a, b) in [before, after] {
+            if b <= a || b - a < min_len || !in_piece(a, b) || covered(a) || covered(b - 1) || out.iter().any(|c: &AiCandidate| a < c.end && b > c.start) {
+                continue;
+            }
+            let g = &frames[a..b];
+            let full = g.iter().filter(|f| f.layout == Layout::Full).count() * 10 >= g.len() * 9;
+            let program = g.iter().filter(|f| f.program).count() * 10 >= g.len() * 9;
+            if full && program {
+                out.push(AiCandidate { start: a, end: b, layout: Layout::Full, stills: vec![m.still], samples: samples(a, b), kind: AiKind::Scene });
+            }
+        }
+    }
     out.sort_by_key(|c| c.start);
     out
 }
@@ -629,8 +714,21 @@ pub fn apply_ai(frames: &[FrameInfo], masks: &mut Vec<MaskSeg>, c: &AiCandidate)
         AiKind::Weak => {
             let score = |k: usize| frames[c.start..c.end].iter().map(|f| f.sims.get(k).copied().unwrap_or(0.0)).sum::<f32>();
             let still = *c.stills.iter().max_by(|a, b| score(**a).total_cmp(&score(**b))).unwrap();
-            masks.push(MaskSeg { start: c.start, end: c.end, layout: c.layout, still, by_label: true, iou: 0.0, ai: true });
+            masks.push(MaskSeg { start: c.start, end: c.end, layout: c.layout, still, by_label: true, iou: 0.0, ai: true, note: None });
             masks.sort_by_key(|m| m.start);
+        }
+        // 同一場畫面：接到出題的那段遮罩（前面的鏡頭往前接、後面的鏡頭往後接）
+        AiKind::Scene => {
+            let still = c.stills[0];
+            if let Some(m) = masks.iter_mut().find(|m| m.end == c.start && m.still == still) {
+                m.end = c.end;
+                m.ai = true;
+                m.note = Some(SCENE_NOTE);
+            } else if let Some(m) = masks.iter_mut().find(|m| m.start == c.end && m.still == still) {
+                m.start = c.start;
+                m.ai = true;
+                m.note = Some(SCENE_NOTE);
+            }
         }
     }
 }
@@ -653,16 +751,20 @@ pub fn report_segments(segs: &[(Segment, Vec<MaskSeg>)], set: &StillSet, rotate_
             used.sort_unstable();
             used.dedup();
             let rotate = if used.len() > 1 { format!(" ｜ 輪播 {} 張、換 {} 次", used.len(), turns.len() - 1) } else { String::new() };
-            let why = if m.ai && m.iou == 0.0 && m.by_label {
+            let mut why = if m.ai && m.iou == 0.0 && m.by_label && m.note.is_none() {
                 "AI 判斷（來源字相同）".to_string()
             } else {
                 format!(
                     "{}{}{}",
                     if m.by_label { "來源字" } else { "畫面相似" },
                     if m.by_label { format!("(IoU {:.2})", m.iou) } else { String::new() },
-                    if m.ai { "＋AI 接上空檔" } else { "" }
+                    if m.ai && m.note != Some(SCENE_NOTE) { "＋AI 接上空檔" } else { "" }
                 )
             };
+            if let Some(n) = m.note {
+                why.push('＋');
+                why.push_str(n);
+            }
             r.push_str(&format!("    遮 {} – {} ｜ {} ｜ {} ｜ {}{rotate}\n", tc(secs(m.start)), tc(secs(m.end)), m.layout.zh(), why, set.stills[m.still].name));
             if used.len() > 1 {
                 for k in used.iter().filter(|&&k| k != m.still) {
@@ -1112,7 +1214,7 @@ mod tests {
         let n = 120 * fps;
         let frames: Vec<FrameInfo> = (0..n).map(|_| FrameInfo { program: true, layout: Layout::Dual, luma: 100.0, cut_diff: 0.0, tmpl: -1, iou: 0.0, sims: vec![0.2] }).collect();
         let seg = Segment { n: 2, pieces: vec![(0, n)], start_ok: true, end_ok: true };
-        let m = |a: usize, b: usize| MaskSeg { start: a * fps, end: b * fps, layout: Layout::Dual, still: 0, by_label: false, iou: 0.0, ai: false };
+        let m = |a: usize, b: usize| MaskSeg { start: a * fps, end: b * fps, layout: Layout::Dual, still: 0, by_label: false, iou: 0.0, ai: false, note: None };
         let mut masks = vec![m(20, 25), m(43, 50)];
         let c = ai_candidates(&frames, &set, &seg, &masks);
         assert_eq!(c.len(), 1, "{c:?}");
@@ -1175,10 +1277,114 @@ mod tests {
             }
         }
         let seg = Segment { n: 2, pieces: vec![(0, n)], start_ok: true, end_ok: true };
-        let m = |a: usize, b: usize| MaskSeg { start: a * fps, end: b * fps, layout: Layout::Dual, still: 0, by_label: false, iou: 0.0, ai: false };
+        let m = |a: usize, b: usize| MaskSeg { start: a * fps, end: b * fps, layout: Layout::Dual, still: 0, by_label: false, iou: 0.0, ai: false, note: None };
         let masks = vec![m(250, 255), m(270, 280)];
         let c = ai_candidates(&frames, &set, &seg, &masks);
         assert_eq!(c.iter().filter(|c| c.kind == AiKind::Weak).count(), AI_MAX_WEAK_PER_SEGMENT);
         assert!(c.iter().any(|c| c.kind == AiKind::Gap && c.start == 255 * fps), "{c:?}");
+    }
+
+    fn mask(a: usize, b: usize, layout: Layout, still: usize) -> MaskSeg {
+        let fps = FPS as usize;
+        MaskSeg { start: a * fps, end: b * fps, layout, still, by_label: false, iou: 0.0, ai: false, note: None }
+    }
+
+    /// 11/02 第 2 段 3:52–3:56：滿版遮罩、4 秒沒遮的滿版近景、雙框遮罩 → 近景接到前面的滿版
+    #[test]
+    fn sandwich_gap_between_full_and_dual_is_filled() {
+        let fps = FPS as usize;
+        let mut frames: Vec<FrameInfo> = (0..60 * fps).map(|_| frame(true)).collect();
+        for f in &mut frames[24 * fps..] {
+            f.layout = Layout::Dual;
+        }
+        let m = fill_sandwich_gaps(&frames, &[mask(10, 20, Layout::Full, 0), mask(24, 30, Layout::Dual, 1)]);
+        assert_eq!(m.len(), 2, "{m:?}");
+        assert_eq!((m[0].start, m[0].end, m[0].layout), (10 * fps, 24 * fps, Layout::Full));
+        assert_eq!(m[0].note, Some(SANDWICH_NOTE));
+        assert_eq!((m[1].start, m[1].end), (24 * fps, 30 * fps));
+        // 空檔是雙框 → 接到後面的雙框
+        for f in &mut frames[20 * fps..24 * fps] {
+            f.layout = Layout::Dual;
+        }
+        let m = fill_sandwich_gaps(&frames, &[mask(10, 20, Layout::Full, 0), mask(24, 30, Layout::Dual, 1)]);
+        assert_eq!((m[0].end, m[1].start), (20 * fps, 20 * fps), "{m:?}");
+        // 前後都是滿版、不同靜圖 → 中間接到前一段
+        let frames: Vec<FrameInfo> = (0..60 * fps).map(|_| frame(true)).collect();
+        let m = fill_sandwich_gaps(&frames, &[mask(10, 20, Layout::Full, 0), mask(25, 30, Layout::Full, 1)]);
+        assert_eq!((m[0].end, m[1].start, m[1].still), (25 * fps, 25 * fps, 1));
+    }
+
+    #[test]
+    fn long_gap_or_non_program_is_not_filled() {
+        let fps = FPS as usize;
+        let mut frames: Vec<FrameInfo> = (0..60 * fps).map(|_| frame(true)).collect();
+        let far = [mask(10, 20, Layout::Full, 0), mask(29, 35, Layout::Full, 1)];
+        assert_eq!(fill_sandwich_gaps(&frames, &far), far.to_vec(), "超過 8 秒不補");
+        for f in &mut frames[20 * fps..24 * fps] {
+            f.program = false;
+        }
+        let near = [mask(10, 20, Layout::Full, 0), mask(25, 30, Layout::Full, 1)];
+        assert_eq!(fill_sandwich_gaps(&frames, &near), near.to_vec(), "中間不是節目畫面（廣告）不補");
+    }
+
+    #[test]
+    fn segment_masks_fill_sandwich_gaps() {
+        // 兩支不同靜圖的滿版素材中間隔 4 秒：以前會露出來，現在補起來
+        let mut set = one_still_set();
+        set.stills[0].template = None;
+        let mut s2 = set.stills[0].clone();
+        s2.name = "t.jpg".into();
+        set.stills.push(s2);
+        let fps = FPS as usize;
+        let mut frames: Vec<FrameInfo> = (0..60 * fps)
+            .map(|_| {
+                let mut f = frame(true);
+                f.sims = vec![0.1, 0.1];
+                f
+            })
+            .collect();
+        for k in [10, 20, 24, 30] {
+            frames[k * fps].cut_diff = 60.0;
+        }
+        for f in &mut frames[12 * fps..13 * fps] {
+            f.sims = vec![0.95, 0.1];
+        }
+        for f in &mut frames[26 * fps..27 * fps] {
+            f.sims = vec![0.1, 0.95];
+        }
+        let seg = Segment { n: 2, pieces: vec![(0, frames.len())], start_ok: true, end_ok: true };
+        let m = segment_masks(&frames, &set, &seg);
+        assert_eq!(m.len(), 2, "{m:?}");
+        assert_eq!((m[0].start, m[0].end, m[1].start, m[1].end), (10 * fps, 24 * fps, 24 * fps, 30 * fps));
+    }
+
+    /// 11/02 第 2 段 8:25：滿版遮罩前後緊接的鏡頭（來源字不同）→ 問 AI 是不是同一場；說是就接上
+    #[test]
+    fn neighbor_shots_of_full_masks_go_to_ai() {
+        let set = one_still_set();
+        let fps = FPS as usize;
+        let mut frames: Vec<FrameInfo> = (0..120 * fps).map(|_| frame(true)).collect();
+        for k in [17, 20, 25, 28] {
+            frames[k * fps].cut_diff = 60.0;
+        }
+        let seg = Segment { n: 2, pieces: vec![(0, frames.len())], start_ok: true, end_ok: true };
+        let mut masks = vec![mask(20, 25, Layout::Full, 0)];
+        let c = ai_candidates(&frames, &set, &seg, &masks);
+        let scene: Vec<(usize, usize)> = c.iter().filter(|c| c.kind == AiKind::Scene).map(|c| (c.start, c.end)).collect();
+        assert_eq!(scene, vec![(17 * fps, 20 * fps), (25 * fps, 28 * fps)], "{c:?}");
+        for c in c.iter().filter(|c| c.kind == AiKind::Scene) {
+            assert_eq!(c.stills, vec![0]);
+            apply_ai(&frames, &mut masks, c);
+        }
+        assert_eq!(masks.len(), 1);
+        assert_eq!((masks[0].start, masks[0].end), (17 * fps, 28 * fps));
+        assert_eq!(masks[0].note, Some(SCENE_NOTE));
+        // 雙框不問；後面沒有鏡頭切換 → 最多看 15 秒
+        let dual = vec![mask(20, 25, Layout::Dual, 0)];
+        assert!(ai_candidates(&frames, &set, &seg, &dual).iter().all(|c| c.kind != AiKind::Scene));
+        let late = vec![mask(60, 70, Layout::Full, 0)];
+        let c = ai_candidates(&frames, &set, &seg, &late);
+        let lim = (SCENE_MAX_SECS * FPS) as usize;
+        assert!(c.iter().any(|c| c.kind == AiKind::Scene && (c.start, c.end) == (70 * fps, 70 * fps + lim)), "{c:?}");
     }
 }

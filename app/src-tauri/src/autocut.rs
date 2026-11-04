@@ -1363,7 +1363,11 @@ impl Watcher {
                         }
                     };
                     asked += fresh as usize;
-                    let kind = if c.kind == plan::AiKind::Gap { "空檔" } else { "灰色地帶" };
+                    let kind = match c.kind {
+                        plan::AiKind::Gap => "空檔",
+                        plan::AiKind::Weak => "灰色地帶",
+                        plan::AiKind::Scene => "相鄰鏡頭",
+                    };
                     log.push_str(&format!(
                         "  AI：第 {} 段 側錄 {} – {}（{kind}）→ {}｜{note}\n",
                         seg.n,
@@ -1860,9 +1864,11 @@ const AI_THREADS: usize = 4;
 
 /// 一個地方：截參考靜圖與側錄 3 格的右上角給 AI，過半說「相同」才算
 fn ai_eval(ffmpeg: &Path, stills: &StillSet, gemini: &ai::Gemini, files: &[(PathBuf, f64, f64)], c: &plan::AiCandidate) -> Result<(bool, String), String> {
-    let refs: Vec<Vec<u8>> = c.stills.iter().take(2).map(|&k| ai::still_crop(&stills.stills[k].path, c.layout)).collect::<Result<_, _>>()?;
-    let targets: Vec<Vec<u8>> = c.samples.iter().map(|&f| grab_crop(ffmpeg, files, f, c.layout)).collect::<Result<_, _>>()?;
-    let ans = gemini.compare(&refs, &targets)?;
+    // 相鄰鏡頭：看整張畫面（是不是同一場），其他：看右上角來源字
+    let whole = c.kind == plan::AiKind::Scene;
+    let refs: Vec<Vec<u8>> = c.stills.iter().take(2).map(|&k| if whole { ai::still_whole(&stills.stills[k].path) } else { ai::still_crop(&stills.stills[k].path, c.layout) }).collect::<Result<_, _>>()?;
+    let targets: Vec<Vec<u8>> = c.samples.iter().map(|&f| if whole { grab_whole(ffmpeg, files, f) } else { grab_crop(ffmpeg, files, f, c.layout) }).collect::<Result<_, _>>()?;
+    let ans = if whole { gemini.compare_scene(&refs, &targets)? } else { gemini.compare(&refs, &targets)? };
     let same = ans.same.iter().filter(|b| **b).count() * 2 > ans.same.len().max(1);
     let note = format!("參考「{}」、讀到 {}", ans.reference, ans.texts.iter().map(|t| format!("「{t}」")).collect::<Vec<_>>().join(""));
     Ok((same, note))
@@ -1877,6 +1883,23 @@ fn grab_crop(ffmpeg: &Path, files: &[(PathBuf, f64, f64)], frame: usize, layout:
         .args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{:.4}", t - fs), "-i"])
         .arg(p)
         .args(["-frames:v", "1", "-an", "-vf", &format!("crop={w}:{h}:{x}:{y},scale={}:{}:flags=lanczos", w * k, h * k), "-f", "image2pipe", "-vcodec", "png", "-"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("無法執行 ffmpeg：{e}"))?;
+    if o.stdout.is_empty() {
+        return Err("截不到畫面".into());
+    }
+    Ok(o.stdout)
+}
+
+/// 截側錄某一格的整張畫面（縮成 ai::WHOLE_W×WHOLE_H 的 PNG）
+fn grab_whole(ffmpeg: &Path, files: &[(PathBuf, f64, f64)], frame: usize) -> Result<Vec<u8>, String> {
+    let t = secs(frame);
+    let (p, fs, _) = files.iter().rev().find(|(_, fs, _)| *fs <= t).ok_or("找不到這一格的側錄檔")?;
+    let o = command(ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{:.4}", t - fs), "-i"])
+        .arg(p)
+        .args(["-frames:v", "1", "-an", "-vf", &format!("scale={}:{}:flags=lanczos", ai::WHOLE_W, ai::WHOLE_H), "-f", "image2pipe", "-vcodec", "png", "-"])
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("無法執行 ffmpeg：{e}"))?;
@@ -1942,14 +1965,42 @@ mod ai {
         Ok(out.into_inner())
     }
 
+    /// 整張畫面給 AI 看的大小
+    pub const WHOLE_W: u32 = 768;
+    pub const WHOLE_H: u32 = 432;
+
+    /// 靜圖整張（縮成 WHOLE_W×WHOLE_H 的 PNG）
+    pub fn still_whole(path: &str) -> Result<Vec<u8>, String> {
+        let img = image::open(path).map_err(|e| format!("讀不到靜圖 {path}：{e}"))?.to_rgb8();
+        let img = imageops::resize(&img, WHOLE_W, WHOLE_H, imageops::FilterType::Lanczos3);
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img).write_to(&mut out, ImageFormat::Png).map_err(|e| e.to_string())?;
+        Ok(out.into_inner())
+    }
+
     impl Gemini {
         pub fn new(key: String, model: String) -> Gemini {
             Gemini { key, model }
         }
 
+        /// 參考圖（要遮掉的那支素材的靜圖）＋要判斷的幾格 → 每格是不是同一場活動／同一支素材的畫面（不看來源字）
+        pub fn compare_scene(&self, refs: &[Vec<u8>], targets: &[Vec<u8>]) -> Result<Answer, String> {
+            let prompt = format!(
+                "以下是台灣電視談話節目的整張畫面截圖，下方的標題條、字幕、台標都不用管。\n\
+                 第 1～{r} 張是參考圖：節目裡播出的一支外部素材（例如某一場辯論會、記者會、活動現場）。第 {a}～{b} 張是要判斷的畫面。\n\
+                 請逐張判斷要判斷的畫面，是不是「同一場活動／同一支素材」的畫面：同一個場地、佈景、同樣的人物與服裝，只是換了鏡頭角度、遠近或時間點，就算相同；\
+                 右上角的來源標示不同沒關係。棚內主持人／來賓的畫面、別的新聞事件、同一個人在別的場合，都算不同。\n\
+                 只回傳 JSON：{{\"ref\":\"一句話描述參考圖的場景\",\"targets\":[{{\"text\":\"一句話描述這張畫面\",\"same\":true}}]}}，targets 依序共 {n} 個。",
+                r = refs.len(),
+                a = refs.len() + 1,
+                b = refs.len() + targets.len(),
+                n = targets.len()
+            );
+            self.ask(prompt, refs, targets)
+        }
+
         /// 參考圖（同一個來源的靜圖）＋要判斷的幾格 → 每格的來源字是不是跟參考相同
         pub fn compare(&self, refs: &[Vec<u8>], targets: &[Vec<u8>]) -> Result<Answer, String> {
-            let b64 = |b: &Vec<u8>| base64::engine::general_purpose::STANDARD.encode(b);
             let prompt = format!(
                 "以下是台灣電視節目畫面右上角「來源標示」區域的截圖。來源標示是白色或灰色的小字，例如「翻攝 IG / 伊朗女忍者」「翻攝 Youtube 少康戰情室」「翻攝 抖音 / 中國辦公大樓空置」，也可能只有一行說明文字；截圖裡可能還有別台的台標、字幕，那些不算。\n\
                  第 1～{r} 張是參考圖（同一個來源）。第 {a}～{b} 張是要判斷的畫面。\n\
@@ -1960,6 +2011,12 @@ mod ai {
                 b = refs.len() + targets.len(),
                 n = targets.len()
             );
+            self.ask(prompt, refs, targets)
+        }
+
+        /// 送出：題目＋參考圖＋要判斷的圖 → JSON 回答
+        fn ask(&self, prompt: String, refs: &[Vec<u8>], targets: &[Vec<u8>]) -> Result<Answer, String> {
+            let b64 = |b: &Vec<u8>| base64::engine::general_purpose::STANDARD.encode(b);
             let mut parts = vec![serde_json::json!({ "text": prompt })];
             for img in refs.iter().chain(targets) {
                 parts.push(serde_json::json!({ "inline_data": { "mime_type": "image/png", "data": b64(img) } }));
