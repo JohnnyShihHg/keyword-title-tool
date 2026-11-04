@@ -341,7 +341,7 @@ listen("autocut-done", (e) => {
   showNotice({ title: chain ? `第 ${n} 段串接完成` : n ? `第 ${n} 段出片完成` : "全集合成完成", message: path });
 });
 
-// ───────── 每段串接（正片 →（閃白）→ YT → promo） ─────────
+// ───────── 每段串接（正片 →（閃白）→ 影片（可以好幾支）→ promo） ─────────
 
 const AC_CHAIN_STATES = {
   need_yt: ["等 YT", "bad"],
@@ -353,24 +353,35 @@ const AC_CHAIN_STATES = {
   failed: ["失敗", "bad"],
 };
 
-/** 預設：每段都接 45 秒 promo；第三、六段另外串 YT（閃白） */
+/** 一支要串的影片（YT 網址或檔案） */
+function acNewVideo(src = "yt") {
+  return { src, url: "", ytPath: "", file: "", startText: "", endText: "", start: null, end: null, flash: true, ytStatus: "" };
+}
+
+/** 預設：每段都接 45 秒 promo；第三、六段另外串一支 YT（閃白） */
 function acChainDefault(n) {
   const yt = n === 3 || n === 6;
-  return { promo: 45, yt_mode: yt, src: "yt", url: "", ytPath: "", file: "", startText: "", endText: "", start: null, end: null, flash: true, ytStatus: "" };
+  return { promo: 45, yt_mode: yt, videos: yt ? [acNewVideo()] : [] };
 }
 
-/** 要串的影片：YT 下載好的檔，或直接選的檔案 */
-function acChainVideo(c) {
-  return c.src === "file" ? c.file : c.ytPath;
+/** 影片檔：YT 下載好的檔，或直接選的檔案 */
+function acChainVideo(v) {
+  return v.src === "file" ? v.file : v.ytPath;
 }
 
-function acVideoStatus(c) {
-  if (c.src === "file") return c.file ? c.file.split(/[\\/]/).pop() : "";
-  return c.ytPath ? "已下載" : "";
+/** 還沒填網址、也沒選檔案 */
+function acVideoEmpty(v) {
+  return v.src === "file" ? !v.file : !v.url;
+}
+
+function acVideoStatus(v) {
+  if (v.src === "file") return v.file ? v.file.split(/[\\/]/).pop() : "";
+  return v.ytPath ? "已下載" : "";
 }
 
 let acChains = {};
 let acChainsDate = null;
+let acChainEls = {}; // 段號 → { tr, list, count }
 
 function acChainKey() {
   return `acChains:${dateInput.value.trim() || "today"}`;
@@ -384,10 +395,16 @@ function acLoadChains() {
   } catch {}
   acChains = {};
   for (const n of [1, 2, 3, 4, 5, 6]) {
-    const c = { ...acChainDefault(n), ...(saved?.[n] || {}) };
-    if (c.path && !c.ytPath) c.ytPath = c.path; // 0.6.1 存的 YT 檔
-    delete c.path;
-    c.ytStatus = acVideoStatus(c);
+    const s = saved?.[n];
+    let c;
+    if (!s) c = acChainDefault(n);
+    else if (Array.isArray(s.videos)) c = { promo: s.promo ?? 45, yt_mode: !!s.yt_mode, videos: s.videos.map((v) => ({ ...acNewVideo(), ...v })) };
+    else {
+      // 0.6.18 以前：一段只有一支影片，欄位直接放在段上
+      const v = { ...acNewVideo(s.src || "yt"), url: s.url || "", ytPath: s.ytPath || s.path || "", file: s.file || "", startText: s.startText || "", endText: s.endText || "", start: s.start ?? null, end: s.end ?? null, flash: s.flash !== false };
+      c = { promo: s.promo ?? 45, yt_mode: !!s.yt_mode, videos: s.yt_mode || !acVideoEmpty(v) ? [v] : [] };
+    }
+    for (const v of c.videos) v.ytStatus = acVideoStatus(v);
     acChains[n] = c;
   }
   acBuildChainRows();
@@ -399,16 +416,17 @@ function acSaveChains() {
   } catch {}
 }
 
-/** 送給 Rust 的設定；不接東西＝null */
+/** 送給 Rust 的設定；不接東西＝null。空白的那列不算；有填但還沒下載好的＝等著 */
 function acChainPayload(n) {
   const c = acChains[n];
   if (!c || !(c.promo || c.yt_mode)) return null;
-  const video = acChainVideo(c);
+  const filled = c.yt_mode ? c.videos.filter((v) => !acVideoEmpty(v)) : [];
+  const ready = filled.filter((v) => acChainVideo(v));
   return {
     promo: c.promo,
     yt_mode: c.yt_mode,
-    yt: c.yt_mode && video ? { path: video, start: c.start, end: c.end } : null,
-    flash: c.flash,
+    videos: ready.map((v) => ({ path: acChainVideo(v), start: v.start, end: v.end, flash: v.flash })),
+    waiting: ready.length < filled.length,
   };
 }
 
@@ -446,6 +464,7 @@ async function acEncoder() {
 }
 
 function acBuildChainRows() {
+  acChainEls = {};
   $("acChains").replaceChildren(
     ...[1, 2, 3, 4, 5, 6].map((n) => {
       const c = acChains[n];
@@ -454,59 +473,90 @@ function acBuildChainRows() {
       tr.innerHTML = `<td>第 ${n} 段</td>
         <td><select class="ac-promo"><option value="0">不接</option><option value="20">20 秒</option><option value="45">45 秒</option></select></td>
         <td><input type="checkbox" class="ac-yt switch" /></td>
-        <td class="ac-src-cell"><select class="ac-src"><option value="yt">YT</option><option value="file">檔案</option></select>
-          <input class="ac-url" spellcheck="false" placeholder="https://youtu.be/…" />
-          <button type="button" class="ghost small ac-pick">選擇檔案</button></td>
-        <td><input class="ac-start ac-time" spellcheck="false" placeholder="開頭" /></td>
-        <td><input class="ac-end ac-time" spellcheck="false" placeholder="結尾" /></td>
-        <td><input type="checkbox" class="ac-flash switch" /></td>
-        <td class="ac-yt-status muted"></td>`;
+        <td class="ac-videos-cell"><div class="ac-video-list"></div>
+          <button type="button" class="ghost small ac-video-add">＋ 新增影片</button></td>`;
       const q = (s) => tr.querySelector(s);
       q(".ac-promo").value = String(c.promo);
       q(".ac-yt").checked = c.yt_mode;
-      q(".ac-url").value = c.url;
-      q(".ac-start").value = c.startText;
-      q(".ac-end").value = c.endText;
-      q(".ac-flash").checked = c.flash;
-      q(".ac-src").value = c.src;
-      const syncEnabled = () => {
-        for (const s of [".ac-src", ".ac-url", ".ac-pick", ".ac-start", ".ac-end", ".ac-flash"]) q(s).disabled = !c.yt_mode;
-        q(".ac-url").classList.toggle("hidden", c.src === "file");
-        q(".ac-pick").classList.toggle("hidden", c.src !== "file");
-      };
-      syncEnabled();
-      q(".ac-src").onchange = () => {
-        c.src = q(".ac-src").value;
-        syncEnabled();
-        acYtStatus(n, acVideoStatus(c));
-        acPushChain(n);
-      };
-      q(".ac-pick").onclick = async () => {
-        const path = await pickVideo();
-        if (!path) return;
-        c.file = path;
-        acYtStatus(n, acVideoStatus(c));
-        acPushChain(n);
-      };
       q(".ac-promo").onchange = () => {
         c.promo = Number(q(".ac-promo").value);
         acPushChain(n);
       };
       q(".ac-yt").onchange = () => {
         c.yt_mode = q(".ac-yt").checked;
-        syncEnabled();
+        if (c.yt_mode && !c.videos.length) c.videos.push(acNewVideo());
+        acBuildVideoItems(n);
+        acPushChain(n);
+      };
+      q(".ac-video-add").onclick = () => {
+        c.videos.push(acNewVideo());
+        c.yt_mode = true;
+        q(".ac-yt").checked = true;
+        acBuildVideoItems(n);
+        acPushChain(n);
+        acChainEls[n].list.lastElementChild?.querySelector(".ac-url")?.focus();
+      };
+      acChainEls[n] = { tr, list: q(".ac-video-list") };
+      acBuildVideoItems(n);
+      return tr;
+    }),
+  );
+  acLabelCells($("acChains"));
+}
+
+/** 一段裡的影片列表：每支一列，照順序接在正片後面 */
+function acBuildVideoItems(n) {
+  const c = acChains[n];
+  const el = acChainEls[n];
+  el.tr.classList.toggle("ac-chain-off", !c.yt_mode);
+  el.list.replaceChildren(
+    ...c.videos.map((v, i) => {
+      const item = document.createElement("div");
+      item.className = "ac-video-item";
+      item.innerHTML = `<span class="ac-video-no">${i + 1}</span>
+        <select class="ac-src"><option value="yt">YT</option><option value="file">檔案</option></select>
+        <input class="ac-url" spellcheck="false" placeholder="https://youtu.be/…" />
+        <button type="button" class="ghost small ac-pick">選擇檔案</button>
+        <input class="ac-start ac-time" spellcheck="false" placeholder="開頭" title="從這裡開始（空白＝從頭）" />
+        <input class="ac-end ac-time" spellcheck="false" placeholder="結尾" title="到這裡結束（空白＝到最後）" />
+        <label class="ac-flash-label" title="接在前一支後面時閃白"><input type="checkbox" class="ac-flash switch" />閃白</label>
+        <span class="ac-yt-status muted"></span>
+        <button type="button" class="ghost small danger ac-video-del" title="刪掉這支">刪除</button>`;
+      const q = (s) => item.querySelector(s);
+      acVideoEls.set(v, q(".ac-yt-status"));
+      q(".ac-src").value = v.src;
+      q(".ac-url").value = v.url;
+      q(".ac-start").value = v.startText;
+      q(".ac-end").value = v.endText;
+      q(".ac-flash").checked = v.flash;
+      const syncSrc = () => {
+        q(".ac-url").classList.toggle("hidden", v.src === "file");
+        q(".ac-pick").classList.toggle("hidden", v.src !== "file");
+      };
+      syncSrc();
+      q(".ac-src").onchange = () => {
+        v.src = q(".ac-src").value;
+        syncSrc();
+        acYtStatus(v, acVideoStatus(v));
+        acPushChain(n);
+      };
+      q(".ac-pick").onclick = async () => {
+        const path = await pickVideo();
+        if (!path) return;
+        v.file = path;
+        acYtStatus(v, acVideoStatus(v));
         acPushChain(n);
       };
       q(".ac-flash").onchange = () => {
-        c.flash = q(".ac-flash").checked;
+        v.flash = q(".ac-flash").checked;
         acPushChain(n);
       };
       q(".ac-url").onchange = () => {
-        c.url = q(".ac-url").value.trim();
-        c.ytPath = "";
+        v.url = q(".ac-url").value.trim();
+        v.ytPath = "";
         acPushChain(n);
-        if (c.url) acDownloadYt(n);
-        else acYtStatus(n, "");
+        if (v.url) acDownloadYt(n, v);
+        else acYtStatus(v, "");
       };
       for (const [sel, key] of [
         [".ac-start", "start"],
@@ -515,8 +565,8 @@ function acBuildChainRows() {
         q(sel).onchange = async () => {
           const text = q(sel).value.trim();
           try {
-            c[key] = text ? await invoke("parse_timecode", { input: text }) : null;
-            c[`${key}Text`] = text;
+            v[key] = text ? await invoke("parse_timecode", { input: text }) : null;
+            v[`${key}Text`] = text;
             q(sel).classList.remove("bad");
             acPushChain(n);
           } catch (e) {
@@ -525,16 +575,25 @@ function acBuildChainRows() {
           }
         };
       }
-      return tr;
+      q(".ac-video-del").onclick = () => {
+        c.videos.splice(i, 1);
+        if (!c.videos.length) c.yt_mode = false;
+        el.tr.querySelector(".ac-yt").checked = c.yt_mode;
+        acBuildVideoItems(n);
+        acPushChain(n);
+      };
+      acYtStatus(v, v.ytStatus);
+      return item;
     }),
   );
-  for (const n of [1, 2, 3, 4, 5, 6]) acYtStatus(n, acChains[n].ytStatus);
-  acLabelCells($("acChains"));
+  if (!c.videos.length) el.list.append(Object.assign(document.createElement("div"), { className: "muted ac-video-empty", textContent: "不串影片。按「＋ 新增影片」加一支；可以加好幾支，照順序接。" }));
 }
 
-function acYtStatus(n, text) {
-  acChains[n].ytStatus = text;
-  const el = document.querySelector(`[data-chain="${n}"] .ac-yt-status`);
+const acVideoEls = new WeakMap(); // 影片 → 它的「影片狀態」欄（不存進 localStorage）
+
+function acYtStatus(v, text) {
+  v.ytStatus = text;
+  const el = acVideoEls.get(v);
   if (el) el.textContent = text;
 }
 
@@ -542,24 +601,24 @@ function acYtStatus(n, text) {
 let acYtQueue = Promise.resolve();
 let acYtActive = null;
 listen("yt-progress", ({ payload }) => {
-  if (acYtActive != null) acYtStatus(acYtActive, `下載中 ${payload.percent.toFixed(0)}%`);
+  if (acYtActive) acYtStatus(acYtActive, `下載中 ${payload.percent.toFixed(0)}%`);
 });
 
-function acDownloadYt(n) {
-  const url = acChains[n].url;
-  acYtStatus(n, "排隊下載…");
+function acDownloadYt(n, v) {
+  const url = v.url;
+  acYtStatus(v, "排隊下載…");
   acYtQueue = acYtQueue.then(async () => {
-    if (acChains[n].url !== url) return; // 排隊時網址又改了
-    acYtActive = n;
-    acYtStatus(n, "下載中…");
+    if (v.url !== url || !acChains[n].videos.includes(v)) return; // 排隊時網址改了、刪掉了
+    acYtActive = v;
+    acYtStatus(v, "下載中…");
     try {
       const path = await invoke("download_youtube", { url });
-      if (acChains[n].url !== url) return;
-      acChains[n].ytPath = path;
-      acYtStatus(n, "已下載");
+      if (v.url !== url) return;
+      v.ytPath = path;
+      acYtStatus(v, "已下載");
       acPushChain(n);
     } catch (e) {
-      acYtStatus(n, `★ ${e}`);
+      acYtStatus(v, `★ ${e}`);
     } finally {
       acYtActive = null;
     }

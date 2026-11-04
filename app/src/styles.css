@@ -679,12 +679,17 @@ input.switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2
 .ac-state.prog { background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 28%, transparent) calc(var(--p, 0) * 100%), color-mix(in srgb, var(--accent) 10%, transparent) 0); }
 
 /* 串接表；沒勾「串影片」時，來源到閃白那幾欄淡掉 */
-.ac-chain-table .ac-src-cell { display: flex; gap: 6px; align-items: center; }
+.ac-chain-table td.ac-videos-cell { width: 100%; }
+.ac-video-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
+.ac-video-item { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.ac-video-no { flex: 0 0 auto; width: 20px; height: 20px; border-radius: 999px; font-size: 11px; display: inline-flex; align-items: center; justify-content: center; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.ac-video-empty { font-size: 12px; }
+.ac-flash-label { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); white-space: nowrap; }
 .ac-chain-table input.ac-url { flex: 1; min-width: 200px; }
 .ac-chain-table input.ac-time { width: 88px; }
 .ac-chain-table input.bad { border-color: var(--danger); }
 .ac-chain-table .ac-yt-status { font-size: 12px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ac-chain-table tr:has(.ac-yt:not(:checked)) :is(.ac-src-cell, td:has(.ac-time), td:has(.ac-flash)) { opacity: .45; }
+.ac-chain-table tr.ac-chain-off .ac-video-list { opacity: .45; }
 .ac-chain-cell { white-space: nowrap; }
 
 /* 上傳 YouTube */
@@ -741,9 +746,9 @@ input.switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2
   .ac-table td[colspan] { grid-column: 1 / -1; }
   .ac-table td.ac-actions { grid-column: 1 / -1; flex-direction: row; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
   .ac-actions button + button { margin-left: 0; }
-  .ac-chain-table td.ac-src-cell, .ac-yt-table td:has(.yt-tags), .ac-yt-table td.yt-title { grid-column: 1 / -1; width: auto; }
-  .ac-chain-table td.ac-src-cell { flex-direction: row; flex-wrap: wrap; align-items: center; }
-  .ac-chain-table td.ac-src-cell::before { flex-basis: 100%; }
+  .ac-chain-table td.ac-videos-cell, .ac-yt-table td:has(.yt-tags), .ac-yt-table td.yt-title { grid-column: 1 / -1; width: auto; }
+  .ac-chain-table td.ac-videos-cell { align-items: stretch; }
+  .ac-chain-table input.ac-url { min-width: 0; flex-basis: 100%; }
   .ac-yt-table td.yt-title { white-space: normal; }
   .ac-yt-table td:has(.yt-tags) { align-items: stretch; }
   .ac-yt-table .yt-count { align-self: flex-end; }

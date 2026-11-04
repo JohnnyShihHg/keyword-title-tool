@@ -136,35 +136,44 @@ fn half() -> f64 {
     0.5
 }
 
-/// 一段正片後面要接的東西：正片 →（閃白）→ YT →（直接接）→ promo
+/// 一段正片後面要接的東西：正片 →（閃白）→ 影片 1 →（閃白）→ 影片 2 … →（直接接）→ promo
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Chain {
     /// 0＝不接 promo；20／45＝接那支
     #[serde(default)]
     pub promo: u32,
-    /// 這段要串 YT（還沒填好 YT 就先等著）
+    /// 這段要串影片（YT 或檔案，可以好幾支）
     #[serde(default)]
     pub yt_mode: bool,
+    /// 已經準備好的影片，照順序接
     #[serde(default)]
-    pub yt: Option<YtClip>,
-    /// 正片跟 YT 之間閃白
-    #[serde(default = "yes")]
-    pub flash: bool,
+    pub videos: Vec<YtClip>,
+    /// 還有影片沒準備好（YT 還在下載、還沒填）→ 先等著不串
+    #[serde(default)]
+    pub waiting: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct YtClip {
-    /// 已下載的檔案
+    /// 已下載的 YT 或選的檔案
     pub path: String,
     #[serde(default)]
     pub start: Option<f64>,
     #[serde(default)]
     pub end: Option<f64>,
+    /// 接在前一支後面時閃白
+    #[serde(default = "yes")]
+    pub flash: bool,
 }
 
 impl Chain {
     fn enabled(&self) -> bool {
         self.promo != 0 || self.yt_mode
+    }
+
+    /// 要串影片但還沒有能用的
+    fn need_video(&self) -> bool {
+        self.yt_mode && (self.waiting || self.videos.is_empty())
     }
 }
 
@@ -418,7 +427,7 @@ impl Shared {
     /// 這段可以串接了（有設定、需要的 YT 已填、正片出好）→ (設定, 正片成品, 串接指紋)
     fn chain_ready(&self, n: usize) -> Option<(Chain, String, String)> {
         let chain = self.chains.lock().unwrap().get(&n).cloned().filter(Chain::enabled)?;
-        if chain.yt_mode && chain.yt.is_none() {
+        if chain.need_video() {
             return None;
         }
         let (output, seg_fp) = match self.renders.lock().unwrap().get(&n) {
@@ -453,7 +462,7 @@ impl Shared {
                 s.state = "failed";
                 s.error = Some(e);
             }
-            None => s.state = if chain.yt_mode && chain.yt.is_none() { "need_yt" } else { "waiting" },
+            None => s.state = if chain.need_video() { "need_yt" } else { "waiting" },
         }
         Some(s)
     }
@@ -2297,11 +2306,9 @@ fn run_chain(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Pat
     }
     shared.chain_renders.lock().unwrap().insert(n, Render::Rendering(0.0));
     shared.publish(app);
-    let what = [chain.yt.as_ref().map(|_| if chain.flash { "閃白＋YT" } else { "YT" }), (chain.promo != 0).then_some(if chain.promo == 20 { "promo 20 秒" } else { "promo 45 秒" })]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join("＋");
+    let videos = (!chain.videos.is_empty()).then(|| if chain.videos.len() == 1 { "影片".to_string() } else { format!("影片 {} 支", chain.videos.len()) });
+    let promo = (chain.promo != 0).then(|| format!("promo {} 秒", chain.promo));
+    let what = [videos, promo].into_iter().flatten().collect::<Vec<_>>().join("＋");
     let r = shared.stage(app, &format!("串接第 {n} 段（{what}）"), || render_chain(app, shared, ffmpeg, ffprobe, cfg, n, &chain, &seg_out, &out));
     match r {
         Ok(()) => {
@@ -2392,12 +2399,13 @@ fn promo_like(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Pa
     Ok(dst.display().to_string())
 }
 
-/// 正片 →（閃白）→ YT →（直接接）→ promo。正片已經 +6dB、壓過水印，這裡都不再加
+/// 正片 →（閃白）→ 影片（一支或好幾支）→（直接接）→ promo。正片已經 +6dB、壓過水印，這裡都不再加
 #[allow(clippy::too_many_arguments)]
 fn render_chain(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Path, cfg: &AutocutConfig, n: usize, chain: &Chain, seg_out: &str, out: &Path) -> Result<(), String> {
     let mut clips = vec![clip_of(ffprobe, seg_out, &format!("第 {n} 段"), Join::Cut, None, None)?];
-    if let Some(yt) = &chain.yt {
-        clips.push(clip_of(ffprobe, &yt.path, "YT", if chain.flash { Join::Flash } else { Join::Cut }, yt.start, yt.end)?);
+    for (i, v) in chain.videos.iter().enumerate() {
+        let label = if chain.videos.len() == 1 { "影片".to_string() } else { format!("影片 {}", i + 1) };
+        clips.push(clip_of(ffprobe, &v.path, &label, if v.flash { Join::Flash } else { Join::Cut }, v.start, v.end)?);
     }
     if chain.promo != 0 {
         let p = promo_like(app, shared, ffmpeg, ffprobe, cfg, chain.promo, &clips[0])?;
