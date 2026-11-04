@@ -1628,7 +1628,9 @@ bar {} {mtime} {ranges:?}", bar.image));
     fn ai_decide_many(&mut self, files: &[(PathBuf, f64, f64)], cands: &[plan::AiCandidate]) -> Vec<Result<(bool, String, bool), String>> {
         let key_of = |c: &plan::AiCandidate| {
             let names: Vec<&str> = c.stills.iter().map(|&k| self.stills.stills[k].name.as_str()).collect();
-            format!("{}|{}|{:?}|{:?}|{}", c.start, c.end, c.kind, c.layout, names.join(","))
+            // 相鄰鏡頭 0.6.20 起要全部格都說相同才算：鍵加上「|all」，0.6.19 用過半數判斷的舊結果不再沿用
+            let rule = if c.kind == plan::AiKind::Scene { "|all" } else { "" };
+            format!("{}|{}|{:?}|{:?}|{}{rule}", c.start, c.end, c.kind, c.layout, names.join(","))
         };
         let keys: Vec<String> = cands.iter().map(key_of).collect();
         let mut out: Vec<Option<Result<(bool, String, bool), String>>> = keys.iter().map(|k| self.ai_cache.get(k).map(|(s, n)| Ok((*s, n.clone(), false)))).collect();
@@ -1869,7 +1871,9 @@ fn ai_eval(ffmpeg: &Path, stills: &StillSet, gemini: &ai::Gemini, files: &[(Path
     let refs: Vec<Vec<u8>> = c.stills.iter().take(2).map(|&k| if whole { ai::still_whole(&stills.stills[k].path) } else { ai::still_crop(&stills.stills[k].path, c.layout) }).collect::<Result<_, _>>()?;
     let targets: Vec<Vec<u8>> = c.samples.iter().map(|&f| if whole { grab_whole(ffmpeg, files, f) } else { grab_crop(ffmpeg, files, f, c.layout) }).collect::<Result<_, _>>()?;
     let ans = if whole { gemini.compare_scene(&refs, &targets)? } else { gemini.compare(&refs, &targets)? };
-    let same = ans.same.iter().filter(|b| **b).count() * 2 > ans.same.len().max(1);
+    // 相鄰鏡頭要每一格都說同一場才接（11/02 第 1 段 15:16.8：三格都描述成棚內來賓，卻有兩格回答相同）
+    let yes = ans.same.iter().filter(|b| **b).count();
+    let same = if whole { !ans.same.is_empty() && yes == ans.same.len() } else { yes * 2 > ans.same.len().max(1) };
     let note = format!("參考「{}」、讀到 {}", ans.reference, ans.texts.iter().map(|t| format!("「{t}」")).collect::<Vec<_>>().join(""));
     Ok((same, note))
 }

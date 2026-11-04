@@ -684,7 +684,9 @@ pub fn ai_candidates(frames: &[FrameInfo], set: &StillSet, seg: &Segment, masks:
         let hi = (m.end + lim).min(next_start);
         let after = (m.end, (m.end + 1..hi).find(|&i| is_shot_cut(frames, i)).unwrap_or(hi));
         for (a, b) in [before, after] {
-            if b <= a || b - a < min_len || !in_piece(a, b) || covered(a) || covered(b - 1) || out.iter().any(|c: &AiCandidate| a < c.end && b > c.start) {
+            // 跟「空檔」重疊照樣問：11/02 第 1 段 12:33 遮罩後 51 秒的空檔大多是少康戰情室（AI 說來源不同），
+            // 但緊接的前幾秒還是辯論會；14:51–15:00 腿部特寫讀不到來源字 → 空檔被判不同，整段露出
+            if b <= a || b - a < min_len || !in_piece(a, b) || covered(a) || covered(b - 1) || out.iter().any(|c: &AiCandidate| c.kind != AiKind::Gap && a < c.end && b > c.start) {
                 continue;
             }
             let g = &frames[a..b];
@@ -695,7 +697,8 @@ pub fn ai_candidates(frames: &[FrameInfo], set: &StillSet, seg: &Segment, masks:
             }
         }
     }
-    out.sort_by_key(|c| c.start);
+    // 同一個起點：空檔先處理（空檔接起來後相鄰鏡頭就沒事了；反過來先接相鄰鏡頭會讓空檔對不到前後兩段）
+    out.sort_by_key(|c| (c.start, c.kind == AiKind::Scene));
     out
 }
 
@@ -1382,6 +1385,31 @@ mod tests {
         // 雙框不問；後面沒有鏡頭切換 → 最多看 15 秒
         let dual = vec![mask(20, 25, Layout::Dual, 0)];
         assert!(ai_candidates(&frames, &set, &seg, &dual).iter().all(|c| c.kind != AiKind::Scene));
+        // 兩段同一張靜圖中間 10 秒（超過夾心 8 秒）→ 問空檔；中間 33 秒有換鏡頭 → 前後兩個鏡頭也各問一次相鄰鏡頭，空檔先處理
+        let gap = vec![mask(25, 30, Layout::Full, 0), mask(40, 45, Layout::Full, 0)];
+        frames[33 * fps].cut_diff = 60.0;
+        let c = ai_candidates(&frames, &set, &seg, &gap);
+        let at = |s: usize| c.iter().filter(|c| c.start == s * fps).map(|c| c.kind).collect::<Vec<_>>();
+        assert_eq!(at(30), vec![AiKind::Gap, AiKind::Scene], "{c:?}");
+        assert!(c.iter().any(|c| c.kind == AiKind::Scene && (c.start, c.end) == (33 * fps, 40 * fps)), "{c:?}");
+        // 空檔被判不同、相鄰鏡頭被判同一場 → 只接那個鏡頭
+        let mut m2 = gap.clone();
+        let scene = c.iter().find(|c| c.kind == AiKind::Scene && c.start == 30 * fps).unwrap();
+        apply_ai(&frames, &mut m2, scene);
+        assert_eq!((m2[0].end, m2[1].start), (33 * fps, 40 * fps));
+        // 空檔判同一個來源 → 整段接起來，之後的相鄰鏡頭不再動
+        let mut m3 = gap.clone();
+        for c in c.iter().filter(|c| c.start >= 30 * fps && c.end <= 40 * fps) {
+            apply_ai(&frames, &mut m3, c);
+        }
+        assert_eq!(m3.len(), 1);
+        assert_eq!((m3[0].start, m3[0].end), (25 * fps, 45 * fps));
+        // 前後沒有鏡頭切換：前一段往後、後一段往前會是同一塊，只問一次
+        frames[33 * fps].cut_diff = 0.0;
+        let c = ai_candidates(&frames, &set, &seg, &gap);
+        let inside: Vec<_> = c.iter().filter(|c| c.kind == AiKind::Scene && c.start >= 30 * fps && c.end <= 40 * fps).collect();
+        assert_eq!(inside.len(), 1, "{c:?}");
+        assert_eq!((inside[0].start, inside[0].end), (30 * fps, 40 * fps));
         let late = vec![mask(60, 70, Layout::Full, 0)];
         let c = ai_candidates(&frames, &set, &seg, &late);
         let lim = (SCENE_MAX_SECS * FPS) as usize;
