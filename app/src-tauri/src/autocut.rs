@@ -1430,31 +1430,45 @@ impl Watcher {
             let mut asked = 0usize;
             let t_ai = (now_ms(), Instant::now());
             for (seg, masks) in planned.iter_mut().filter(|(s, _)| s.complete()) {
-                let cands = plan::ai_candidates(&frames, &self.stills, seg, masks);
-                let answers = self.ai_decide_many(&files, &cands);
-                for (c, a) in cands.iter().zip(answers) {
-                    let (same, note, fresh) = match a {
-                        Ok(x) => x,
-                        Err(e) => {
-                            log.push_str(&format!("  ★ AI 補判失敗（第 {} 段 側錄 {}）：{e}\n", seg.n, tc(secs(c.start))));
-                            continue;
+                // AI 接上一段後，新的相鄰鏡頭／空檔要再問，一直問到遮罩不再變（11/06 第 1 段 12:47：
+                // 接上 12:41–12:47 那個鏡頭後，緊接的 12:47–12:59 還是水電爸爸，以前只問一輪就露出來）
+                let mut seen: std::collections::HashSet<(usize, usize, u8)> = std::collections::HashSet::new();
+                for _round in 0..20 {
+                    let key = |c: &plan::AiCandidate| (c.start, c.end, c.kind as u8);
+                    let cands: Vec<plan::AiCandidate> = plan::ai_candidates(&frames, &self.stills, seg, masks).into_iter().filter(|c| !seen.contains(&key(c))).collect();
+                    if cands.is_empty() {
+                        break;
+                    }
+                    seen.extend(cands.iter().map(key));
+                    let before = masks.iter().map(|m| (m.start, m.end)).collect::<Vec<_>>();
+                    let answers = self.ai_decide_many(&files, &cands);
+                    for (c, a) in cands.iter().zip(answers) {
+                        let (same, note, fresh) = match a {
+                            Ok(x) => x,
+                            Err(e) => {
+                                log.push_str(&format!("  ★ AI 補判失敗（第 {} 段 側錄 {}）：{e}\n", seg.n, tc(secs(c.start))));
+                                continue;
+                            }
+                        };
+                        asked += fresh as usize;
+                        let kind = match c.kind {
+                            plan::AiKind::Gap => "空檔",
+                            plan::AiKind::Weak => "灰色地帶",
+                            plan::AiKind::Scene => "相鄰鏡頭",
+                        };
+                        log.push_str(&format!(
+                            "  AI：第 {} 段 側錄 {} – {}（{kind}）→ {}｜{note}\n",
+                            seg.n,
+                            tc(secs(c.start)),
+                            tc(secs(c.end)),
+                            if same { "同一個來源，遮" } else { "不同，不遮" }
+                        ));
+                        if same {
+                            plan::apply_ai(&frames, masks, c);
                         }
-                    };
-                    asked += fresh as usize;
-                    let kind = match c.kind {
-                        plan::AiKind::Gap => "空檔",
-                        plan::AiKind::Weak => "灰色地帶",
-                        plan::AiKind::Scene => "相鄰鏡頭",
-                    };
-                    log.push_str(&format!(
-                        "  AI：第 {} 段 側錄 {} – {}（{kind}）→ {}｜{note}\n",
-                        seg.n,
-                        tc(secs(c.start)),
-                        tc(secs(c.end)),
-                        if same { "同一個來源，遮" } else { "不同，不遮" }
-                    ));
-                    if same {
-                        plan::apply_ai(&frames, masks, c);
+                    }
+                    if masks.iter().map(|m| (m.start, m.end)).collect::<Vec<_>>() == before {
+                        break;
                     }
                 }
             }

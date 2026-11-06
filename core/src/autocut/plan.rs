@@ -1415,4 +1415,25 @@ mod tests {
         let lim = (SCENE_MAX_SECS * FPS) as usize;
         assert!(c.iter().any(|c| c.kind == AiKind::Scene && (c.start, c.end) == (70 * fps, 70 * fps + lim)), "{c:?}");
     }
+
+    /// 11/06 第 1 段 12:47：AI 接上後面一個鏡頭後，再後面那個鏡頭要變成新的題目（呼叫端一輪一輪問到不再變）
+    #[test]
+    fn scene_extension_exposes_next_shot() {
+        let set = one_still_set();
+        let fps = FPS as usize;
+        let mut frames: Vec<FrameInfo> = (0..120 * fps).map(|_| frame(true)).collect();
+        for k in [25, 31, 43] {
+            frames[k * fps].cut_diff = 60.0;
+        }
+        let seg = Segment { n: 1, pieces: vec![(0, frames.len())], start_ok: true, end_ok: true };
+        let mut masks = vec![mask(10, 20, Layout::Full, 0)];
+        let after = |m: &[MaskSeg], s: usize| ai_candidates(&frames, &set, &seg, m).into_iter().find(|c| c.kind == AiKind::Scene && c.start == s * fps);
+        let c1 = after(&masks, 20).unwrap();
+        assert_eq!(c1.end, 25 * fps);
+        apply_ai(&frames, &mut masks, &c1);
+        let c2 = after(&masks, 25).expect("接上之後，緊接的下一個鏡頭也要問");
+        assert_eq!(c2.end, 31 * fps);
+        apply_ai(&frames, &mut masks, &c2);
+        assert_eq!((masks[0].start, masks[0].end), (10 * fps, 31 * fps));
+    }
 }
