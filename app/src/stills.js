@@ -69,7 +69,8 @@ function acFillStills() {
     if (!list.length) el.grid.append(Object.assign(document.createElement("div"), { className: "muted ac-bar-empty", textContent: "沒有圖片（可以直接拖圖片進來）" }));
   }
   const bars = Object.values(typeof acBars === "object" ? acBars : {}).reduce((a, v) => a + (v?.length || 0), 0);
-  $("acReplaceNote").textContent = `靜圖 ${total} 張、BAR ${bars} 條`;
+  const manual = Object.values(typeof acMasks === "object" ? acMasks : {}).reduce((a, v) => a + (v?.length || 0), 0);
+  $("acReplaceNote").textContent = `靜圖 ${total} 張、BAR ${bars} 條${manual ? `、手動遮罩 ${manual} 個` : ""}`;
 }
 
 async function acLoadStills() {

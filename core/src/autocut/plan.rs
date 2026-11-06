@@ -702,6 +702,49 @@ pub fn ai_candidates(frames: &[FrameInfo], set: &StillSet, seg: &Segment, masks:
     out
 }
 
+// ───────────────────────── 手動遮罩 ─────────────────────────
+
+pub const MANUAL_NOTE: &str = "手動指定";
+
+/// 手動遮罩沒指定靜圖：這段時間裡平均畫面最像的那張（這段能用的靜圖；版型跟這段多數格一樣的優先）。
+/// 11/06 第 1 段 21:04–21:13 歌劇的其他鏡頭：跟每張靜圖都只有 0.2～0.5，但最像的還是歌劇那幾張
+pub fn pick_still(frames: &[FrameInfo], set: &StillSet, seg: &Segment, start: usize, end: usize) -> Option<usize> {
+    let own = set.for_segment(seg.n);
+    let set = own.as_ref().unwrap_or(set);
+    let (a, b) = (start.min(frames.len()), end.min(frames.len()));
+    let g = &frames[a..b];
+    let dual = !g.is_empty() && g.iter().filter(|f| f.layout == Layout::Dual).count() * 2 > g.len();
+    let layout = if dual { Layout::Dual } else { Layout::Full };
+    let score = |k: usize| g.iter().map(|f| f.sims.get(k).copied().unwrap_or(0.0)).sum::<f32>();
+    let usable: Vec<usize> = (0..set.stills.len()).filter(|&k| !set.is_off(k)).collect();
+    let same: Vec<usize> = usable.iter().copied().filter(|&k| set.stills[k].layout == layout).collect();
+    let pool = if same.is_empty() { usable } else { same };
+    pool.into_iter().max_by(|x, y| score(*x).total_cmp(&score(*y)))
+}
+
+/// 手動指定的時段一定遮：跟原本的遮罩重疊的部分讓給手動的（原本的切掉重疊那截，前後剩下的照留）
+pub fn apply_manual(masks: &mut Vec<MaskSeg>, start: usize, end: usize, still: usize, layout: Layout) {
+    if end <= start {
+        return;
+    }
+    let mut out = Vec::new();
+    for m in masks.drain(..) {
+        if m.end <= start || m.start >= end {
+            out.push(m);
+            continue;
+        }
+        if m.start < start {
+            out.push(MaskSeg { end: start, ..m.clone() });
+        }
+        if m.end > end {
+            out.push(MaskSeg { start: end, ..m.clone() });
+        }
+    }
+    out.push(MaskSeg { start, end, layout, still, by_label: false, iou: 0.0, ai: false, note: Some(MANUAL_NOTE) });
+    out.sort_by_key(|m| m.start);
+    *masks = out;
+}
+
 /// AI 說「同一個來源」：空檔 → 把前後兩段遮罩接成一段；灰色地帶 → 補一段遮罩（用參考靜圖裡同版型、畫面最像的那張）
 pub fn apply_ai(frames: &[FrameInfo], masks: &mut Vec<MaskSeg>, c: &AiCandidate) {
     match c.kind {
@@ -754,7 +797,9 @@ pub fn report_segments(segs: &[(Segment, Vec<MaskSeg>)], set: &StillSet, rotate_
             used.sort_unstable();
             used.dedup();
             let rotate = if used.len() > 1 { format!(" ｜ 輪播 {} 張、換 {} 次", used.len(), turns.len() - 1) } else { String::new() };
-            let mut why = if m.ai && m.iou == 0.0 && m.by_label && m.note.is_none() {
+            let mut why = if m.note == Some(MANUAL_NOTE) {
+                String::new()
+            } else if m.ai && m.iou == 0.0 && m.by_label && m.note.is_none() {
                 "AI 判斷（來源字相同）".to_string()
             } else {
                 format!(
@@ -765,7 +810,9 @@ pub fn report_segments(segs: &[(Segment, Vec<MaskSeg>)], set: &StillSet, rotate_
                 )
             };
             if let Some(n) = m.note {
-                why.push('＋');
+                if !why.is_empty() {
+                    why.push('＋');
+                }
                 why.push_str(n);
             }
             r.push_str(&format!("    遮 {} – {} ｜ {} ｜ {} ｜ {}{rotate}\n", tc(secs(m.start)), tc(secs(m.end)), m.layout.zh(), why, set.stills[m.still].name));
@@ -1414,6 +1461,40 @@ mod tests {
         let c = ai_candidates(&frames, &set, &seg, &late);
         let lim = (SCENE_MAX_SECS * FPS) as usize;
         assert!(c.iter().any(|c| c.kind == AiKind::Scene && (c.start, c.end) == (70 * fps, 70 * fps + lim)), "{c:?}");
+    }
+
+    /// 手動遮罩：一定遮，重疊的原本遮罩切掉重疊那截；沒指定靜圖就挑這段平均最像的
+    #[test]
+    fn manual_mask_overrides_and_picks_still() {
+        let fps = FPS as usize;
+        let mut masks = vec![mask(10, 20, Layout::Full, 0), mask(30, 40, Layout::Full, 0)];
+        apply_manual(&mut masks, 15 * fps, 35 * fps, 0, Layout::Dual);
+        let got: Vec<(usize, usize, Option<&str>)> = masks.iter().map(|m| (m.start / fps, m.end / fps, m.note)).collect();
+        assert_eq!(got, vec![(10, 15, None), (15, 35, Some(MANUAL_NOTE)), (35, 40, None)]);
+        assert_eq!(masks[1].layout, Layout::Dual);
+        // 整段蓋在一段遮罩裡面 → 那段拆成前後兩截
+        let mut inside = vec![mask(10, 40, Layout::Full, 0)];
+        apply_manual(&mut inside, 20 * fps, 25 * fps, 0, Layout::Full);
+        assert_eq!(inside.iter().map(|m| (m.start / fps, m.end / fps)).collect::<Vec<_>>(), vec![(10, 20), (20, 25), (25, 40)]);
+
+        let mut set = one_still_set();
+        let mut s2 = set.stills[0].clone();
+        s2.name = "b.jpg".into();
+        s2.template = None;
+        set.stills.push(s2);
+        let mut frames: Vec<FrameInfo> = (0..60 * fps)
+            .map(|_| {
+                let mut f = frame(true);
+                f.sims = vec![0.2, 0.1];
+                f
+            })
+            .collect();
+        for f in &mut frames[20 * fps..30 * fps] {
+            f.sims = vec![0.1, 0.4];
+        }
+        let seg = Segment { n: 1, pieces: vec![(0, frames.len())], start_ok: true, end_ok: true };
+        assert_eq!(pick_still(&frames, &set, &seg, 20 * fps, 30 * fps), Some(1));
+        assert_eq!(pick_still(&frames, &set, &seg, 0, 10 * fps), Some(0));
     }
 
     /// 11/06 第 1 段 12:47：AI 接上後面一個鏡頭後，再後面那個鏡頭要變成新的題目（呼叫端一輪一輪問到不再變）

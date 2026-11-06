@@ -207,6 +207,7 @@ fn main() {
             autocut::autocut_set_titles,
             autocut::autocut_set_chain,
             autocut::autocut_set_bars,
+            autocut::autocut_set_manual_masks,
             autocut::autocut_reveal,
             autocut::autocut_copy_to_share,
             autocut::stills_list,

@@ -116,6 +116,21 @@ pub struct AutocutConfig {
     /// 每段要壓的 BAR（開始時的設定；之後用 `autocut_set_bars` 改）
     #[serde(default)]
     pub bars: HashMap<usize, Vec<Bar>>,
+    /// 每段手動指定要遮的時段（開始時的設定；之後用 `autocut_set_manual_masks` 改）
+    #[serde(default)]
+    pub manual_masks: HashMap<usize, Vec<ManualMask>>,
+}
+
+/// 手動遮罩：自動判斷漏掉的地方，指定時段一定遮（11/06 第 1 段 16:01–16:10 歌劇的其他鏡頭，
+/// 跟靜圖不夠像、來源字是一行的「翻攝 Youtube」、離其他歌劇遮罩太遠，AI 也問不到）
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ManualMask {
+    /// 時段（成品的段內秒數）
+    #[serde(default)]
+    pub ranges: Vec<(f64, f64)>,
+    /// 用哪張靜圖（靜圖資料夾裡的完整路徑）；空的＝挑這段時間畫面最像的
+    #[serde(default)]
+    pub still: String,
 }
 
 /// 壓 BAR：舊標題出現在標題條的時段，整張蓋上新的 BAR 圖
@@ -204,6 +219,8 @@ pub struct SegStatus {
     chain: Option<ChainStatus>,
     /// 每個 BAR 實際要蓋的時段（成品的段內秒數），順序跟設定一樣；還沒能規劃＝空
     bars: Vec<Vec<(f64, f64)>>,
+    /// 每個手動遮罩實際要遮的時段（成品的段內秒數、用的靜圖名稱），順序跟設定一樣；還沒能規劃＝空
+    manual: Vec<Vec<(f64, f64, String)>>,
 }
 
 #[derive(Clone, Serialize, Default)]
@@ -293,6 +310,8 @@ struct PlanSeg {
     job: Option<RenderJob>,
     /// 每個 BAR 要蓋的時段（成品的段內秒數）
     bars: Vec<Vec<(f64, f64)>>,
+    /// 每個手動遮罩要遮的時段（成品的段內秒數、靜圖名稱）
+    manual: Vec<Vec<(f64, f64, String)>>,
 }
 
 #[derive(Clone)]
@@ -325,6 +344,8 @@ struct Shared {
     chains: Mutex<HashMap<usize, Chain>>,
     /// 每段要壓的 BAR（監看中可以改；Watcher 每輪比對，變了就重新規劃）
     bars: Mutex<HashMap<usize, Vec<Bar>>>,
+    /// 每段手動遮罩（跟 BAR 一樣，Watcher 每輪比對，變了就重新規劃）
+    manual_masks: Mutex<HashMap<usize, Vec<ManualMask>>>,
     /// 串接成品的狀態（Done 的指紋＝正片指紋＋串接設定）
     chain_renders: Mutex<HashMap<usize, Render>>,
     all_progress: Mutex<Option<f64>>,
@@ -359,6 +380,7 @@ impl Shared {
                     recorded: p.recorded,
                     masks: p.masks,
                     bars: p.bars.clone(),
+                    manual: p.manual.clone(),
                     ..Default::default()
                 };
                 match renders.get(&p.n) {
@@ -535,6 +557,7 @@ pub fn start(app: AppHandle, state: &AutocutState, config: AutocutConfig) -> Res
     *shared.config.lock().unwrap() = Some(config.clone());
     *shared.chains.lock().unwrap() = config.chains.clone();
     *shared.bars.lock().unwrap() = config.bars.clone();
+    *shared.manual_masks.lock().unwrap() = config.manual_masks.clone();
     if config.batch {
         let p = Path::new(&config.output_dir).join(".autocut").join("batch.log");
         let _ = std::fs::remove_file(&p);
@@ -636,6 +659,19 @@ pub fn autocut_set_bars(app: AppHandle, state: State<'_, AutocutState>, n: usize
         shared.bars.lock().unwrap().remove(&n);
     } else {
         shared.bars.lock().unwrap().insert(n, bars);
+    }
+    shared.publish(&app);
+}
+
+/// 改某段的手動遮罩。跟 BAR 一樣下一輪重新規劃；已經出好的正片會自動重出（開了自動出片）或變「靜圖已更新」
+#[tauri::command]
+pub fn autocut_set_manual_masks(app: AppHandle, state: State<'_, AutocutState>, n: usize, masks: Vec<ManualMask>) {
+    let Some(shared) = state.shared.lock().unwrap().clone().filter(|s| s.running.load(Ordering::SeqCst)) else { return };
+    let masks: Vec<ManualMask> = masks.into_iter().filter(|m| !m.ranges.is_empty()).collect();
+    if masks.is_empty() {
+        shared.manual_masks.lock().unwrap().remove(&n);
+    } else {
+        shared.manual_masks.lock().unwrap().insert(n, masks);
     }
     shared.publish(&app);
 }
@@ -974,6 +1010,8 @@ struct Watcher {
     last_titles: String,
     /// 上次規劃時的壓 BAR 設定
     last_bars: HashMap<usize, Vec<Bar>>,
+    /// 上次規劃時的手動遮罩設定
+    last_manual: HashMap<usize, Vec<ManualMask>>,
     /// 壓 BAR 時段的邊界窗口 (lo, hi, 進場?) → 對準的那一格（要解碼一小段，結果記起來）
     bar_edges: HashMap<(usize, usize, bool), usize>,
     /// AI 補判（沒設金鑰＝None）與判斷過的結果（存在 .autocut\ai.tsv，同一個地方不重複問）
@@ -1021,6 +1059,7 @@ impl Watcher {
             dirty: true,
             last_titles: String::new(),
             last_bars: HashMap::new(),
+            last_manual: HashMap::new(),
             bar_edges: HashMap::new(),
             rerendered: HashSet::new(),
         })
@@ -1075,6 +1114,11 @@ impl Watcher {
         let bars = self.shared.bars.lock().unwrap().clone();
         if bars != self.last_bars {
             self.last_bars = bars;
+            self.dirty = true;
+        }
+        let manual = self.shared.manual_masks.lock().unwrap().clone();
+        if manual != self.last_manual {
+            self.last_manual = manual;
             self.dirty = true;
         }
         let files = self.list_files()?;
@@ -1476,6 +1520,43 @@ impl Watcher {
                 self.shared.stages.lock().unwrap().push(StageInfo { name: format!("AI 補判（問了 {asked} 處）"), started: t_ai.0, secs: t_ai.1.elapsed().as_secs_f64() });
             }
         }
+        // 手動遮罩：最後套上，一定遮（蓋過自動判斷的）
+        let mut manual_out: HashMap<usize, Vec<Vec<(f64, f64, String)>>> = HashMap::new();
+        for (seg, masks) in planned.iter_mut().filter(|(s, _)| s.complete()) {
+            let specs = self.last_manual.get(&seg.n).cloned().unwrap_or_default();
+            let mut per = Vec::new();
+            for spec in &specs {
+                let wanted = self.stills.stills.iter().position(|s| !spec.still.trim().is_empty() && Path::new(&s.path) == Path::new(spec.still.trim()));
+                if !spec.still.trim().is_empty() && wanted.is_none() {
+                    log.push_str(&format!("  ★ 第 {} 段手動遮罩：靜圖資料夾裡找不到 {}，改用畫面最像的
+", seg.n, spec.still));
+                }
+                let ranges: Vec<(usize, usize)> = spec.ranges.iter().filter_map(|&(a, b)| Some((in_frame(&seg.pieces, a)?, in_frame(&seg.pieces, b)?))).filter(|(a, b)| b > a).collect();
+                let mut shown = Vec::new();
+                for (a, b) in clip_to_pieces(&seg.pieces, &ranges) {
+                    let Some(k) = wanted.or_else(|| plan::pick_still(&frames, &self.stills, seg, a, b)) else {
+                        log.push_str(&format!("  ★ 第 {} 段手動遮罩 {}：沒有靜圖可以用，不遮
+", seg.n, tc(out_time(&seg.pieces, a))));
+                        continue;
+                    };
+                    let st = &self.stills.stills[k];
+                    plan::apply_manual(masks, a, b, k, st.layout);
+                    log.push_str(&format!(
+                        "  第 {} 段手動遮罩：成品 {} – {}（側錄 {} – {}）用 {}
+",
+                        seg.n,
+                        tc(out_time(&seg.pieces, a)),
+                        tc(out_time(&seg.pieces, b)),
+                        tc(secs(a)),
+                        tc(secs(b)),
+                        st.name
+                    ));
+                    shown.push((out_time(&seg.pieces, a), out_time(&seg.pieces, b), st.name.clone()));
+                }
+                per.push(shown);
+            }
+            manual_out.insert(seg.n, per);
+        }
 
         // 段落狀態：文稿有的每一段都列出來
         let only = self.cfg.only.clone();
@@ -1487,7 +1568,7 @@ impl Watcher {
         let mut plan_segs = Vec::new();
         for n in ns {
             let Some((seg, masks)) = planned.iter().find(|(s, _)| s.n == n) else {
-                plan_segs.push(PlanSeg { n, state: "waiting", rec_start: None, rec_end: None, recorded: 0.0, masks: 0, job: None, bars: Vec::new() });
+                plan_segs.push(PlanSeg { n, state: "waiting", rec_start: None, rec_end: None, recorded: 0.0, masks: 0, job: None, bars: Vec::new(), manual: Vec::new() });
                 continue;
             };
             let state = if !seg.start_ok {
@@ -1509,6 +1590,7 @@ impl Watcher {
                 masks: masks.len(),
                 job,
                 bars,
+                manual: manual_out.remove(&n).unwrap_or_default(),
             });
         }
         // 送去出片：完整、還沒出過的段落。之前出過（工具重開）且判斷一樣就直接算完成。

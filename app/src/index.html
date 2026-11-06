@@ -389,7 +389,7 @@
       </section>
 
       <details id="acReplace" class="ac-section ac-details">
-        <summary class="ac-section-head"><h3>替換畫面</h3><span id="acReplaceNote" class="ac-note">遮蓋用的靜圖、壓 BAR</span></summary>
+        <summary class="ac-section-head"><h3>替換畫面</h3><span id="acReplaceNote" class="ac-note">遮蓋用的靜圖、壓 BAR、手動遮罩</span></summary>
         <div class="ac-sub">
           <div class="ac-sub-head">
             <h4>替換畫面</h4>
@@ -423,6 +423,13 @@
             <p>舊標題出現在標題條的時段，整張蓋上新的 BAR 圖（1920×1080 透明 PNG）。時段用標題條 OCR 自動找並對準到格，對不到可以手動填。改了之後已出好的正片會變「靜圖已更新」，按「重新出片」就會套上（串接也會跟著重串）。</p>
           </div>
           <div id="acBars" class="card ac-bars"></div>
+        </div>
+        <div class="ac-sub">
+          <div class="ac-sub-head">
+            <h4>手動遮罩</h4>
+            <p>自動判斷漏掉的地方（同事回報沒遮到），把時間貼進來就一定遮，蓋過自動判斷的。時段是成品的段內時間，剪輯時間碼「00;16;01;20-00;16;10;25」可以直接貼。靜圖不選＝自動挑這段畫面最像的那張。改了之後已出好的正片會重新出片（沒開自動出片的話按「重新出片」）。</p>
+          </div>
+          <div id="acMasks" class="card ac-bars"></div>
         </div>
       </details>
 
@@ -728,6 +735,7 @@
   <script src="video.js"></script>
   <script src="autocut.js"></script>
   <script src="bars.js"></script>
+  <script src="masks.js"></script>
   <script src="stills.js"></script>
   <script src="youtube.js"></script>
 </body>

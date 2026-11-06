@@ -195,6 +195,7 @@ $("acStartBtn").addEventListener("click", async () => {
           [1, 2, 3, 4, 5, 6].map((n) => [n, acChainPayload(n)]).filter(([, c]) => c),
         ),
         bars: acBarsConfig(),
+        manual_masks: acMasksConfig(),
       },
     });
     $("acLog").textContent = "";
