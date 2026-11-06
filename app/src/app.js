@@ -652,18 +652,26 @@ $("syncWriteBtn").addEventListener("click", async () => {
   if (await syncPush({ create: true })) syncRunPendingEdits();
 });
 
-// 開始編輯前（點進任何一段）看一次別人有沒有改過，自己沒在改就先載入，避免之後衝突
-let lastFocusCheck = 0;
-segmentsEl.addEventListener("focusin", async () => {
+// 看一次別人有沒有改過，自己沒在改就載入（避免之後衝突，也讓另一台改的馬上看得到）。
+// 時機：點進任何一段、切回這個視窗、在工具裡任何地方按一下（一直停在工具上時視窗不會再收到 focus）、
+// 視窗從最小化還原。最多每 5 秒看一次修改時間，只看時間不讀檔，網路磁碟也不卡
+let lastRemoteCheck = 0;
+async function syncCheckRemote() {
   if (!syncLoads() || !sync.path || sync.busy || sync.conflict || sync.dirty || syncPaused()) return;
-  if (Date.now() - lastFocusCheck < 5000) return;
-  lastFocusCheck = Date.now();
+  if (Date.now() - lastRemoteCheck < 5000) return;
+  lastRemoteCheck = Date.now();
   try {
     const m = await invoke("sync_stat", { path: sync.path });
     if ((m ?? null) !== sync.mtime) await syncPull();
   } catch (e) {
     syncFailed(e, "read");
   }
+}
+segmentsEl.addEventListener("focusin", syncCheckRemote);
+window.addEventListener("focus", syncCheckRemote);
+document.addEventListener("pointerdown", syncCheckRemote, true);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") syncCheckRemote();
 });
 
 /** 開啟時：開了自動載入就換成今天的檔案（前一天還沒寫回的先寫回）。 */
