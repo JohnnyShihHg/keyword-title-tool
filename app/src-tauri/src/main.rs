@@ -212,6 +212,7 @@ fn main() {
             autocut::stills_list,
             autocut::stills_add,
             autocut::stills_remove,
+            autocut::clear_folder,
             autocut::stills_find,
             youtube::yt_account,
             youtube::yt_login,

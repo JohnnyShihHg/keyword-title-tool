@@ -56,11 +56,26 @@ document.querySelectorAll("[data-ac-pick]").forEach((btn) => {
     persistSettings();
   });
 });
+// 清空：資料夾裡的東西全部移到垃圾桶（資料夾本身和欄位保留）。側錄資料夾、網路磁碟、監看中由 Rust 端擋掉
 document.querySelectorAll("[data-ac-clear]").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    settings[btn.dataset.acClear] = "";
-    acFillDirs();
-    persistSettings();
+  btn.addEventListener("click", async () => {
+    const dir = settings[btn.dataset.acClear];
+    const what = btn.dataset.acClear === "autocut_stills_dir" ? "靜圖資料夾" : "成品資料夾";
+    if (!dir) return acMessage(`還沒選${what}`);
+    const ok = await dialog.ask(`要把${what}「${dir}」裡的檔案和子資料夾全部移到垃圾桶嗎？\n資料夾本身會留著，放錯可以去垃圾桶還原。`, {
+      title: `清空${what}`,
+      kind: "warning",
+      okLabel: "移到垃圾桶",
+      cancelLabel: "取消",
+    });
+    if (!ok) return;
+    try {
+      const n = await invoke("clear_folder", { dir, watchDir: settings.autocut_watch_dir || "" });
+      acMessage(n ? `已把${what}裡的 ${n} 項移到垃圾桶` : `${what}本來就是空的`);
+      if (btn.dataset.acClear === "autocut_stills_dir") window.acLoadStills?.();
+    } catch (e) {
+      acMessage(`沒有清空：${e}`);
+    }
   });
 });
 $("acEndCutoff").addEventListener("change", () => {

@@ -719,7 +719,41 @@ pub fn stills_list(dir: String) -> Result<BTreeMap<usize, Vec<String>>, String> 
     Ok(out)
 }
 
-/// 把圖複製進第 n 段（0＝每段都比）；在靜圖資料夾裡的就是搬過去。同名的加 (2)、(3)。回傳新路徑
+/// 網路上的路徑（`\\主機\…`、對應成磁碟機代號的網路磁碟）：Windows 的垃圾桶管不到，丟了就救不回來；
+/// 也是別人共用的檔案，加入替換畫面時不搬走
+fn on_network(p: &Path) -> bool {
+    let s = p.to_string_lossy();
+    // `\\?\C:\…` 是本機路徑的長路徑寫法，`\\?\UNC\…` 才是網路
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return rest.starts_with("UNC\\");
+    }
+    if s.starts_with(r"\\") {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use windows::core::HSTRING;
+        use windows::Win32::Storage::FileSystem::GetDriveTypeW;
+        const DRIVE_REMOTE: u32 = 4;
+        let mut c = s.chars();
+        if let (Some(d), Some(':')) = (c.next(), c.next()) {
+            return unsafe { GetDriveTypeW(&HSTRING::from(format!("{d}:\\"))) } == DRIVE_REMOTE;
+        }
+    }
+    false
+}
+
+/// 搬檔：同一顆磁碟直接改名；跨磁碟（下載在 C:、靜圖資料夾在 D:）就複製完再把原檔刪掉
+fn move_file(src: &Path, dst: &Path) -> Result<(), String> {
+    if std::fs::rename(src, dst).is_ok() {
+        return Ok(());
+    }
+    std::fs::copy(src, dst).map_err(|e| format!("搬不動 {}：{e}", src.display()))?;
+    std::fs::remove_file(src).map_err(|e| format!("已複製到 {}，但原檔刪不掉：{e}", dst.display()))
+}
+
+/// 把圖搬進第 n 段（0＝每段都比），原本的位置不留（下載資料夾不會越積越多）；
+/// 網路上的（共用資料夾裡別人放的）用複製。同名的加 (2)、(3)。回傳新路徑
 #[tauri::command]
 pub fn stills_add(dir: String, n: usize, paths: Vec<String>) -> Result<Vec<String>, String> {
     let root = Path::new(&dir);
@@ -740,9 +774,9 @@ pub fn stills_add(dir: String, n: usize, paths: Vec<String>) -> Result<Vec<Strin
             dst = to.join(format!("{stem} ({k}).{ext}"));
             k += 1;
         }
-        let moving = src.parent().is_some_and(|p| inside.iter().any(|d| d == p));
-        if moving {
-            std::fs::rename(&src, &dst).map_err(|e| format!("搬不動 {}：{e}", src.display()))?;
+        let inside_stills = src.parent().is_some_and(|p| inside.iter().any(|d| d == p));
+        if inside_stills || !on_network(&src) {
+            move_file(&src, &dst)?;
         } else {
             std::fs::copy(&src, &dst).map_err(|e| format!("複製不了 {}：{e}", src.display()))?;
         }
@@ -765,6 +799,36 @@ pub fn stills_remove(dir: String, path: String) -> Result<(), String> {
         k += 1;
     }
     std::fs::rename(&src, &dst).map_err(|e| format!("移不走 {}：{e}", src.display()))
+}
+
+/// 清空資料夾（靜圖、成品）：裡面的檔案、子資料夾全部移到垃圾桶，資料夾本身留著。回傳移走幾項。
+/// 不清的情況：監看中、跟側錄同一個資料夾、裡面有側錄檔、網路磁碟（沒有垃圾桶，刪了救不回來）
+#[tauri::command]
+pub fn clear_folder(state: State<'_, AutocutState>, dir: String, watch_dir: String) -> Result<usize, String> {
+    if state.shared.lock().unwrap().as_ref().is_some_and(|s| s.running.load(Ordering::SeqCst)) {
+        return Err("監看中不能清空，請先停止".into());
+    }
+    let dir = dir.trim();
+    if dir.is_empty() {
+        return Err("還沒選資料夾".into());
+    }
+    let path = Path::new(dir);
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    if !watch_dir.trim().is_empty() && canon(path) == canon(Path::new(watch_dir.trim())) {
+        return Err("這是側錄資料夾，不清空".into());
+    }
+    if on_network(path) {
+        return Err("這是網路磁碟，沒有垃圾桶（刪了救不回來），請自己到資料夾裡清".into());
+    }
+    let entries: Vec<PathBuf> = std::fs::read_dir(path).map_err(|e| format!("讀不到 {dir}：{e}"))?.flatten().map(|e| e.path()).collect();
+    if let Some(rec) = entries.iter().find(|p| p.file_name().is_some_and(|n| cache::name_timestamp(&n.to_string_lossy()).is_some())) {
+        return Err(format!("裡面有側錄檔（{}），不清空", rec.file_name().unwrap_or_default().to_string_lossy()));
+    }
+    if entries.is_empty() {
+        return Ok(0);
+    }
+    trash::delete_all(&entries).map_err(|e| format!("移到垃圾桶失敗：{e}"))?;
+    Ok(entries.len())
 }
 
 /// 資料夾裡檔名（去掉副檔名、空白）以 `prefix` 開頭的圖；`range` 有給就只要後面接的編號在範圍內的
@@ -2752,6 +2816,28 @@ fn concat_all(ffmpeg: &Path, ffprobe: &Path, segs: &[(usize, PathBuf)], out: &Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_paths() {
+        assert!(on_network(Path::new(r"\\10.3.20.33\yt上傳\1028關鍵\替換畫面")));
+        assert!(on_network(Path::new(r"\\?\UNC\server\share")));
+        assert!(!on_network(Path::new(r"\\?\C:\Users\user\Downloads")));
+        assert!(!on_network(Path::new("/tmp/stills")));
+    }
+
+    #[test]
+    fn adding_stills_moves_local_files() {
+        let tmp = std::env::temp_dir().join(format!("ktt-move-{}", std::process::id()));
+        let (dl, stills) = (tmp.join("下載"), tmp.join("靜圖"));
+        std::fs::create_dir_all(&dl).unwrap();
+        std::fs::create_dir_all(&stills).unwrap();
+        std::fs::write(dl.join("靜幀導出01.jpg"), b"x").unwrap();
+        let out = stills_add(stills.display().to_string(), 3, vec![dl.join("靜幀導出01.jpg").display().to_string()]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(Path::new(&out[0]).is_file());
+        assert!(!dl.join("靜幀導出01.jpg").exists(), "下載資料夾不留原檔");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn output_names_are_not_recordings() {
