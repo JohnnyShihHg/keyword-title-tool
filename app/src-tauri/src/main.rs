@@ -217,6 +217,7 @@ fn main() {
             youtube::yt_login,
             youtube::yt_logout,
             youtube::yt_meta,
+            youtube::yt_full_meta,
             youtube::yt_uploaded,
             youtube::yt_cancel,
             youtube::yt_open,

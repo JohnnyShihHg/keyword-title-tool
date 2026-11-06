@@ -86,10 +86,12 @@ $("acCopyShare").addEventListener("change", () => {
 });
 
 // ───────── 成品複製到當天的共用資料夾（{日期}-{段}.mp4，給人檢查） ─────────
-// 每個成品這次開程式只複製一次；目的地已有同名檔就不覆蓋（Rust 端判斷）
+// 每個成品這次開程式只複製一次；目的地已有同名檔就不覆蓋（Rust 端判斷）。
+// 例外：這次開程式裡剛出好（含按「重新出片」）的成品，要覆蓋共用資料夾裡的舊檔
 
 let acShare = {}; // 段號 → { state, progress, dest, error }
 const acShareTried = new Set();
+const acShareFresh = new Set(); // 剛出好的成品路徑：複製時覆蓋同名舊檔
 
 /** 這段要複製的成品：有串接就等串接完成，沒有串接用正片 */
 function acShareSource(s) {
@@ -105,8 +107,9 @@ function acCopyToShare(st) {
     const src = acShareSource(s);
     if (!src || acShareTried.has(src)) continue;
     acShareTried.add(src);
+    const overwrite = acShareFresh.delete(src);
     acShare[s.n] = { state: "copying", progress: 0 };
-    invoke("autocut_copy_to_share", { settings, date, n: s.n, src }).catch((e) => {
+    invoke("autocut_copy_to_share", { settings, date, n: s.n, src, overwrite }).catch((e) => {
       acShare[s.n] = { state: "failed", error: String(e) };
       acShow(acStatus);
     });
@@ -339,7 +342,39 @@ listen("autocut-log", (e) => {
 listen("autocut-done", (e) => {
   const { n, path, chain } = e.payload;
   showNotice({ title: chain ? `第 ${n} 段串接完成` : n ? `第 ${n} 段出片完成` : "全集合成完成", message: path });
+  // 重新出片後檔名一樣：讓它再複製一次，而且蓋掉共用資料夾的舊檔
+  if (n) {
+    acShareTried.delete(path);
+    acShareFresh.add(path);
+    if (acStatus) acCopyToShare(acStatus);
+  }
+  if (!n && e.payload.chapters?.length) acWriteChapters(e.payload.chapters);
 });
+
+/** 全集合成好：各段的章節時間（閃白結束、該段完全出現的那一秒，跟影片頁「填入章節時間」一樣）回寫文稿。
+ *  先讀共用資料夾最新的文稿再改（docAutoEdit），寫完全集區有時間了，全集自動上傳才會接著跑 */
+async function acWriteChapters(chapters) {
+  const filled = [];
+  const ok = await docAutoEdit("全集章節時間", () => {
+    let any = false;
+    filled.length = 0;
+    for (const [n, sec] of chapters) {
+      const input = segments[n - 1]?.time;
+      if (!input) continue;
+      const t = fmtTime(Math.ceil(sec - 1e-6));
+      filled.push(`第${n}段 ${t}`);
+      if (input.value.trim() !== t) {
+        input.value = t;
+        any = true;
+      }
+    }
+    return any;
+  });
+  if (ok) {
+    acMessage(`全集章節時間已寫回文稿：${filled.join("、")}`);
+    showNotice({ title: "全集章節時間已寫回文稿", message: filled.join("、") });
+  }
+}
 
 // ───────── 每段串接（正片 →（閃白）→ 影片（可以好幾支）→ promo） ─────────
 

@@ -497,6 +497,77 @@ async function syncPush({ force = false, create = false } = {}) {
   }
 }
 
+// --- 工具自己改文稿（回寫 YT 連結、全集章節時間）、自動上傳前：先讀共用資料夾最新的版本 ---
+// 以前是直接改畫面再寫回：工具裡的文稿如果不是最新的（別台電腦改過、這台還沒讀），寫回時就會跳衝突，
+// 選「用我的蓋過去」就把別人的修改蓋掉了。現在一律「先讀最新 → 改 → 馬上寫回」。
+
+const syncSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let syncPendingEdits = []; // 衝突沒處理完，先擱著的自動修改（處理完衝突再補做）
+
+/**
+ * 把共用資料夾最新的版本讀進工具。回傳：
+ * "ok"＝畫面上已經是最新的（或沒開同步、還沒有 txt）；
+ * "conflict"＝這台也有還沒寫回的修改、對方也改過（已跳出衝突視窗，不要接著改）；
+ * "error"＝讀不到共用資料夾（狀態列已顯示原因）。
+ */
+async function syncFresh() {
+  if (!syncOn() || !sync.path || syncPaused()) return "ok";
+  for (let i = 0; sync.busy && i < 150; i++) await syncSleep(100);
+  if (sync.busy) return "error";
+  if (sync.conflict) return "conflict";
+  sync.busy = true;
+  try {
+    const f = await invoke("sync_read", { path: sync.path });
+    sync.folder = f.folder;
+    if (!f.exists) return "ok"; // 還沒有 txt：沒有別人的版本會被蓋掉
+    if (f.text === sync.text) {
+      sync.mtime = f.mtime;
+      return "ok";
+    }
+    const mine = (await invoke("render_document", { doc: collect() })).text.replace(/\r?\n/g, "\r\n");
+    if (f.text === mine) {
+      Object.assign(sync, { text: f.text, mtime: f.mtime });
+      return "ok";
+    }
+    if (!sync.dirty || !hasContent()) {
+      await loadSynced(f);
+      return "ok";
+    }
+    showConflict(f);
+    return "conflict";
+  } catch (e) {
+    syncFailed(e, "read");
+    return "error";
+  } finally {
+    sync.busy = false;
+  }
+}
+
+/**
+ * 工具自動改文稿：先讀最新的 → apply()（回傳 false＝沒改東西）→ 有開自動寫入就馬上寫回。
+ * 衝突時先不改，等使用者處理完衝突再補做；讀不到共用資料夾時照樣改（之後寫回會比對內容，不會蓋掉別人的）。
+ * 回傳是否已經改進畫面。
+ */
+async function docAutoEdit(label, apply) {
+  const state = await syncFresh();
+  if (state === "conflict") {
+    syncPendingEdits.push({ label, apply });
+    setSyncStatus(`⚠ 和共用資料夾的版本不一樣，${label}等衝突處理完再寫入`, "bad");
+    return false;
+  }
+  if ((await apply()) === false) return false;
+  changed();
+  if (syncWrites() && sync.path && sync.text !== null && !sync.conflict && !syncPaused()) await syncPush();
+  return true;
+}
+
+/** 衝突處理完（載入對方的或用自己的蓋過去）：補做先擱著的自動修改 */
+async function syncRunPendingEdits() {
+  const edits = syncPendingEdits;
+  syncPendingEdits = [];
+  for (const e of edits) await docAutoEdit(e.label, e.apply);
+}
+
 /** 「存成 txt」剛好存到共用資料夾的今天的檔案：就當作建立了，開始同步。 */
 async function syncAfterSave(savedPath) {
   const norm = (p) => p.replace(/\\/g, "/").toLowerCase();
@@ -536,11 +607,13 @@ function closeConflict() {
 $("conflictTheirsBtn").addEventListener("click", async () => {
   closeConflict();
   await loadSynced(conflictFile);
+  syncRunPendingEdits();
 });
 $("conflictMineBtn").addEventListener("click", async () => {
   closeConflict();
   sync.conflict = false;
   await syncPush({ force: true });
+  syncRunPendingEdits();
 });
 $("conflictLaterBtn").addEventListener("click", () => {
   // 保持暫停寫入；按「載入」或「寫入」再處理
@@ -565,6 +638,7 @@ $("syncLoadBtn").addEventListener("click", async () => {
       if (!ok) return setSyncStatus(syncPaused() ? "⏸ 已清空畫面，自動同步暫停（按「載入」恢復）" : "已取消載入");
     }
     await loadSynced(f);
+    setTimeout(syncRunPendingEdits, 0); // 等這裡的 busy 解開再補做
   } catch (e) {
     syncFailed(e, "read");
   } finally {
@@ -575,7 +649,7 @@ $("syncLoadBtn").addEventListener("click", async () => {
 $("syncWriteBtn").addEventListener("click", async () => {
   if (syncPaused() || !hasContent()) return;
   sync.conflict = false;
-  await syncPush({ create: true });
+  if (await syncPush({ create: true })) syncRunPendingEdits();
 });
 
 // 開始編輯前（點進任何一段）看一次別人有沒有改過，自己沒在改就先載入，避免之後衝突

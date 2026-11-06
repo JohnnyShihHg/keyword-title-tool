@@ -97,10 +97,26 @@ $("ytLogoutBtn").addEventListener("click", async () => {
 function ytFileFor(n) {
   const picked = ytLoad("ytFiles")[n];
   if (picked) return picked;
+  if (n === 0) return ytFullOutput(); // 全集：自動切段合成的全集.mp4
   const s = acStatus?.segments?.find((x) => x.n === n);
   if (s?.chain?.output && s.chain.state === "done") return s.chain.output;
   if (!s?.chain && s?.output && s.state === "done") return s.output;
   return "";
+}
+
+/** 自動切段合成好的全集（合成中、還沒合成＝""） */
+function ytFullOutput() {
+  return acStatus?.all && acStatus.all_progress == null ? acStatus.all : "";
+}
+
+/** 全集的標題（全集只帶說明、預設播放清單、預設標記，其他到 Studio 再改） */
+function ytFullTitle() {
+  return `關鍵時刻${dateInput.value.trim()}全集`;
+}
+
+/** 全集區的章節時間還有沒填的（--:--:--） */
+function ytFullNoTimes(m) {
+  return /--[:：]--[:：]--/.test(m?.description || "");
 }
 
 /** 縮圖：自己選的 ＞ 共用資料夾當天的 N.jpg */
@@ -123,10 +139,17 @@ function ytRequiredNames() {
     .map((s) => s.replaceAll("{日期}", date));
 }
 
-/** 用名稱找頻道上的播放清單（忽略空白） */
+/** 比對清單名稱用：全形半形統一、去掉所有空白（含全形空白、零寬字元）、不分大小寫 */
+function ytNorm(s) {
+  return String(s || "")
+    .normalize("NFKC")
+    .replace(/[\s\u200b-\u200d\u2060\ufeff]/g, "")
+    .toLowerCase();
+}
+
+/** 用名稱找頻道上的播放清單（忽略空白、全形半形） */
 function ytFindPlaylist(name) {
-  const norm = (s) => s.replace(/\s/g, "");
-  return ytPlaylists.find((p) => norm(p.title) === norm(name));
+  return ytPlaylists.find((p) => ytNorm(p.title) === ytNorm(name));
 }
 
 /** 必選清單：已經建好的 ID、還沒建的名稱 */
@@ -163,6 +186,7 @@ async function ytFindThumbs() {
   const dir = txt.replace(/[\\/][^\\/]*$/, "");
   ytThumbDir = dir;
   for (const m of ytMeta) {
+    if (m.number === 0) continue; // 全集不設縮圖
     for (const ext of ["jpg", "png"]) {
       const p = `${dir}\\${m.number}.${ext}`;
       if (await invoke("path_exists", { path: p }).catch(() => false)) {
@@ -175,7 +199,11 @@ async function ytFindThumbs() {
 
 async function ytRefreshMeta() {
   try {
-    ytMeta = await invoke("yt_meta", { text: await acCurrentTitles() });
+    const text = await acCurrentTitles();
+    ytMeta = await invoke("yt_meta", { text });
+    // 全集（段號 0）：說明＝文稿最後的全集區（章節時間點），標記只用設定頁的預設標記
+    const full = ytMeta.length ? await invoke("yt_full_meta", { text }) : null;
+    if (full) ytMeta.push({ ...full, title: ytFullTitle() });
   } catch {
     ytMeta = [];
   }
@@ -212,10 +240,10 @@ function ytPlaylistPicker(getIds, setIds, emptyText) {
   };
   const render = () => {
     const ids = getIds();
-    const q = search.value.trim().toLowerCase();
+    const q = ytNorm(search.value);
     // 已選的排前面，方便看
     const required = ytRequired().ids;
-    const items = ytPlaylists.filter((p) => !q || p.title.toLowerCase().includes(q)).sort((a, b) => ids.includes(b.id) - ids.includes(a.id));
+    const items = ytPlaylists.filter((p) => !q || ytNorm(p.title).includes(q)).sort((a, b) => ids.includes(b.id) - ids.includes(a.id));
     list.replaceChildren(
       ...items.map((p) => {
         const label = document.createElement("label");
@@ -266,6 +294,19 @@ function ytPlaylistPicker(getIds, setIds, emptyText) {
     search.focus();
   };
   search.oninput = render;
+  // 從別的地方複製來的名稱：自己接手貼上（只取第一行、去頭尾空白），貼完馬上篩選
+  search.addEventListener("paste", (e) => {
+    const text = e.clipboardData?.getData("text/plain");
+    if (text == null) return; // 讀不到剪貼簿就交給瀏覽器預設的貼上
+    e.preventDefault();
+    const line = text.split(/\r?\n/).map((l) => l.trim()).find(Boolean) || "";
+    const { selectionStart: a = search.value.length, selectionEnd: b = search.value.length } = search;
+    search.value = search.value.slice(0, a) + line + search.value.slice(b);
+    search.setSelectionRange(a + line.length, a + line.length);
+    render();
+  });
+  // 右鍵也能貼：浮動視窗裡的右鍵不要被當成點到外面
+  search.addEventListener("mousedown", (e) => e.stopPropagation());
   search.onkeydown = (e) => e.key === "Escape" && pop.classList.add("hidden");
   pop.querySelector(".yt-pl-clear").onclick = () => {
     setIds([]);
@@ -332,7 +373,7 @@ function ytBuild() {
       ...ytMeta.map((m) => {
         const n = m.number;
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td>第 ${n} 段</td><td class="yt-main"><div class="yt-title"></div><div class="yt-count"></div></td>
+        tr.innerHTML = `<td>${ytName(n)}</td><td class="yt-main"><div class="yt-title"></div><div class="yt-count"></div></td>
           <td class="yt-thumb"></td><td class="yt-pl"></td><td class="yt-file"></td><td class="yt-status"></td><td class="ac-actions"></td>`;
         const el = {
           tr,
@@ -480,9 +521,18 @@ async function ytUpdate() {
 
 // ───────── 文稿的 YT 連結（檔頭「串N」）：讀出影片 ID、上傳完回寫短網址 ─────────
 
-/** 文稿頁第 n 段的 YT 連結欄（app.js 的 segments） */
+/** 文稿頁第 n 段的 YT 連結欄（app.js 的 segments）；0＝檔頭「全集」的連結 */
+function ytLinkInput(n) {
+  return n === 0 ? fullLinkInput : segments[n - 1]?.link;
+}
+
 function ytDocLink(n) {
-  return segments[n - 1]?.link.value.trim() || "";
+  return ytLinkInput(n)?.value.trim() || "";
+}
+
+/** 畫面上顯示的段名 */
+function ytName(n) {
+  return n === 0 ? "全集" : `第 ${n} 段`;
 }
 
 /** youtu.be/ID、youtube.com/watch?v=ID、/shorts/ID、/live/ID → ID；不是 YouTube 網址回傳 "" */
@@ -494,25 +544,28 @@ function ytLinkId(url) {
   return m ? m[1] : "";
 }
 
-/** 上傳完把短網址填進文稿這段的 YT 連結；原本有別的連結就先問 */
+/** 上傳完把短網址填進文稿這段的 YT 連結；原本有別的連結就先問。
+ *  先讀共用資料夾最新的文稿再改（docAutoEdit），不會用工具裡舊的文稿蓋掉別人的修改 */
 async function ytWriteLink(n, videoId) {
-  const input = segments[n - 1]?.link;
-  if (!input) return;
   const url = `https://youtu.be/${videoId}`;
-  const old = input.value.trim();
-  if (ytLinkId(old) === videoId) return;
-  if (old) {
-    const ok = await dialog.ask(`第 ${n} 段的 YT 連結原本是\n${old}\n\n要換成剛上傳的\n${url}\n嗎？`, {
-      title: "更新文稿的 YT 連結",
-      kind: "warning",
-      okLabel: "換成新的",
-      cancelLabel: "保留原本的",
-    });
-    if (!ok) return;
-  }
-  input.value = url;
-  changed(); // 跟手動貼上一樣：存草稿、重新排版，有開同步就寫回共用資料夾
-  ytMessage(`第 ${n} 段的連結已寫進文稿：${url}`);
+  const ok = await docAutoEdit(`${ytName(n)}的 YT 連結`, async () => {
+    const input = ytLinkInput(n);
+    if (!input) return false;
+    const old = input.value.trim();
+    if (ytLinkId(old) === videoId) return false;
+    if (old) {
+      const yes = await dialog.ask(`${ytName(n)}的 YT 連結原本是\n${old}\n\n要換成剛上傳的\n${url}\n嗎？`, {
+        title: "更新文稿的 YT 連結",
+        kind: "warning",
+        okLabel: "換成新的",
+        cancelLabel: "保留原本的",
+      });
+      if (!yes) return false;
+    }
+    input.value = url;
+    return true;
+  });
+  if (ok) ytMessage(`${ytName(n)}的連結已寫進文稿：${url}`);
 }
 
 // ───────── YouTube 上的實際狀態（公開／私人／不公開／排程／已刪除） ─────────
@@ -565,15 +618,31 @@ async function ytPickThumb(n) {
 
 // ───────── 上傳 ─────────
 
-async function ytUpload(m, path, again) {
+async function ytUpload(m, path, again, auto = false) {
+  const n = m.number;
   if (again) {
-    const ok = await dialog.ask(`第 ${m.number} 段已經上傳過，要再傳一支新的私人影片嗎？`, {
+    const ok = await dialog.ask(`${ytName(n)}已經上傳過，要再傳一支新的私人影片嗎？`, {
       title: "再傳一次",
       kind: "warning",
       okLabel: "再傳",
       cancelLabel: "取消",
     });
     if (!ok) return;
+  }
+  // 上傳前先讀共用資料夾最新的文稿：標題、說明、後臺關鍵字、YT 連結都用最新的
+  const fresh = await syncFresh();
+  if (fresh === "conflict") {
+    ytMessage(`${ytName(n)}先不上傳：文稿和共用資料夾的版本不一樣，處理完衝突再傳`);
+    if (auto) ytAutoTried.delete(path); // 處理完衝突後自動上傳會再試
+    return;
+  }
+  await ytRefreshMeta();
+  m = ytMeta.find((x) => x.number === n);
+  if (!m) return ytMessage(`最新的文稿裡沒有${ytName(n)}的標題，沒有上傳`);
+  if (auto && ytLinkId(ytDocLink(n))) return ytMessage(`最新的文稿裡${ytName(n)}已經有 YT 連結（別台電腦傳過），不自動上傳`);
+  if (auto && ytMissing(m).length) {
+    ytAutoTried.delete(path);
+    return ytUpdate(); // 最新的文稿資料還沒齊，回去等
   }
   const footer = (settings.yt_description_footer || "").trim();
   const req = {
@@ -608,11 +677,12 @@ function ytSetAutoStopped(n, stopped) {
   if (stopped) all[n] = true;
   else delete all[n];
   ytSave("ytAutoStop", all);
-  ytMessage(stopped ? `第 ${n} 段停止自動上傳` : `第 ${n} 段恢復自動上傳`);
+  ytMessage(stopped ? `${ytName(n)}停止自動上傳` : `${ytName(n)}恢復自動上傳`);
   ytUpdate();
 }
 
 function ytAutoPath(n) {
+  if (n === 0) return ytFullOutput();
   const s = acStatus?.segments?.find((x) => x.n === n);
   return s?.chain ? (s.chain.state === "done" ? s.chain.output : "") : s?.state === "done" && !s.stale ? s.output : "";
 }
@@ -620,6 +690,12 @@ function ytAutoPath(n) {
 /** 設定頁勾的「自動上傳前要備齊」裡，這段還缺哪些 */
 function ytMissing(m) {
   const miss = [];
+  if (m.number === 0) {
+    // 全集：等章節時間回寫進文稿（說明要用）；縮圖、後臺關鍵字不管
+    if (ytFullNoTimes(m)) miss.push("章節時間");
+    if (settings.yt_require_playlist) for (const name of ytRequired().missing) miss.push(`播放清單「${name}」`);
+    return miss;
+  }
   if (settings.yt_require_thumbnail && !ytThumbFor(m.number)) miss.push("縮圖");
   if (settings.yt_require_keywords && !m.keywords.length) miss.push("後臺關鍵字");
   if (settings.yt_require_playlist) for (const name of ytRequired().missing) miss.push(`播放清單「${name}」`);
@@ -649,8 +725,8 @@ async function ytAutoUpload() {
       ytDone[path] = done[path];
       continue;
     }
-    ytMessage(`第 ${m.number} 段成品做好了，自動上傳中`);
-    ytUpload(m, path, false);
+    ytMessage(`${ytName(m.number)}成品做好了，自動上傳中`);
+    ytUpload(m, path, false, true);
   }
 }
 
@@ -675,11 +751,11 @@ listen("yt-upload", (e) => {
   ytUploads[u.n] = u;
   if (u.state === "done") {
     ytDone[u.path] = u.video_id;
-    showNotice({ title: `第 ${u.n} 段已上傳 YouTube（私人）`, message: `https://youtu.be/${u.video_id}` });
+    showNotice({ title: `${ytName(u.n)}已上傳 YouTube（私人）`, message: `https://youtu.be/${u.video_id}` });
     ytWriteLink(u.n, u.video_id);
   }
   if (u.state === "failed") {
-    ytMessage(`第 ${u.n} 段上傳失敗：${u.error}`);
+    ytMessage(`${ytName(u.n)}上傳失敗：${u.error}`);
     // 傳到一半過期：重新登入後讓自動上傳再試一次
     if (ytCheckExpired(u.error)) {
       ytAutoTried.delete(u.path);

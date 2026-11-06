@@ -1833,16 +1833,17 @@ async function dropIntoFull(paths, from) {
 /** 章節時間＝閃白結束、該段完全出現的那一秒（無條件進位，確保已經完全出現）。 */
 $("fillChaptersBtn").addEventListener("click", async () => {
   const { seq, placements } = await full.plan();
-  const filled = [];
+  const times = [];
   seq.forEach((item, i) => {
-    if (!item.segment) return;
-    const t = fmtTime(Math.ceil(placements[i].visible_at - 1e-6));
-    segments[item.segment - 1].time.value = t;
-    filled.push(`第${SEGMENT_NAMES[item.segment - 1]}段 ${t}`);
+    if (item.segment) times.push([item.segment, fmtTime(Math.ceil(placements[i].visible_at - 1e-6))]);
   });
-  if (!filled.length) return ($("chapterInfo").textContent = "⚠ 還沒選任何段落");
-  changed();
-  $("chapterInfo").textContent = `已填入：${filled.join("、")}`;
+  if (!times.length) return ($("chapterInfo").textContent = "⚠ 還沒選任何段落");
+  // 先讀共用資料夾最新的文稿再填（app.js 的 docAutoEdit），不會用工具裡舊的文稿蓋掉別人的修改
+  const ok = await docAutoEdit("章節時間", () => {
+    for (const [n, t] of times) segments[n - 1].time.value = t;
+  });
+  const filled = times.map(([n, t]) => `第${SEGMENT_NAMES[n - 1]}段 ${t}`).join("、");
+  $("chapterInfo").textContent = ok ? `已填入：${filled}` : `⚠ 文稿和共用資料夾的版本不一樣，處理完衝突後會填入：${filled}`;
 });
 
 $("fullRenderBtn").addEventListener("click", () =>

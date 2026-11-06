@@ -101,6 +101,29 @@ fn build(number: usize, title: &str, lines: &[String]) -> VideoMeta {
     VideoMeta { number, title, description, keywords, warnings }
 }
 
+/// 文稿最後的「全集」區塊（章節時間點那幾行）→ 全集影片的說明。標題由畫面決定（這裡留空），
+/// 後臺關鍵字不從文稿拿（全集只用設定頁的預設標記）。全集區是空的就回傳 None
+pub fn full_meta(text: &str) -> Option<VideoMeta> {
+    let text = text.trim_start_matches('\u{feff}').replace("\r\n", "\n");
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    // 檔頭也有一行「全集 （連結）」，所以取最後一個：全集區一定在文稿最後
+    let at = lines.iter().rposition(|l| *l == "全集")?;
+    let body: Vec<String> = lines[at + 1..].iter().take_while(|l| **l != "=======").map(|l| l.to_string()).collect();
+    let start = body.iter().position(|l| !l.is_empty())?;
+    let end = body.iter().rposition(|l| !l.is_empty()).map_or(start, |e| e + 1);
+    let mut warnings = Vec::new();
+    let mut description = clean(&body[start..end].join("\n"));
+    if description.len() > DESCRIPTION_MAX_BYTES {
+        warnings.push("說明超過 5000 位元組，已截掉後面".to_string());
+        let mut cut = DESCRIPTION_MAX_BYTES;
+        while !description.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        description.truncate(cut);
+    }
+    Some(VideoMeta { number: 0, title: String::new(), description, keywords: Vec::new(), warnings })
+}
+
 /// 使用者填的「標記」（Studio 後台那欄；逗號、頓號或換行分隔）→ 標記清單。
 /// 照填的原樣送（`#新聞直播` 也保留），只去掉重複的，合計不超過 500 字
 pub fn parse_tags(input: &str) -> Vec<String> {
@@ -162,6 +185,16 @@ mod tests {
         assert_eq!(m[0].title.chars().count(), TITLE_MAX);
         assert_eq!(m[0].description, "a＜b");
         assert_eq!(m[0].warnings.len(), 1);
+    }
+
+    #[test]
+    fn full_section_becomes_full_description() {
+        let m = full_meta(DOC).unwrap();
+        assert_eq!(m.number, 0);
+        assert_eq!(m.description, "(00:00:00)Part1：標題一！【關鍵時刻】20261026-1張炤和");
+        assert!(m.keywords.is_empty());
+        // 全集區還沒有內容（只有檔頭那行「全集 」）
+        assert_eq!(full_meta("全集 \n=======\n\n第一段\n\n標題\n\n=======\n全集\n"), None);
     }
 
     #[test]

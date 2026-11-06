@@ -243,6 +243,8 @@ struct Done {
     path: String,
     /// 串接成品（不是正片）
     chain: bool,
+    /// 全集才有：(段號, 該段完全出現的秒數)，給文稿回填章節時間點
+    chapters: Vec<(usize, f64)>,
 }
 
 /// 出片佇列的工作
@@ -807,7 +809,8 @@ struct ShareCopy {
 /// 第 n 段成品複製成 `共用資料夾\{MMDD}關鍵\{日期}-{n}.mp4`。已經有同名檔就不動；
 /// 先寫暫存檔、複製完才改成正式檔名，檢查的人不會打開複製到一半的檔。回傳目的地路徑
 #[tauri::command]
-pub fn autocut_copy_to_share(app: AppHandle, settings: keyword_title_core::Settings, date: String, n: usize, src: String) -> Result<String, String> {
+pub fn autocut_copy_to_share(app: AppHandle, settings: keyword_title_core::Settings, date: String, n: usize, src: String, overwrite: Option<bool>) -> Result<String, String> {
+    let overwrite = overwrite.unwrap_or(false);
     let txt = keyword_title_core::sync::file_path(&settings, &date).ok_or("共用資料夾設定不完整（設定頁的共用資料夾根目錄、資料夾格式）")?;
     let dir = txt.parent().ok_or("共用資料夾設定不完整")?.to_path_buf();
     let ext = Path::new(&src).extension().and_then(|e| e.to_str()).unwrap_or("mp4").to_string();
@@ -819,19 +822,21 @@ pub fn autocut_copy_to_share(app: AppHandle, settings: keyword_title_core::Setti
         let emit = |state: &'static str, progress: f64, error: Option<String>| {
             let _ = app.emit("share-copy", ShareCopy { n, state, progress, dest: dest_s.clone(), error });
         };
-        if dest.exists() {
+        if dest.exists() && !overwrite {
             return emit("skipped", 0.0, None);
         }
         if !dir.is_dir() {
             return emit("failed", 0.0, Some(format!("當天資料夾 {} 還沒建立", dir.display())));
         }
-        let tmp = dir.join(format!(".~{name}.tmp"));
+        // 暫存檔名每次不同：重出後的複製跟上一次還沒做完的複製不會寫到同一個檔
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis());
+        let tmp = dir.join(format!(".~{name}.{stamp}.tmp"));
         let result = copy_with_progress(Path::new(&src), &tmp, &|p| emit("copying", p, None)).and_then(|()| {
-            // 複製期間有人放了同名檔：不蓋
-            if dest.exists() {
+            // 複製期間有人放了同名檔：不蓋（重出的成品例外，就是要換掉舊的）
+            if dest.exists() && !overwrite {
                 return Ok(false);
             }
-            std::fs::rename(&tmp, &dest).map(|()| true).map_err(|e| format!("改成正式檔名失敗：{e}"))
+            std::fs::rename(&tmp, &dest).map(|()| true).map_err(|e| format!("換不掉共用資料夾的舊檔（可能有人開著在看）：{e}"))
         });
         match result {
             Ok(true) => emit("done", 1.0, None),
@@ -2277,7 +2282,7 @@ fn render_one_segment(app: &AppHandle, shared: &Arc<Shared>, ffprobe: &Path, ffm
                 let output = job.out.display().to_string();
                 shared.renders.lock().unwrap().insert(n, Render::Done { output: output.clone(), fingerprint: job.fingerprint.clone() });
                 shared.log(app, format!("第 {n} 段完成：{output}"));
-                let _ = app.emit("autocut-done", Done { n, path: output, chain: false });
+                let _ = app.emit("autocut-done", Done { n, path: output, chain: false, chapters: Vec::new() });
             }
             Err(e) => {
                 let e = if shared.stopped() { "已停止".to_string() } else { e };
@@ -2316,7 +2321,7 @@ fn run_chain(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Pat
             let output = out.display().to_string();
             shared.chain_renders.lock().unwrap().insert(n, Render::Done { output: output.clone(), fingerprint: fp });
             shared.log(app, format!("第 {n} 段串接完成：{output}"));
-            let _ = app.emit("autocut-done", Done { n, path: output, chain: true });
+            let _ = app.emit("autocut-done", Done { n, path: output, chain: true, chapters: Vec::new() });
         }
         Err(e) => {
             let e = if shared.stopped() { "已停止".to_string() } else { e };
@@ -2485,7 +2490,7 @@ fn maybe_concat_all(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprob
     for p in &plan {
         match (renders.get(&p.n), &p.job) {
             (Some(Render::Done { output, fingerprint }), Some(job)) if &job.fingerprint == fingerprint => {
-                clips.push(PathBuf::from(output));
+                clips.push((p.n, PathBuf::from(output)));
                 fps.push(fingerprint.clone());
             }
             _ => return,
@@ -2505,16 +2510,16 @@ fn maybe_concat_all(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprob
     let ok = if with_promo {
         shared.stage(app, "合成全集（promo、閃白，重新編碼）", || render_all(app, shared, ffmpeg, ffprobe, cfg, &clips, &out))
     } else {
-        shared.stage(app, "合成全集（直接接，不重新編碼）", || concat_all(ffmpeg, &clips, &out))
+        shared.stage(app, "合成全集（直接接，不重新編碼）", || concat_all(ffmpeg, ffprobe, &clips, &out))
     };
     *shared.all_progress.lock().unwrap() = None;
     match ok {
-        Ok(()) => {
+        Ok(chapters) => {
             let _ = std::fs::write(&marker, fp);
             let path = out.display().to_string();
             *shared.all.lock().unwrap() = Some(path.clone());
             shared.log(app, format!("全集完成：{path}"));
-            let _ = app.emit("autocut-done", Done { n: 0, path, chain: false });
+            let _ = app.emit("autocut-done", Done { n: 0, path, chain: false, chapters });
         }
         Err(e) => {
             let e = if shared.stopped() { "已停止".to_string() } else { e };
@@ -2526,10 +2531,14 @@ fn maybe_concat_all(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprob
 
 /// 全集跟影片頁一樣：第一段 → promo 20（直接接）→ 各段之間閃白 → promo 45（直接接）。
 /// 正片已經 +6dB、壓過水印；promo 沒設定的就略過
-fn render_all(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Path, cfg: &AutocutConfig, segs: &[PathBuf], out: &Path) -> Result<(), String> {
+/// 回傳各段的章節時間（閃白結束、該段完全出現的秒數，跟影片頁「填入章節時間」同一套）
+fn render_all(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Path, cfg: &AutocutConfig, segs: &[(usize, PathBuf)], out: &Path) -> Result<Vec<(usize, f64)>, String> {
     let mut clips = Vec::new();
-    for (i, p) in segs.iter().enumerate() {
-        clips.push(clip_of(ffprobe, &p.display().to_string(), &format!("第 {} 段", i + 1), Join::Flash, None, None)?);
+    // clips 裡第幾個是哪一段
+    let mut seg_at = Vec::new();
+    for (i, (n, p)) in segs.iter().enumerate() {
+        seg_at.push((*n, clips.len()));
+        clips.push(clip_of(ffprobe, &p.display().to_string(), &format!("第 {n} 段"), Join::Flash, None, None)?);
         if i == 0 && !cfg.promo_20.trim().is_empty() {
             clips.push(clip_of(ffprobe, &cfg.promo_20, "Promo 20 秒", Join::Cut, None, None)?);
         }
@@ -2540,6 +2549,8 @@ fn render_all(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Pa
     let tmp = out.with_extension("part.mp4");
     *shared.all_progress.lock().unwrap() = Some(0.0);
     let spec = RenderSpec { clips, transition: cfg.transition, width: W as u32, height: H as u32, fps: "30000/1001".into(), encoder: cfg.encoder.unwrap_or(Encoder::X264), output: tmp.display().to_string() };
+    let (places, _) = video::plan(&spec);
+    let chapters = seg_at.iter().map(|&(n, k)| (n, places[k].visible_at)).collect();
     let list = Path::new(&cfg.output_dir).join(".autocut").join("全集.list.txt");
     let r = render_spec(app, shared, ffmpeg, spec, &list, &mut |p| {
         *shared.all_progress.lock().unwrap() = Some(p);
@@ -2548,7 +2559,8 @@ fn render_all(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Pa
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    std::fs::rename(&tmp, out).map_err(|e| format!("無法寫入 {}：{e}", out.display()))
+    std::fs::rename(&tmp, out).map_err(|e| format!("無法寫入 {}：{e}", out.display()))?;
+    Ok(chapters)
 }
 
 /// 依片段從各側錄檔取出來接起來，去交錯、蓋上靜圖、編碼。先試 NVENC，不行改 x264
@@ -2706,7 +2718,15 @@ fn verify_length(ffprobe: &Path, out: &Path, expected: f64) -> Result<(), String
     Ok(())
 }
 
-fn concat_all(ffmpeg: &Path, clips: &[PathBuf], out: &Path) -> Result<(), String> {
+fn concat_all(ffmpeg: &Path, ffprobe: &Path, segs: &[(usize, PathBuf)], out: &Path) -> Result<Vec<(usize, f64)>, String> {
+    // 直接接：每段的起點＝前面各段長度相加
+    let mut chapters = Vec::new();
+    let mut at = 0.0;
+    for (n, p) in segs {
+        chapters.push((*n, at));
+        at += probe(ffprobe, &p.display().to_string())?.duration;
+    }
+    let clips: Vec<&PathBuf> = segs.iter().map(|(_, p)| p).collect();
     let list = out.with_extension("list.txt");
     let body: String = std::iter::once("ffconcat version 1.0".to_string())
         .chain(clips.iter().map(|p| format!("file '{}'", p.display().to_string().replace('\'', "'\\''"))))
@@ -2723,7 +2743,7 @@ fn concat_all(ffmpeg: &Path, clips: &[PathBuf], out: &Path) -> Result<(), String
         .map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(&list);
     if o.status.success() {
-        Ok(())
+        Ok(chapters)
     } else {
         Err(String::from_utf8_lossy(&o.stderr).trim().to_string())
     }

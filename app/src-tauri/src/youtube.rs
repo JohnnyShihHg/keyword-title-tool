@@ -321,6 +321,12 @@ pub fn yt_meta(text: String) -> Vec<VideoMeta> {
     youtube::video_meta(&text)
 }
 
+/// 文稿 → 全集影片的說明（文稿最後的全集區）；全集區還沒內容＝null
+#[tauri::command]
+pub fn yt_full_meta(text: String) -> Option<VideoMeta> {
+    youtube::full_meta(&text)
+}
+
 /// 這些檔上傳過的影片 ID（沒傳過的不列）
 #[tauri::command]
 pub fn yt_uploaded(app: AppHandle, paths: Vec<String>) -> HashMap<String, String> {
@@ -483,8 +489,10 @@ pub async fn yt_playlists(app: AppHandle, settings: Settings) -> Result<Vec<Play
             for item in v["items"].as_array().into_iter().flatten() {
                 out.push(Playlist { id: item["id"].as_str().unwrap_or_default().to_string(), title: item["snippet"]["title"].as_str().unwrap_or_default().to_string() });
             }
+            // 以前讀到 500 個就停，頻道清單多時後面的（例如「社會最前線」）會漏掉；
+            // 一頁 50 個、1 個配額單位，讀到最後（上限 5000 個防止無限迴圈）
             match v["nextPageToken"].as_str() {
-                Some(t) if out.len() < 500 => page = t.to_string(),
+                Some(t) if out.len() < 5000 => page = t.to_string(),
                 _ => break,
             }
         }
