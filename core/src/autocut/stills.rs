@@ -138,10 +138,15 @@ impl StillSet {
     /// 第 n 段能用的靜圖：共用的（直接放在資料夾裡）＋放在這段子資料夾的。
     /// 靜圖編號不變（每格的相似度照舊對得上），別段的標成 off、從來源字樣板底下拿掉。沒有要排除的回傳 None
     pub fn for_segment(&self, n: usize) -> Option<StillSet> {
+        self.for_segment_with(n, &[])
+    }
+
+    /// 同 `for_segment`，另外把 `also` 這幾段子資料夾的靜圖也算進來（那幾段的素材在第 n 段重播，見 `plan::reused_segments`）
+    pub fn for_segment_with(&self, n: usize, also: &[usize]) -> Option<StillSet> {
         if !self.off.is_empty() {
             return None; // 已經是某一段的
         }
-        let off: Vec<bool> = self.stills.iter().map(|s| s.segment.is_some_and(|g| g != n)).collect();
+        let off: Vec<bool> = self.stills.iter().map(|s| s.segment.is_some_and(|g| g != n && !also.contains(&g))).collect();
         if !off.contains(&true) {
             return None;
         }

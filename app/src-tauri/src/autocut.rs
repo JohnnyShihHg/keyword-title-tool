@@ -1469,6 +1469,17 @@ impl Watcher {
                 (s, m)
             })
             .collect();
+        // 別段的素材在這段重播：那一段子資料夾的靜圖這段也拿來比（plan::for_segment 裡套用，這裡只寫報告）
+        for (seg, _) in planned.iter().filter(|(s, _)| s.complete()) {
+            for (m, k, at, sim) in plan::reused_segments(&frames, &self.stills, seg) {
+                log.push_str(&format!(
+                    "  第 {} 段重播了第 {m} 段的素材（{} 在側錄 {} 相似 {sim:.2}、來源字也對得上）→ 第 {m} 段的靜圖這段也拿來比\n",
+                    seg.n,
+                    self.stills.stills[k].name,
+                    tc(secs(at))
+                ));
+            }
+        }
         // AI 補判：規則沒把握的地方截右上角來源字給 Gemini 看（判斷過的存起來，不重複問）
         if self.ai.is_some() {
             let mut asked = 0usize;

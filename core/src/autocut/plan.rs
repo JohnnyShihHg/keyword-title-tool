@@ -508,8 +508,57 @@ pub fn fill_sandwich_gaps(frames: &[FrameInfo], masks: &[MaskSeg]) -> Vec<MaskSe
 
 /// 只用這一段能用的靜圖（`StillSet::for_segment`）：段內每格跟別段靜圖的相似度改成 -1（當成完全不像）。
 /// 沒有別段的靜圖要排除回傳 None
+/// 別段的素材在這段重播的證據：畫面跟那張靜圖幾乎一樣，而且右上角是同一個來源字（沒有來源字、或只有一行的靜圖要畫面更像），
+/// 連續 1 秒以上。11/06 第 4 段 17:58 重播第 1 段的 60 Minutes 訪談（跟第1段/Still059 0.8～0.97、來源字 0.85）、
+/// 27:46 重播第 3 段的校園訪談，靜圖只放在第 1、3 段的子資料夾，第 4 段不比，整段露出來
+pub const REUSE_SIM: f32 = 0.85;
+pub const REUSE_SIM_NO_LABEL: f32 = 0.92;
+pub const REUSE_SECS: f64 = 1.0;
+
+/// 這段重播了哪幾段的素材：(那一段, 證據靜圖, 證據開始的格, 最高相似度)，每段只列第一個證據
+pub fn reused_segments(frames: &[FrameInfo], set: &StillSet, seg: &Segment) -> Vec<(usize, usize, usize, f32)> {
+    let need = (REUSE_SECS * FPS) as usize;
+    let mut out: Vec<(usize, usize, usize, f32)> = Vec::new();
+    for (k, s) in set.stills.iter().enumerate() {
+        let Some(m) = s.segment.filter(|&m| m != seg.n) else { continue };
+        if out.iter().any(|o| o.0 == m) {
+            continue;
+        }
+        let label = s.template.filter(|&t| !set.templates[t].generic);
+        let strong = |f: &FrameInfo| {
+            let v = f.sims.get(k).copied().unwrap_or(0.0);
+            match label {
+                Some(t) => v >= REUSE_SIM && f.tmpl >= 0 && f.iou >= LABEL_IOU && set.same_label(t, f.tmpl as usize),
+                None => v >= REUSE_SIM_NO_LABEL,
+            }
+        };
+        'pieces: for &(a, b) in &seg.pieces {
+            let (mut run, mut best) = (0usize, 0f32);
+            for i in a..b.min(frames.len()) {
+                if strong(&frames[i]) {
+                    run += 1;
+                    best = best.max(frames[i].sims[k]);
+                    if run >= need {
+                        out.push((m, k, i + 1 - run, best));
+                        break 'pieces;
+                    }
+                } else {
+                    run = 0;
+                    best = 0.0;
+                }
+            }
+        }
+    }
+    out.sort_by_key(|o| o.0);
+    out
+}
+
 fn for_segment(frames: &[FrameInfo], set: &StillSet, seg: &Segment) -> Option<(Vec<FrameInfo>, StillSet)> {
-    let set = set.for_segment(seg.n)?;
+    if (0..set.stills.len()).any(|k| set.is_off(k)) {
+        return None; // 已經是某一段的
+    }
+    let also: Vec<usize> = reused_segments(frames, set, seg).iter().map(|o| o.0).collect();
+    let set = set.for_segment_with(seg.n, &also)?;
     let (a, b) = (seg.start(), seg.end().min(frames.len()));
     let mut frames = frames.to_vec();
     for f in &mut frames[a..b] {
@@ -684,9 +733,11 @@ pub fn ai_candidates(frames: &[FrameInfo], set: &StillSet, seg: &Segment, masks:
         let hi = (m.end + lim).min(next_start);
         let after = (m.end, (m.end + 1..hi).find(|&i| is_shot_cut(frames, i)).unwrap_or(hi));
         for (a, b) in [before, after] {
+            // 跟「灰色地帶」重疊也照樣問（灰色地帶問的是來源字、這裡問是不是同一場）：11/07 重跑 11/06 第 4 段 1:10:25，
+            // 別段靜圖加進來後多了一個灰色地帶蓋住這個鏡頭，AI 說來源字不同，原本會接上的跳舞畫面就露出來。
             // 跟「空檔」重疊照樣問：11/02 第 1 段 12:33 遮罩後 51 秒的空檔大多是少康戰情室（AI 說來源不同），
             // 但緊接的前幾秒還是辯論會；14:51–15:00 腿部特寫讀不到來源字 → 空檔被判不同，整段露出
-            if b <= a || b - a < min_len || !in_piece(a, b) || covered(a) || covered(b - 1) || out.iter().any(|c: &AiCandidate| c.kind != AiKind::Gap && a < c.end && b > c.start) {
+            if b <= a || b - a < min_len || !in_piece(a, b) || covered(a) || covered(b - 1) || out.iter().any(|c: &AiCandidate| c.kind == AiKind::Scene && a < c.end && b > c.start) {
                 continue;
             }
             let g = &frames[a..b];
@@ -709,7 +760,7 @@ pub const MANUAL_NOTE: &str = "手動指定";
 /// 手動遮罩沒指定靜圖：這段時間裡平均畫面最像的那張（這段能用的靜圖；版型跟這段多數格一樣的優先）。
 /// 11/06 第 1 段 21:04–21:13 歌劇的其他鏡頭：跟每張靜圖都只有 0.2～0.5，但最像的還是歌劇那幾張
 pub fn pick_still(frames: &[FrameInfo], set: &StillSet, seg: &Segment, start: usize, end: usize) -> Option<usize> {
-    let own = set.for_segment(seg.n);
+    let own = for_segment(frames, set, seg).map(|(_, s)| s);
     let set = own.as_ref().unwrap_or(set);
     let (a, b) = (start.min(frames.len()), end.min(frames.len()));
     let g = &frames[a..b];
@@ -766,6 +817,10 @@ pub fn apply_ai(frames: &[FrameInfo], masks: &mut Vec<MaskSeg>, c: &AiCandidate)
         // 同一場畫面：接到出題的那段遮罩（前面的鏡頭往前接、後面的鏡頭往後接）
         AiKind::Scene => {
             let still = c.stills[0];
+            // 這段已經被別的判斷（灰色地帶、空檔）遮了：不再疊一層
+            if masks.iter().any(|m| m.start < c.end && m.end > c.start) {
+                return;
+            }
             if let Some(m) = masks.iter_mut().find(|m| m.end == c.start && m.still == still) {
                 m.end = c.end;
                 m.ai = true;
@@ -896,12 +951,21 @@ mod tests {
         let mut f = frame(true);
         f.tmpl = 0;
         f.iou = 0.95;
-        f.sims = vec![0.95];
+        // 來源字一樣、畫面只有幾分像（別的素材剛好同一個來源）
+        f.sims = vec![0.7];
         let n = 6 * FPS as usize;
         let frames: Vec<FrameInfo> = (0..n).map(|_| f.clone()).collect();
         let seg = |g: usize| Segment { n: g, pieces: vec![(0, n)], start_ok: true, end_ok: true };
         assert_eq!(segment_masks(&frames, &set, &seg(2)).len(), 1, "自己這段照樣遮");
         assert!(segment_masks(&frames, &set, &seg(3)).is_empty(), "別段的靜圖不遮");
+        assert!(reused_segments(&frames, &set, &seg(3)).is_empty());
+        // 11/06 第 4 段重播第 1 段的 60 Minutes：畫面幾乎一樣＋同一個來源字 → 第 1 段的靜圖第 4 段也拿來比
+        let replay: Vec<FrameInfo> = frames.iter().map(|f| FrameInfo { sims: vec![0.95], ..f.clone() }).collect();
+        assert_eq!(reused_segments(&replay, &set, &seg(3)).iter().map(|r| r.0).collect::<Vec<_>>(), vec![2]);
+        assert_eq!(segment_masks(&replay, &set, &seg(3)).len(), 1, "重播的素材要遮");
+        // 只有半秒像：不算重播
+        let blip: Vec<FrameInfo> = (0..n).map(|i| if i < FPS as usize / 2 { replay[i].clone() } else { frames[i].clone() }).collect();
+        assert!(reused_segments(&blip, &set, &seg(3)).is_empty());
         set.stills[0].segment = None;
         assert_eq!(segment_masks(&frames, &set, &seg(3)).len(), 1, "共用的每段都比");
     }
