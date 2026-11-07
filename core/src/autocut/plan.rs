@@ -850,7 +850,11 @@ pub fn manual_shots(frames: &[FrameInfo], start: usize, end: usize) -> Vec<(usiz
     let max_len = (MANUAL_SHOT_MAX_SECS * FPS) as usize;
     let mut cuts: Vec<usize> = vec![a];
     for i in a + 1..b {
-        if lay[i - a] != lay[i - a - 1] || is_any_cut(frames, i) {
+        // 閃一下（亮度大變）也切：11/07 第 2 段 16:51.5 本節目圖卡切到演唱會那一刀亮度變很多，被當成閃白沒切開，
+        // 2 秒演唱會跟圖卡一起被判成本節目。多切的只是多問幾個鏡頭
+        let dual = frames[i].layout == Layout::Dual && frames[i - 1].layout == Layout::Dual;
+        let raw_cut = if dual { frames[i].cut_diff > DUAL_CUT_DIFF } else { is_cut(frames, i) };
+        if lay[i - a] != lay[i - a - 1] || raw_cut {
             cuts.push(i);
         }
     }

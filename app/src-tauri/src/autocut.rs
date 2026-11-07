@@ -1583,7 +1583,7 @@ impl Watcher {
                     let mut keep: Vec<(usize, usize)> = Vec::new();
                     for (a, b) in ranges {
                         let shots = plan::manual_shots(&frames, a, b);
-                        let verdicts = self.ai_classify_shots(&files, &shots, studio);
+                        let verdicts = self.ai_classify_shots(&files, &shots, studio, &chosen);
                         for ((s, e, l), (ext, why)) in shots.iter().zip(verdicts) {
                             let what = match ext {
                                 Some(true) => "遮（外部素材）",
@@ -1918,8 +1918,10 @@ bar {} {mtime} {ranges:?}", bar.image));
 
     /// 手動遮罩「跳過棚內」：每個鏡頭是不是外部素材。Some(true)＝外部素材（遮）、Some(false)＝本節目棚內／圖卡、None＝不確定或問不到。
     /// 先沿用之前相鄰鏡頭問過的答案（AI 說同一場＝外部素材；被「本節目的攝影棚／圖卡」擋下＝棚內），
-    /// 其他的 8 個一題問 AI（附本節目棚內樣本；雙框只看左框），答案存進 ai.tsv
-    fn ai_classify_shots(&mut self, files: &[(PathBuf, f64, f64)], shots: &[(usize, usize, Layout)], studio: Option<usize>) -> Vec<(Option<bool>, String)> {
+    /// 其他的 8 個一題問 AI（附本節目棚內樣本；雙框只看左框），答案存進 ai.tsv。
+    /// `refs`：這組手動遮罩選的靜圖＝要遮的外部素材，一起給 AI 看（最多 3 張）：11/07 第 2 段 9:17–9:28
+    /// 綜藝節目的粉紅佈景被當成本節目的棚。有選靜圖時，之前「被本節目攝影棚擋下」的答案不沿用（那時沒有參考圖）
+    fn ai_classify_shots(&mut self, files: &[(PathBuf, f64, f64)], shots: &[(usize, usize, Layout)], studio: Option<usize>, refs: &[usize]) -> Vec<(Option<bool>, String)> {
         // 之前相鄰鏡頭的答案：(開始, 結束, 版型, 同一場?, 說明)
         let prior: Vec<(usize, usize, String, bool, String)> = self
             .ai_cache
@@ -1929,7 +1931,10 @@ bar {} {mtime} {ranges:?}", bar.image));
                 (p.len() >= 6 && p[2] == "Scene" && p.last() == Some(&"ours2")).then(|| (p[0].parse().ok(), p[1].parse().ok())).and_then(|(a, b)| Some((a?, b?, p[3].to_string(), *same, note.clone())))
             })
             .collect();
-        let key = |&(s, e, l): &(usize, usize, Layout)| format!("{s}|{e}|Shot|{l:?}|v1");
+        let mut ref_names: Vec<&str> = refs.iter().take(3).map(|&k| self.stills.stills[k].name.as_str()).collect();
+        ref_names.sort_unstable();
+        let ref_tag = ref_names.join(",");
+        let key = |&(s, e, l): &(usize, usize, Layout)| format!("{s}|{e}|Shot|{l:?}|v2|{ref_tag}");
         let mut out: Vec<Option<(Option<bool>, String)>> = shots
             .iter()
             .map(|sh| {
@@ -1944,7 +1949,7 @@ bar {} {mtime} {ranges:?}", bar.image));
                 let ours = hit.4.contains("本節目") && hit.4.contains("不接");
                 if hit.3 {
                     Some((Some(true), format!("沿用相鄰鏡頭的判斷：{}", hit.4)))
-                } else if ours {
+                } else if ours && refs.is_empty() {
                     Some((Some(false), format!("沿用相鄰鏡頭的判斷：{}", hit.4)))
                 } else {
                     None
@@ -1961,6 +1966,14 @@ bar {} {mtime} {ranges:?}", bar.image));
                 }
                 Some(gemini) => {
                     let sample = studio.and_then(|f| grab_whole(&self.ffmpeg, files, f).ok());
+                    let ext_refs: Vec<Vec<u8>> = refs
+                        .iter()
+                        .take(3)
+                        .filter_map(|&k| {
+                            let st = &self.stills.stills[k];
+                            if st.layout == Layout::Dual { ai::still_box(&st.path, st.layout) } else { ai::still_whole(&st.path) }.ok()
+                        })
+                        .collect();
                     for chunk in todo.chunks(8) {
                         let imgs: Result<Vec<Vec<u8>>, String> = chunk
                             .iter()
@@ -1971,7 +1984,7 @@ bar {} {mtime} {ranges:?}", bar.image));
                             })
                             .collect();
                         let dual: Vec<bool> = chunk.iter().map(|&i| shots[i].2 == Layout::Dual).collect();
-                        let ans = imgs.and_then(|imgs| gemini.classify(sample.as_ref(), &imgs, &dual));
+                        let ans = imgs.and_then(|imgs| gemini.classify(sample.as_ref(), &ext_refs, &imgs, &dual));
                         for (j, &i) in chunk.iter().enumerate() {
                             let v = match &ans {
                                 Ok(kinds) => match kinds.get(j).map(|(k, t)| (k.as_str(), t.clone())) {
@@ -1992,7 +2005,71 @@ bar {} {mtime} {ranges:?}", bar.image));
                 }
             }
         }
-        out.into_iter().map(|v| v.unwrap_or((None, "不確定".into()))).collect()
+        let mut out: Vec<(Option<bool>, String)> = out.into_iter().map(|v| v.unwrap_or((None, "不確定".into()))).collect();
+        // 第二關：判成本節目、但有選靜圖 → 再問「跟選的靜圖是不是同一支素材」（跟相鄰鏡頭同一個題目，這題 AI 比較準）。
+        // 是同一支、而且不是本節目的棚內／圖卡才改成遮。11/07 第 2 段 9:17–9:28 綜藝節目的粉紅佈景，
+        // 「是不是本節目」一直答是，但「跟綜藝節目的靜圖是不是同一場」答得出來
+        if !refs.is_empty() {
+            let rkey = |&(s, e, l): &(usize, usize, Layout)| format!("{s}|{e}|Recheck|{l:?}|v1|{ref_tag}");
+            let mut todo: Vec<usize> = Vec::new();
+            for i in 0..shots.len() {
+                if out[i].0 != Some(false) {
+                    continue;
+                }
+                match self.ai_cache.get(&rkey(&shots[i])) {
+                    Some((true, note)) => out[i] = (Some(true), format!("{}；再比對選的靜圖：同一支素材（{note}）", out[i].1)),
+                    Some((false, _)) => {}
+                    None => todo.push(i),
+                }
+            }
+            if let (Some(gemini), false) = (self.ai.as_ref(), todo.is_empty()) {
+                let sample = studio.and_then(|f| grab_whole(&self.ffmpeg, files, f).ok());
+                for layout in [Layout::Full, Layout::Dual] {
+                    let ids: Vec<usize> = todo.iter().copied().filter(|&i| shots[i].2 == layout).collect();
+                    // 參考圖：選的靜圖裡同版型的優先（雙框看左框）
+                    let mut ks: Vec<usize> = refs.iter().copied().filter(|&k| self.stills.stills[k].layout == layout).collect();
+                    if ks.is_empty() {
+                        ks = refs.to_vec();
+                    }
+                    let rimgs: Vec<Vec<u8>> = ks
+                        .iter()
+                        .take(2)
+                        .filter_map(|&k| {
+                            let st = &self.stills.stills[k];
+                            if layout == Layout::Dual { ai::still_box(&st.path, st.layout) } else { ai::still_whole(&st.path) }.ok()
+                        })
+                        .collect();
+                    if rimgs.is_empty() {
+                        continue;
+                    }
+                    for chunk in ids.chunks(8) {
+                        let imgs: Result<Vec<Vec<u8>>, String> = chunk
+                            .iter()
+                            .map(|&i| {
+                                let (s, e, _) = shots[i];
+                                let mid = s + (e - s) / 2;
+                                if layout == Layout::Dual { grab_box(&self.ffmpeg, files, mid) } else { grab_whole(&self.ffmpeg, files, mid) }
+                            })
+                            .collect();
+                        let ans = imgs.and_then(|imgs| if layout == Layout::Dual { gemini.compare_box(&rimgs, &imgs) } else { gemini.compare_scene(&rimgs, &imgs, sample.as_ref()) });
+                        let Ok(ans) = ans else { continue };
+                        for (j, &i) in chunk.iter().enumerate() {
+                            let same = ans.same.get(j).copied().unwrap_or(false);
+                            let studio_flag = ans.studio.get(j).copied().unwrap_or(true);
+                            let ours = layout == Layout::Dual || sample.is_none() || ans.ours.get(j).copied().flatten().unwrap_or(true);
+                            let ext = same && !(studio_flag && ours);
+                            let text = ans.texts.get(j).cloned().unwrap_or_default();
+                            self.ai_cache.insert(rkey(&shots[i]), (ext, text.clone()));
+                            ai::append_cache(&self.work.join("ai.tsv"), &rkey(&shots[i]), ext, &text);
+                            if ext {
+                                out[i] = (Some(true), format!("{}；再比對選的靜圖：同一支素材（{text}）", out[i].1));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// 段落開頭修準：在標題條出現前 6 秒內，找「關鍵時刻」Logo 轉場溶接到棚內結束的那一格。
@@ -2452,8 +2529,17 @@ mod ai {
 
         /// 手動遮罩跳過棚內：幾個鏡頭各一格（雙框只截左框）→ 每格是本節目（棚內／圖卡）、外部素材、還是不確定。
         /// 回傳 (kind, 描述)，順序跟 targets 一樣
-        pub fn classify(&self, studio: Option<&Vec<u8>>, targets: &[Vec<u8>], dual: &[bool]) -> Result<Vec<(String, String)>, String> {
-            let sample = if studio.is_some() { "第 1 張是本節目攝影棚的樣本（只拿來比對，不用判斷）。" } else { "" };
+        pub fn classify(&self, studio: Option<&Vec<u8>>, ext: &[Vec<u8>], targets: &[Vec<u8>], dual: &[bool]) -> Result<Vec<(String, String)>, String> {
+            let mut sample = String::new();
+            if !ext.is_empty() {
+                sample.push_str(&format!(
+                    "第 1～{} 張是這次要遮的外部素材的參考圖（例如別的節目、綜藝節目、演唱會）：要判斷的畫面跟參考圖是同一個場景、佈景或節目，就是 external——就算那是別的節目的攝影棚或舞台也一樣。",
+                    ext.len()
+                ));
+            }
+            if studio.is_some() {
+                sample.push_str(&format!("第 {} 張是本節目攝影棚的樣本（只拿來比對，不用判斷）。", ext.len() + 1));
+            }
             let idx: Vec<String> = dual.iter().enumerate().filter(|(_, d)| **d).map(|(i, _)| format!("第 {} 個", i + 1)).collect();
             let duals = if idx.is_empty() { "都是整張畫面。".to_string() } else { format!("{}是「雙框」畫面的左框（左框播素材、右框是棚內來賓，只截了左框），其他是整張畫面。", idx.join("、")) };
             let prompt = format!(
@@ -2467,7 +2553,8 @@ mod ai {
                  只回傳 JSON：{{\"targets\":[{{\"text\":\"一句話描述這張畫面\",\"kind\":\"external\"}}]}}，targets 依序共 {n} 個。",
                 n = targets.len()
             );
-            let refs: Vec<Vec<u8>> = studio.into_iter().cloned().collect();
+            let mut refs: Vec<Vec<u8>> = ext.to_vec();
+            refs.extend(studio.into_iter().cloned());
             let a = self.ask(prompt, &refs, targets, studio.is_some())?;
             Ok(a.kind.into_iter().zip(a.texts).collect())
         }
