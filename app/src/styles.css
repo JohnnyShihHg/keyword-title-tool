@@ -237,10 +237,13 @@ input.invalid { border-color: var(--warn); background: var(--warn-bg); }
 }
 .segment-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
 .segment-warn { color: var(--warn); font-size: 12px; }
+/* 文稿輸入框跟著內容長高：只有外面整欄捲動，不會兩層捲軸各自滾（11/07） */
 .segment .text {
   width: 100%;
   min-height: 140px;
-  resize: vertical;
+  field-sizing: content;
+  overflow: hidden;
+  resize: none;
   padding: 6px 8px;
   line-height: 1.6;
 }

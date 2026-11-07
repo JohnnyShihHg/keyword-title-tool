@@ -69,6 +69,8 @@ pub struct Settings {
     pub autocut_output_dir: String,
     /// 偵測到完整一段就自動遮蓋出片
     pub autocut_auto_render: bool,
+    /// 六段都好了自動合成全集
+    pub autocut_make_all: bool,
     /// 只看這個時間（`21:50`）之後的側錄檔（側錄資料夾是整天的頻道錄影）；空白＝全部
     pub autocut_since: String,
     /// 最後一段：側錄過了這個時間（`23:59:30`）節目還沒回來就算結束；空白＝不用（只看收黑、錄滿 8 分鐘）
@@ -140,6 +142,7 @@ impl Default for Settings {
             autocut_stills_dir: String::new(),
             autocut_output_dir: String::new(),
             autocut_auto_render: true,
+            autocut_make_all: true,
             autocut_since: "21:50".to_string(),
             autocut_end_cutoff: "23:59:30".to_string(),
             autocut_rotate_secs: 7.0,

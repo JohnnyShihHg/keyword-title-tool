@@ -38,6 +38,7 @@ function acFillDirs() {
   $("acOutputDir").value = settings.autocut_output_dir || "";
   $("acOutputDir").placeholder = settings.output_dir ? `空白＝沿用 ${settings.output_dir}` : "尚未指定";
   $("acAutoRender").checked = settings.autocut_auto_render !== false;
+  $("acMakeAll").checked = settings.autocut_make_all !== false;
   $("acCopyShare").checked = !!settings.autocut_copy_to_share;
   $("acSince").value = settings.autocut_since ?? "";
   $("acEndCutoff").value = settings.autocut_end_cutoff ?? "";
@@ -81,18 +82,28 @@ document.querySelectorAll("[data-ac-clear]").forEach((btn) => {
 $("acEndCutoff").addEventListener("change", () => {
   settings.autocut_end_cutoff = $("acEndCutoff").value.trim();
   persistSettings();
+  acPushLive();
 });
 $("acRotateSecs").addEventListener("change", () => {
   settings.autocut_rotate_secs = Math.max(0, Number($("acRotateSecs").value) || 0);
   persistSettings();
+  acPushLive();
 });
 $("acSince").addEventListener("change", () => {
   settings.autocut_since = $("acSince").value.trim();
   persistSettings();
+  acPushLive();
 });
 $("acAutoRender").addEventListener("change", () => {
   settings.autocut_auto_render = $("acAutoRender").checked;
   persistSettings();
+  invoke("autocut_set_options", { autoRender: $("acAutoRender").checked }).catch(() => {});
+});
+// 監看中取消勾選也要馬上生效（以前只在開始監看時讀一次，取消了照樣合成全集）
+$("acMakeAll").addEventListener("change", () => {
+  settings.autocut_make_all = $("acMakeAll").checked;
+  persistSettings();
+  invoke("autocut_set_options", { makeAll: $("acMakeAll").checked }).catch(() => {});
 });
 $("acCopyShare").addEventListener("change", () => {
   settings.autocut_copy_to_share = $("acCopyShare").checked;
@@ -178,18 +189,8 @@ $("acStartBtn").addEventListener("click", async () => {
         titles,
         auto_render: settings.autocut_auto_render !== false,
         make_all: $("acMakeAll").checked,
-        since: $("acSince").value.trim() || null,
-        end_cutoff: $("acEndCutoff").value.trim() || null,
-        rotate_secs: Math.max(0, Number($("acRotateSecs").value) || 0),
-        ai_key: settings.autocut_ai_key || null,
-        ai_model: settings.autocut_ai_model || null,
-        // 正片加工（跟影片頁單集一樣）、串接、全集用
-        gain_db: settings.audio_gain_db ?? 6,
-        watermarks: await acWatermarks(date),
-        promo_20: settings.promo_20_path || "",
-        promo_45: settings.promo_45_path || "",
-        transition: settings.transition_secs ?? 0.5,
-        encoder: await acEncoder(),
+        // 開始時間、AI、正片加工、串接、全集用的設定（監看中改了由 acPushLive 再送）
+        ...(await acLiveOptions(date)),
         date_tag: /^\d{8}$/.test(date) ? date.slice(4) : "",
         chains: Object.fromEntries(
           [1, 2, 3, 4, 5, 6].map((n) => [n, acChainPayload(n)]).filter(([, c]) => c),
@@ -198,6 +199,7 @@ $("acStartBtn").addEventListener("click", async () => {
         manual_masks: acMasksConfig(),
       },
     });
+    acRunDate = date;
     $("acLog").textContent = "";
     acMessage("");
     // 文稿頁的內容每 15 秒送一次（只有不用共用資料夾時才需要）
@@ -252,6 +254,16 @@ function acShow(st) {
   $("acStopBtn").classList.toggle("hidden", !st.running);
   $("acRunState").classList.toggle("on", st.running);
   $("acRunState").lastElementChild.textContent = st.running ? "監看中" : "已停止";
+  // 監看中鎖住資料夾和文稿日期：換了等於換一集，正在跑的那一輪不會跟著換（換日期還會把別天的遮罩、BAR 送進來）
+  const lockTip = st.running ? "監看中不能改，請先停止監看" : "";
+  document.querySelectorAll("[data-ac-pick], [data-ac-clear]").forEach((b) => {
+    b.disabled = st.running;
+    b.title = lockTip || b.dataset.acTitle || b.title;
+  });
+  for (const el of [dateInput, $("todayBtn")]) {
+    el.disabled = st.running;
+    el.title = st.running ? "自動切段監看中不能換日期，請先停止監看" : el.dataset.acTitle || "";
+  }
   if (st.message) acMessage(st.message);
   else if (st.running) acMessage("每 15 秒檢查一次側錄資料夾");
 
@@ -488,6 +500,38 @@ async function acPushChain(n, retry = false) {
   } catch (e) {
     acMessage(String(e));
   }
+}
+
+/** 監看中可以改、馬上生效的設定（Rust 端 LiveOptions）。開始監看時也用同一份 */
+let acRunDate = "";
+async function acLiveOptions(date) {
+  return {
+    since: $("acSince").value.trim() || null,
+    end_cutoff: $("acEndCutoff").value.trim() || null,
+    rotate_secs: Math.max(0, Number($("acRotateSecs").value) || 0),
+    ai_key: settings.autocut_ai_key || null,
+    ai_model: settings.autocut_ai_model || null,
+    gain_db: settings.audio_gain_db ?? 6,
+    watermarks: await acWatermarks(date),
+    promo_20: settings.promo_20_path || "",
+    promo_45: settings.promo_45_path || "",
+    transition: settings.transition_secs ?? 0.5,
+    encoder: await acEncoder(),
+  };
+}
+
+/** 監看中改了上面那些設定：送給 Rust（半秒內連改只送一次）。11/07 以前只在開始監看時讀一次 */
+let acLiveTimer = null;
+function acPushLive() {
+  if (!acStatus?.running) return;
+  clearTimeout(acLiveTimer);
+  acLiveTimer = setTimeout(async () => {
+    try {
+      await invoke("autocut_set_live", { options: await acLiveOptions(acRunDate || dateInput.value.trim()) });
+    } catch (e) {
+      acMessage(`設定沒送出去：${e}`);
+    }
+  }, 500);
 }
 
 /** 台標＋月份標。月份標檔名是年月（202610.png）時換成節目日期那個月的同資料夾檔案 */
@@ -733,8 +777,10 @@ const acPrevSettingsChanged = window.onSettingsChanged;
 window.onSettingsChanged = () => {
   acPrevSettingsChanged?.();
   acFillDirs();
+  acPushLive();
 };
 (async function acInit() {
+  for (const el of [...document.querySelectorAll("[data-ac-pick], [data-ac-clear]"), dateInput, $("todayBtn")]) el.dataset.acTitle = el.title || "";
   while (!settings) await new Promise((r) => setTimeout(r, 100));
   acFillDirs();
   acLoadChains();

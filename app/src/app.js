@@ -962,3 +962,23 @@ $("updateBadge").addEventListener("click", () => {
   window.onSettingsChanged?.();
   syncStartup();
 })();
+
+// 舊版 WebView 不支援 field-sizing 時：文稿輸入框自己量高度（打字時、程式改內容後都要跟上，所以每半秒也看一次）
+if (!CSS.supports("field-sizing", "content")) {
+  const fitText = (el) => {
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight + 2}px`;
+  };
+  document.addEventListener("input", (e) => {
+    if (e.target.matches?.(".segment .text")) fitText(e.target);
+  });
+  const seen = new WeakMap();
+  setInterval(() => {
+    for (const el of document.querySelectorAll(".segment .text")) {
+      if (seen.get(el) !== el.value) {
+        seen.set(el, el.value);
+        fitText(el);
+      }
+    }
+  }, 500);
+}

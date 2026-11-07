@@ -121,6 +121,50 @@ pub struct AutocutConfig {
     pub manual_masks: HashMap<usize, Vec<ManualMask>>,
 }
 
+/// 監看中可以改、馬上生效的設定（畫面改了就送 `autocut_set_live`）。資料夾、文稿日期不在這裡：監看中畫面直接鎖住。
+/// 11/07：以前這些都只在按「開始監看」時讀一次，監看中改了沒反應（例如換 AI 金鑰要停止再開）
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct LiveOptions {
+    #[serde(default)]
+    pub since: Option<String>,
+    #[serde(default)]
+    pub end_cutoff: Option<String>,
+    #[serde(default)]
+    pub rotate_secs: Option<f64>,
+    #[serde(default)]
+    pub ai_key: Option<String>,
+    #[serde(default)]
+    pub ai_model: Option<String>,
+    #[serde(default)]
+    pub gain_db: f64,
+    #[serde(default)]
+    pub watermarks: Vec<String>,
+    #[serde(default)]
+    pub promo_20: String,
+    #[serde(default)]
+    pub promo_45: String,
+    #[serde(default = "half")]
+    pub transition: f64,
+    #[serde(default)]
+    pub encoder: Option<Encoder>,
+}
+
+impl LiveOptions {
+    fn apply(&self, cfg: &mut AutocutConfig) {
+        cfg.since = self.since.clone();
+        cfg.end_cutoff = self.end_cutoff.clone();
+        cfg.rotate_secs = self.rotate_secs;
+        cfg.ai_key = self.ai_key.clone();
+        cfg.ai_model = self.ai_model.clone();
+        cfg.gain_db = self.gain_db;
+        cfg.watermarks = self.watermarks.clone();
+        cfg.promo_20 = self.promo_20.clone();
+        cfg.promo_45 = self.promo_45.clone();
+        cfg.transition = self.transition;
+        cfg.encoder = self.encoder;
+    }
+}
+
 /// 手動遮罩：自動判斷漏掉的地方，指定時段一定遮（11/06 第 1 段 16:01–16:10 歌劇的其他鏡頭，
 /// 跟靜圖不夠像、來源字是一行的「翻攝 Youtube」、離其他歌劇遮罩太遠，AI 也問不到）
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -284,6 +328,8 @@ enum Job {
     Segment(RenderJob),
     /// 正片後面接 YT／promo
     Chain(usize),
+    /// 什麼都不做，只是讓出片佇列再看一次要不要合成全集（監看中才勾「合成全集」時）
+    CheckAll,
 }
 
 // ───────────────────────── 共用狀態 ─────────────────────────
@@ -339,6 +385,11 @@ enum Render {
 #[derive(Default)]
 struct Shared {
     stop: AtomicBool,
+    /// 監看中可以改的開關（畫面勾選馬上生效，不用重開監看）：完整一段就自動出片、六段都好了自動合成全集
+    auto_render: AtomicBool,
+    make_all: AtomicBool,
+    /// 畫面送來、Watcher 還沒套用的設定（下一輪輪詢套用、重新規劃）
+    live: Mutex<Option<LiveOptions>>,
     running: AtomicBool,
     files: Mutex<Vec<FileStatus>>,
     plan: Mutex<Vec<PlanSeg>>,
@@ -565,6 +616,8 @@ pub fn start(app: AppHandle, state: &AutocutState, config: AutocutConfig) -> Res
     let ffprobe = require_tool(&app, "ffprobe")?;
     let shared = Arc::new(Shared::default());
     shared.running.store(true, Ordering::SeqCst);
+    shared.auto_render.store(config.auto_render, Ordering::SeqCst);
+    shared.make_all.store(config.make_all, Ordering::SeqCst);
     if let TitlesSource::Text(t) = &config.titles {
         *shared.titles_text.lock().unwrap() = t.clone();
     }
@@ -686,6 +739,36 @@ pub fn autocut_set_manual_masks(app: AppHandle, state: State<'_, AutocutState>, 
         shared.manual_masks.lock().unwrap().remove(&n);
     } else {
         shared.manual_masks.lock().unwrap().insert(n, masks);
+    }
+    shared.publish(&app);
+}
+
+/// 監看中改設定（開始時間、結束時間、換圖間隔、AI 金鑰／模型、音量、台標、promo、閃白、編碼器）：
+/// 出片佇列馬上用新的（`shared.config`），規劃在下一輪輪詢套用；遮罩或加工變了的段會自動重出
+#[tauri::command]
+pub fn autocut_set_live(app: AppHandle, state: State<'_, AutocutState>, options: LiveOptions) {
+    let Some(shared) = state.shared.lock().unwrap().clone().filter(|s| s.running.load(Ordering::SeqCst)) else { return };
+    if let Some(cfg) = shared.config.lock().unwrap().as_mut() {
+        options.apply(cfg);
+    }
+    *shared.live.lock().unwrap() = Some(options);
+    shared.publish(&app);
+}
+
+/// 監看中改「自動出片」「合成全集」：馬上生效。打開合成全集時讓出片佇列再看一次（六段可能早就都好了）
+#[tauri::command]
+pub fn autocut_set_options(app: AppHandle, state: State<'_, AutocutState>, auto_render: Option<bool>, make_all: Option<bool>) {
+    let Some(shared) = state.shared.lock().unwrap().clone().filter(|s| s.running.load(Ordering::SeqCst)) else { return };
+    if let Some(v) = auto_render {
+        shared.auto_render.store(v, Ordering::SeqCst);
+    }
+    if let Some(v) = make_all {
+        shared.make_all.store(v, Ordering::SeqCst);
+        if v {
+            if let Some(tx) = shared.jobs.lock().unwrap().as_ref() {
+                let _ = tx.send(Job::CheckAll);
+            }
+        }
     }
     shared.publish(&app);
 }
@@ -1026,6 +1109,8 @@ struct Watcher {
     last_bars: HashMap<usize, Vec<Bar>>,
     /// 上次規劃時的手動遮罩設定
     last_manual: HashMap<usize, Vec<ManualMask>>,
+    /// 上次規劃時「自動出片」有沒有開（監看中打開 → 重新規劃，完整的段送去出片）
+    last_auto_render: bool,
     /// 壓 BAR 時段的邊界窗口 (lo, hi, 進場?) → 對準的那一格（要解碼一小段，結果記起來）
     bar_edges: HashMap<(usize, usize, bool), usize>,
     /// AI 補判（沒設金鑰＝None）與判斷過的結果（存在 .autocut\ai.tsv，同一個地方不重複問）
@@ -1074,6 +1159,7 @@ impl Watcher {
             last_titles: String::new(),
             last_bars: HashMap::new(),
             last_manual: HashMap::new(),
+            last_auto_render: true,
             bar_edges: HashMap::new(),
             rerendered: HashSet::new(),
         })
@@ -1130,6 +1216,22 @@ impl Watcher {
             self.last_bars = bars;
             self.dirty = true;
         }
+        if let Some(live) = self.shared.live.lock().unwrap().take() {
+            let (old_key, old_model) = (self.cfg.ai_key.clone(), self.cfg.ai_model.clone());
+            live.apply(&mut self.cfg);
+            if self.cfg.ai_key != old_key || self.cfg.ai_model != old_model {
+                let key = self.cfg.ai_key.clone().map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+                let model = self.cfg.ai_model.clone().filter(|m| !m.trim().is_empty()).unwrap_or_else(|| "gemini-3.5-flash-lite".into());
+                self.ai = key.map(|k| ai::Gemini::new(k, model));
+                self.log(if self.ai.is_some() { "AI 金鑰／模型換了，之後用新的" } else { "AI 金鑰清掉了，之後不問 AI" });
+            }
+            self.dirty = true;
+        }
+        let auto = self.shared.auto_render.load(Ordering::SeqCst);
+        if auto != self.last_auto_render {
+            self.last_auto_render = auto;
+            self.dirty = true;
+        }
         let manual = self.shared.manual_masks.lock().unwrap().clone();
         if manual != self.last_manual {
             self.last_manual = manual;
@@ -1137,7 +1239,7 @@ impl Watcher {
         }
         // 出片途中判斷改了（例如手動遮罩先打時間、出片已經開始才選靜圖）：出好的是舊判斷 → 重新規劃，讓它自動重出。
         // 11/07 第 1 段 16:01：時間一打好就用自動挑的 BTS 靜圖開始出片，選了歌劇靜圖後成品還是 BTS
-        if self.cfg.auto_render && !self.dirty {
+        if self.shared.auto_render.load(Ordering::SeqCst) && !self.dirty {
             let renders = self.shared.renders.lock().unwrap();
             let plan = self.shared.plan.lock().unwrap();
             let stale = plan.iter().any(|p| {
@@ -1693,7 +1795,7 @@ impl Watcher {
                     renders.insert(p.n, done(job.fingerprint.clone()));
                     continue;
                 }
-                if !self.cfg.auto_render {
+                if !self.shared.auto_render.load(Ordering::SeqCst) {
                     if let Some(fp) = done_fp {
                         renders.insert(p.n, done(fp));
                     }
@@ -2782,7 +2884,7 @@ fn chain_marker(cfg: &AutocutConfig, n: usize) -> PathBuf {
     Path::new(&cfg.output_dir).join(".autocut").join(format!("第{n}段.chain.done"))
 }
 
-fn render_loop(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Path, cfg: &AutocutConfig, rx: Receiver<Job>) {
+fn render_loop(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Path, cfg0: &AutocutConfig, rx: Receiver<Job>) {
     let mut pending: std::collections::VecDeque<Job> = Default::default();
     loop {
         let job = match pending.pop_front() {
@@ -2795,6 +2897,9 @@ fn render_loop(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &P
         if shared.stopped() {
             break;
         }
+        // 每個工作都用最新的設定（監看中改了 promo、閃白、編碼器要馬上用上）
+        let latest = shared.config.lock().unwrap().clone().unwrap_or_else(|| cfg0.clone());
+        let cfg = &latest;
         match job {
             Job::Segment(job) => {
                 let n = job.n;
@@ -2805,10 +2910,12 @@ fn render_loop(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &P
                 }
             }
             Job::Chain(n) => run_chain(app, shared, ffmpeg, ffprobe, cfg, n),
+            Job::CheckAll => {}
         }
         // 全集要重新編碼、很久：佇列裡還有工作（正片、串接）就先做完
         pending.extend(rx.try_iter());
-        if pending.is_empty() && cfg.make_all && cfg.only.is_none() && !shared.stopped() {
+        // 11/07：以前只看開始監看時的設定，監看中取消勾選「合成全集」照樣合成
+        if pending.is_empty() && shared.make_all.load(Ordering::SeqCst) && cfg.only.is_none() && !shared.stopped() {
             maybe_concat_all(app, shared, ffmpeg, ffprobe, cfg);
         }
     }
