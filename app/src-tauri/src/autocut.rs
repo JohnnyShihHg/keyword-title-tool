@@ -1531,7 +1531,9 @@ impl Watcher {
                     log.push_str(&format!("  ★ 第 {} 段手動遮罩：靜圖資料夾裡找不到 {}，改用畫面最像的
 ", seg.n, spec.still));
                 }
-                let ranges: Vec<(usize, usize)> = spec.ranges.iter().filter_map(|&(a, b)| Some((in_frame(&seg.pieces, a)?, in_frame(&seg.pieces, b)?))).filter(|(a, b)| b > a).collect();
+                // 結束時間超過這段長度（多抓了幾秒）＝遮到段尾，不要整個丟掉
+                let seg_end = seg.pieces.last().map(|p| p.1);
+                let ranges: Vec<(usize, usize)> = spec.ranges.iter().filter_map(|&(a, b)| Some((in_frame(&seg.pieces, a)?, in_frame(&seg.pieces, b).or(seg_end)?))).filter(|(a, b)| b > a).collect();
                 let mut shown = Vec::new();
                 for (a, b) in clip_to_pieces(&seg.pieces, &ranges) {
                     let Some(k) = wanted.or_else(|| plan::pick_still(&frames, &self.stills, seg, a, b)) else {
