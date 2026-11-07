@@ -128,9 +128,20 @@ pub struct ManualMask {
     /// 時段（成品的段內秒數）
     #[serde(default)]
     pub ranges: Vec<(f64, f64)>,
-    /// 用哪張靜圖（靜圖資料夾裡的完整路徑）；空的＝挑這段時間畫面最像的
+    /// 用哪張靜圖（靜圖資料夾裡的完整路徑）；空的＝挑這段時間畫面最像的。舊版設定只有這一欄
     #[serde(default)]
     pub still: String,
+    /// 可以選好幾張（滿版、雙框混著選）：時段照版型切開，每截用同版型、畫面最像的那張（`plan::manual_plan`）
+    #[serde(default)]
+    pub stills: Vec<String>,
+}
+
+impl ManualMask {
+    fn paths(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.stills.iter().chain(std::iter::once(&self.still)).map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
+        v.dedup();
+        v
+    }
 }
 
 /// 壓 BAR：舊標題出現在標題條的時段，整張蓋上新的 BAR 圖
@@ -1121,6 +1132,18 @@ impl Watcher {
             self.last_manual = manual;
             self.dirty = true;
         }
+        // 出片途中判斷改了（例如手動遮罩先打時間、出片已經開始才選靜圖）：出好的是舊判斷 → 重新規劃，讓它自動重出。
+        // 11/07 第 1 段 16:01：時間一打好就用自動挑的 BTS 靜圖開始出片，選了歌劇靜圖後成品還是 BTS
+        if self.cfg.auto_render && !self.dirty {
+            let renders = self.shared.renders.lock().unwrap();
+            let plan = self.shared.plan.lock().unwrap();
+            let stale = plan.iter().any(|p| {
+                p.job.as_ref().is_some_and(|j| matches!(renders.get(&p.n), Some(Render::Done { fingerprint, .. }) if fingerprint != &j.fingerprint) && !self.rerendered.contains(&(p.n, j.fingerprint.clone())))
+            });
+            if stale {
+                self.dirty = true;
+            }
+        }
         let files = self.list_files()?;
         // 依序處理錄完的檔；中間任何一個還沒錄完，後面的都等（時間軸要連續）
         let mut statuses: Vec<FileStatus> = Vec::new();
@@ -1496,7 +1519,9 @@ impl Watcher {
                     }
                     seen.extend(cands.iter().map(key));
                     let before = masks.iter().map(|m| (m.start, m.end)).collect::<Vec<_>>();
-                    let answers = self.ai_decide_many(&files, &cands);
+                    // 本節目棚內的樣本：這段開頭 Logo 轉場後 1.5 秒（一定是棚內），給 AI 分辨「我們的棚」和別的節目的棚
+                    let studio = seg.pieces.first().map(|p| p.0 + (1.5 * FPS) as usize);
+                    let answers = self.ai_decide_many(&files, &cands, studio);
                     for (c, a) in cands.iter().zip(answers) {
                         let (same, note, fresh) = match a {
                             Ok(x) => x,
@@ -1537,34 +1562,44 @@ impl Watcher {
             let specs = self.last_manual.get(&seg.n).cloned().unwrap_or_default();
             let mut per = Vec::new();
             for spec in &specs {
-                let wanted = self.stills.stills.iter().position(|s| !spec.still.trim().is_empty() && Path::new(&s.path) == Path::new(spec.still.trim()));
-                if !spec.still.trim().is_empty() && wanted.is_none() {
-                    log.push_str(&format!("  ★ 第 {} 段手動遮罩：靜圖資料夾裡找不到 {}，改用畫面最像的
-", seg.n, spec.still));
+                let mut chosen = Vec::new();
+                for p in spec.paths() {
+                    match self.stills.stills.iter().position(|s| Path::new(&s.path) == Path::new(&p)) {
+                        Some(k) => chosen.push(k),
+                        None => log.push_str(&format!("  ★ 第 {} 段手動遮罩：靜圖資料夾裡找不到 {p}，不用這張\n", seg.n)),
+                    }
                 }
                 // 結束時間超過這段長度（多抓了幾秒）＝遮到段尾，不要整個丟掉
                 let seg_end = seg.pieces.last().map(|p| p.1);
                 let ranges: Vec<(usize, usize)> = spec.ranges.iter().filter_map(|&(a, b)| Some((in_frame(&seg.pieces, a)?, in_frame(&seg.pieces, b).or(seg_end)?))).filter(|(a, b)| b > a).collect();
                 let mut shown = Vec::new();
                 for (a, b) in clip_to_pieces(&seg.pieces, &ranges) {
-                    let Some(k) = wanted.or_else(|| plan::pick_still(&frames, &self.stills, seg, a, b)) else {
-                        log.push_str(&format!("  ★ 第 {} 段手動遮罩 {}：沒有靜圖可以用，不遮
-", seg.n, tc(out_time(&seg.pieces, a))));
-                        continue;
-                    };
-                    let st = &self.stills.stills[k];
-                    plan::apply_manual(masks, a, b, k, st.layout);
-                    log.push_str(&format!(
-                        "  第 {} 段手動遮罩：成品 {} – {}（側錄 {} – {}）用 {}
-",
-                        seg.n,
-                        tc(out_time(&seg.pieces, a)),
-                        tc(out_time(&seg.pieces, b)),
-                        tc(secs(a)),
-                        tc(secs(b)),
-                        st.name
-                    ));
-                    shown.push((out_time(&seg.pieces, a), out_time(&seg.pieces, b), st.name.clone()));
+                    let parts = plan::manual_plan(&frames, &self.stills, seg, a, b, &chosen);
+                    for &(s, e, k) in &parts {
+                        if k.is_none() {
+                            log.push_str(&format!(
+                                "  ★ 第 {} 段手動遮罩：成品 {} – {} 沒選這種版型的靜圖、畫面也沒有夠像的，不遮（請選靜圖）\n",
+                                seg.n,
+                                tc(out_time(&seg.pieces, s)),
+                                tc(out_time(&seg.pieces, e))
+                            ));
+                        }
+                    }
+                    for (s, e, k) in parts.into_iter().filter_map(|(s, e, k)| Some((s, e, k?))) {
+                        let st = &self.stills.stills[k];
+                        plan::apply_manual(masks, s, e, k, st.layout);
+                        log.push_str(&format!(
+                            "  第 {} 段手動遮罩：成品 {} – {}（側錄 {} – {}）{}用 {}\n",
+                            seg.n,
+                            tc(out_time(&seg.pieces, s)),
+                            tc(out_time(&seg.pieces, e)),
+                            tc(secs(s)),
+                            tc(secs(e)),
+                            st.layout.zh(),
+                            st.name
+                        ));
+                        shown.push((out_time(&seg.pieces, s), out_time(&seg.pieces, e), st.name.clone()));
+                    }
                 }
                 per.push(shown);
             }
@@ -1812,11 +1847,12 @@ bar {} {mtime} {ranges:?}", bar.image));
 
     /// 問 AI 這些地方的來源字跟參考靜圖是不是同一個（判斷過的直接用；沒判斷過的 4 個同時問）。
     /// 每個回傳 (同一個?, 說明, 這次有沒有真的呼叫 API)
-    fn ai_decide_many(&mut self, files: &[(PathBuf, f64, f64)], cands: &[plan::AiCandidate]) -> Vec<Result<(bool, String, bool), String>> {
+    fn ai_decide_many(&mut self, files: &[(PathBuf, f64, f64)], cands: &[plan::AiCandidate], studio: Option<usize>) -> Vec<Result<(bool, String, bool), String>> {
         let key_of = |c: &plan::AiCandidate| {
             let names: Vec<&str> = c.stills.iter().map(|&k| self.stills.stills[k].name.as_str()).collect();
-            // 相鄰鏡頭的判斷規則改過就換鍵，舊結果不再沿用：0.6.20「|all」全部格都說相同；0.6.21「|studio」另外排除攝影棚
-            let rule = if c.kind == plan::AiKind::Scene { "|studio" } else { "" };
+            // 相鄰鏡頭的判斷規則改過就換鍵，舊結果不再沿用：0.6.20「|all」全部格都說相同；0.6.21「|studio」另外排除攝影棚；
+            // 0.6.30「|ours2」附上本節目棚內樣本，別的節目的棚不算（雙框只看左框）；每張圖都標名稱
+            let rule = if c.kind == plan::AiKind::Scene { "|ours2" } else { "" };
             format!("{}|{}|{:?}|{:?}|{}{rule}", c.start, c.end, c.kind, c.layout, names.join(","))
         };
         let keys: Vec<String> = cands.iter().map(key_of).collect();
@@ -1826,10 +1862,12 @@ bar {} {mtime} {ranges:?}", bar.image));
             let Some(gemini) = self.ai.as_ref() else { return vec![Err("AI 沒開".into()); cands.len()] };
             let (ffmpeg, stills) = (&self.ffmpeg, &self.stills);
             let chunk = todo.len().div_ceil(AI_THREADS);
+            let sample = studio.and_then(|f| grab_whole(ffmpeg, files, f).ok());
+            let sample = sample.as_ref();
             let fresh: Vec<(usize, Result<(bool, String), String>)> = std::thread::scope(|sc| {
                 let hs: Vec<_> = todo
                     .chunks(chunk)
-                    .map(|part| sc.spawn(move || part.iter().map(|&i| (i, ai_eval(ffmpeg, stills, gemini, files, &cands[i]))).collect::<Vec<_>>()))
+                    .map(|part| sc.spawn(move || part.iter().map(|&i| (i, ai_eval(ffmpeg, stills, gemini, files, &cands[i], sample))).collect::<Vec<_>>()))
                     .collect();
                 hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
             });
@@ -2052,23 +2090,65 @@ fn collect_stderr(stderr: impl Read + Send + 'static) -> std::thread::JoinHandle
 const AI_THREADS: usize = 4;
 
 /// 一個地方：截參考靜圖與側錄 3 格的右上角給 AI，過半說「相同」才算
-fn ai_eval(ffmpeg: &Path, stills: &StillSet, gemini: &ai::Gemini, files: &[(PathBuf, f64, f64)], c: &plan::AiCandidate) -> Result<(bool, String), String> {
-    // 相鄰鏡頭：看整張畫面（是不是同一場），其他：看右上角來源字
+fn ai_eval(ffmpeg: &Path, stills: &StillSet, gemini: &ai::Gemini, files: &[(PathBuf, f64, f64)], c: &plan::AiCandidate, studio: Option<&Vec<u8>>) -> Result<(bool, String), String> {
+    // 相鄰鏡頭：看整張畫面（是不是同一場；雙框只看左框），其他：看右上角來源字
     let whole = c.kind == plan::AiKind::Scene;
-    let refs: Vec<Vec<u8>> = c.stills.iter().take(2).map(|&k| if whole { ai::still_whole(&stills.stills[k].path) } else { ai::still_crop(&stills.stills[k].path, c.layout) }).collect::<Result<_, _>>()?;
-    let targets: Vec<Vec<u8>> = c.samples.iter().map(|&f| if whole { grab_whole(ffmpeg, files, f) } else { grab_crop(ffmpeg, files, f, c.layout) }).collect::<Result<_, _>>()?;
-    let ans = if whole { gemini.compare_scene(&refs, &targets)? } else { gemini.compare(&refs, &targets)? };
+    let boxed = whole && c.layout == Layout::Dual;
+    let refs: Vec<Vec<u8>> = c
+        .stills
+        .iter()
+        .take(2)
+        .map(|&k| {
+            let s = &stills.stills[k];
+            if boxed {
+                ai::still_box(&s.path, s.layout)
+            } else if whole {
+                ai::still_whole(&s.path)
+            } else {
+                ai::still_crop(&s.path, c.layout)
+            }
+        })
+        .collect::<Result<_, _>>()?;
+    let targets: Vec<Vec<u8>> = c.samples.iter().map(|&f| if boxed { grab_box(ffmpeg, files, f) } else if whole { grab_whole(ffmpeg, files, f) } else { grab_crop(ffmpeg, files, f, c.layout) }).collect::<Result<_, _>>()?;
+    let ans = if boxed {
+        gemini.compare_box(&refs, &targets)?
+    } else if whole {
+        gemini.compare_scene(&refs, &targets, studio)?
+    } else {
+        gemini.compare(&refs, &targets)?
+    };
     // 相鄰鏡頭要每一格都說同一場才接（11/02 第 1 段 15:16.8：三格都描述成棚內來賓，卻有兩格回答相同）
     // 0.6.21：而且沒有任何一格是攝影棚（11/02 第 1 段 13:53、15:16.8：三格都描述成棚內主持人／來賓在大螢幕前講解，
-    // 卻都回答同一場——棚內螢幕上播著辯論會）
+    // 卻都回答同一場——棚內螢幕上播著辯論會）。
+    // 0.6.30：附上本節目棚內樣本，只擋「本節目的棚」：11/06 第 2 段 8:16 綜藝節目的棚（播出的外部素材）被當成攝影棚不接。
+    // 沒有樣本、或 AI 沒回答是不是本節目的棚 → 照舊，看得到任何攝影棚都不接；雙框左框是本節目的圖卡也不接
     let yes = ans.same.iter().filter(|b| **b).count();
-    let studio = ans.studio.iter().any(|b| *b);
-    let same = if whole { !ans.same.is_empty() && yes == ans.same.len() && !studio } else { yes * 2 > ans.same.len().max(1) };
+    let ours = |i: usize| boxed || studio.is_none() || ans.ours.get(i).copied().flatten().unwrap_or(true);
+    let blocked = ans.studio.iter().enumerate().any(|(i, b)| *b && ours(i));
+    let same = if whole { !ans.same.is_empty() && yes == ans.same.len() && !blocked } else { yes * 2 > ans.same.len().max(1) };
     let mut note = format!("參考「{}」、讀到 {}", ans.reference, ans.texts.iter().map(|t| format!("「{t}」")).collect::<Vec<_>>().join(""));
-    if whole && studio {
-        note.push_str("（看得到攝影棚，不接）");
+    if whole && blocked {
+        note.push_str(if boxed { "（左框是本節目的圖卡／棚內，不接）" } else { "（看得到本節目的攝影棚，不接）" });
     }
     Ok((same, note))
+}
+
+/// 截側錄某一格的雙框左框（PNG，縮成 3/4）
+fn grab_box(ffmpeg: &Path, files: &[(PathBuf, f64, f64)], frame: usize) -> Result<Vec<u8>, String> {
+    let t = secs(frame);
+    let (p, fs, _) = files.iter().rev().find(|(_, fs, _)| *fs <= t).ok_or("找不到這一格的側錄檔")?;
+    let (bw, bh) = (BOX.2 - BOX.0, BOX.3.min(BAND.0) - BOX.1);
+    let o = command(ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{:.4}", t - fs), "-i"])
+        .arg(p)
+        .args(["-frames:v", "1", "-an", "-vf", &format!("crop={bw}:{bh}:{}:{},scale={}:{}:flags=lanczos", BOX.0, BOX.1, bw * 3 / 4 / 2 * 2, bh * 3 / 4 / 2 * 2), "-f", "image2pipe", "-vcodec", "png", "-"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("無法執行 ffmpeg：{e}"))?;
+    if o.stdout.is_empty() {
+        return Err("截不到畫面".into());
+    }
+    Ok(o.stdout)
 }
 
 /// 截側錄某一格的右上角來源字（PNG）
@@ -2141,6 +2221,21 @@ mod ai {
         pub same: Vec<bool>,
         /// 相鄰鏡頭的題目：這一格看得到攝影棚（主持人、來賓、棚內螢幕）
         pub studio: Vec<bool>,
+        /// 相鄰鏡頭的題目（有附棚內樣本時）：看到的是不是「本節目」的攝影棚；沒回答＝None
+        pub ours: Vec<Option<bool>>,
+    }
+
+    /// 雙框靜圖的左框（滿版靜圖就整張）縮成跟 `grab_box` 差不多大的 PNG
+    pub fn still_box(path: &str, layout: Layout) -> Result<Vec<u8>, String> {
+        use keyword_title_core::autocut::{BAND, BOX};
+        let img = image::open(path).map_err(|e| format!("讀不到靜圖 {path}：{e}"))?.to_rgb8();
+        let img = if img.dimensions() != (W, H) { imageops::resize(&img, W, H, imageops::FilterType::Triangle) } else { img };
+        let (bw, bh) = (BOX.2 - BOX.0, BOX.3.min(BAND.0) - BOX.1);
+        let crop = if layout == Layout::Dual { imageops::crop_imm(&img, BOX.0, BOX.1, bw, bh).to_image() } else { img };
+        let crop = imageops::resize(&crop, bw * 3 / 4, bh * 3 / 4, imageops::FilterType::Lanczos3);
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(crop).write_to(&mut out, ImageFormat::Png).map_err(|e| e.to_string())?;
+        Ok(out.into_inner())
     }
 
     /// 給 AI 看的右上角範圍 x y w h 與放大倍數（比規則用的範圍寬：一行長字、兩行字都放得進去）
@@ -2183,7 +2278,29 @@ mod ai {
         }
 
         /// 參考圖（要遮掉的那支素材的靜圖）＋要判斷的幾格 → 每格是不是同一場活動／同一支素材的畫面（不看來源字）
-        pub fn compare_scene(&self, refs: &[Vec<u8>], targets: &[Vec<u8>]) -> Result<Answer, String> {
+        pub fn compare_scene(&self, refs: &[Vec<u8>], targets: &[Vec<u8>], studio: Option<&Vec<u8>>) -> Result<Answer, String> {
+            if let Some(sample) = studio {
+                let prompt = format!(
+                    "以下是台灣電視談話節目的整張畫面截圖，下方的標題條、字幕、台標都不用管。\n\
+                     第 1～{r} 張是參考圖：節目裡播出的一支外部素材（例如某一場辯論會、記者會、綜藝節目、活動現場）。\
+                     第 {s} 張是「本節目自己的攝影棚」樣本（本節目的主持人、佈景、大螢幕）。第 {a}～{b} 張是要判斷的畫面。\n\
+                     請逐張判斷要判斷的畫面，是不是跟參考圖「同一場活動／同一支素材」的畫面：同一個場地、佈景、同樣的人物與服裝，只是換了鏡頭角度、遠近或時間點，就算相同；\
+                     右上角的來源標示不同沒關係。本節目棚內主持人／來賓的畫面、別的新聞事件、同一個人在別的場合，都算不同。\n\
+                     另外逐張判斷 studio：畫面裡看得到電視台攝影棚或舞台就是 true。再判斷 ours：看到的是不是「本節目」的攝影棚——\
+                     跟第 {s} 張樣本同一個棚（同樣的佈景、大螢幕或觸控螢幕、本節目的主持人或來賓）就是 true，\
+                     就算棚內螢幕上正在播參考素材、或主持人正在講解參考素材的照片也是 true；\
+                     整個畫面是播出的外部素材本身（例如別的節目、綜藝節目的棚或舞台）就是 false；不確定就是 true。\n\
+                     只回傳 JSON：{{\"ref\":\"一句話描述參考圖的場景\",\"targets\":[{{\"text\":\"一句話描述這張畫面\",\"studio\":false,\"ours\":false,\"same\":true}}]}}，targets 依序共 {n} 個。",
+                    r = refs.len(),
+                    s = refs.len() + 1,
+                    a = refs.len() + 2,
+                    b = refs.len() + 1 + targets.len(),
+                    n = targets.len()
+                );
+                let mut all = refs.to_vec();
+                all.push(sample.clone());
+                return self.ask(prompt, &all, targets, true);
+            }
             let prompt = format!(
                 "以下是台灣電視談話節目的整張畫面截圖，下方的標題條、字幕、台標都不用管。\n\
                  第 1～{r} 張是參考圖：節目裡播出的一支外部素材（例如某一場辯論會、記者會、活動現場）。第 {a}～{b} 張是要判斷的畫面。\n\
@@ -2197,7 +2314,25 @@ mod ai {
                 b = refs.len() + targets.len(),
                 n = targets.len()
             );
-            self.ask(prompt, refs, targets)
+            self.ask(prompt, refs, targets, false)
+        }
+
+        /// 雙框左框：參考圖（要遮的那支素材）＋要判斷的幾格左框 → 每格是不是同一支素材；本節目自己的圖卡、棚內畫面算 studio
+        pub fn compare_box(&self, refs: &[Vec<u8>], targets: &[Vec<u8>]) -> Result<Answer, String> {
+            let prompt = format!(
+                "以下是台灣電視談話節目「雙框」畫面的左框截圖（左框播素材、右框是棚內來賓，這裡只截了左框）。\n\
+                 第 1～{r} 張是參考圖：左框播出的一支外部素材（例如某一個綜藝節目、演唱會、活動現場）。第 {a}～{b} 張是要判斷的左框。\n\
+                 請逐張判斷要判斷的左框，是不是跟參考圖「同一場活動／同一支素材」的畫面：同一個場地、佈景、同樣的人物與服裝，只是換了鏡頭角度、遠近或時間點，就算相同；\
+                 右上角的來源標示不同沒關係。別的節目、別的演出、別的事件都算不同。\n\
+                 另外逐張判斷 studio：左框是本節目自己做的圖卡、名單、文字說明、照片拼貼，或是本節目的攝影棚畫面，就是 true；\
+                 是播出的外部影片畫面本身就是 false；不確定就是 true。\n\
+                 只回傳 JSON：{{\"ref\":\"一句話描述參考圖的場景\",\"targets\":[{{\"text\":\"一句話描述這張畫面\",\"studio\":false,\"same\":true}}]}}，targets 依序共 {n} 個。",
+                r = refs.len(),
+                a = refs.len() + 1,
+                b = refs.len() + targets.len(),
+                n = targets.len()
+            );
+            self.ask(prompt, refs, targets, false)
         }
 
         /// 參考圖（同一個來源的靜圖）＋要判斷的幾格 → 每格的來源字是不是跟參考相同
@@ -2212,14 +2347,27 @@ mod ai {
                 b = refs.len() + targets.len(),
                 n = targets.len()
             );
-            self.ask(prompt, refs, targets)
+            self.ask(prompt, refs, targets, false)
         }
 
         /// 送出：題目＋參考圖＋要判斷的圖 → JSON 回答
-        fn ask(&self, prompt: String, refs: &[Vec<u8>], targets: &[Vec<u8>]) -> Result<Answer, String> {
+        /// 每張圖前面都標上「第 N 張（參考圖／要判斷的畫面 j）」：只靠順序時，AI 會把附在參考圖後面的棚內樣本
+        /// 當成第一張要判斷的畫面（11/07 重跑：targets 第一個都描述成「本節目主持人在棚內播報」，整批被擋掉）。
+        /// `sample_last`：refs 的最後一張是本節目棚內樣本
+        fn ask(&self, prompt: String, refs: &[Vec<u8>], targets: &[Vec<u8>], sample_last: bool) -> Result<Answer, String> {
             let b64 = |b: &Vec<u8>| base64::engine::general_purpose::STANDARD.encode(b);
             let mut parts = vec![serde_json::json!({ "text": prompt })];
-            for img in refs.iter().chain(targets) {
+            for (i, img) in refs.iter().enumerate() {
+                let label = if sample_last && i + 1 == refs.len() {
+                    format!("第 {} 張（本節目攝影棚樣本：只拿來比對，不用判斷，不要放進 targets）", i + 1)
+                } else {
+                    format!("第 {} 張（參考圖）", i + 1)
+                };
+                parts.push(serde_json::json!({ "text": label }));
+                parts.push(serde_json::json!({ "inline_data": { "mime_type": "image/png", "data": b64(img) } }));
+            }
+            for (j, img) in targets.iter().enumerate() {
+                parts.push(serde_json::json!({ "text": format!("第 {} 張（要判斷的畫面 {}，對應 targets 第 {} 個）", refs.len() + j + 1, j + 1, j + 1) }));
                 parts.push(serde_json::json!({ "inline_data": { "mime_type": "image/png", "data": b64(img) } }));
             }
             let body = serde_json::json!({
@@ -2257,6 +2405,7 @@ mod ai {
                 same: targets.iter().map(|t| t["same"].as_bool().unwrap_or(false)).collect(),
                 // 來源字的題目沒有這個欄位 → false
                 studio: targets.iter().map(|t| t["studio"].as_bool().unwrap_or(false)).collect(),
+                ours: targets.iter().map(|t| t["ours"].as_bool()).collect(),
             })
         }
     }

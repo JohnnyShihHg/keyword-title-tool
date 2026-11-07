@@ -101,6 +101,20 @@ pub fn is_shot_cut(frames: &[FrameInfo], i: usize) -> bool {
 }
 
 /// range 裡的鏡頭（起, 訖）
+/// 雙框只有左框在換：左框硬切整張畫面只差 15～20（滿版硬切 60 以上），門檻要低很多
+pub const DUAL_CUT_DIFF: f32 = 12.0;
+
+/// 換鏡頭：滿版看整張畫面的硬切（`is_shot_cut`）；前後都是雙框時看左框換畫面（門檻 DUAL_CUT_DIFF）
+pub fn is_any_cut(frames: &[FrameInfo], i: usize) -> bool {
+    if i == 0 || i >= frames.len() {
+        return false;
+    }
+    if frames[i].layout == Layout::Dual && frames[i - 1].layout == Layout::Dual {
+        return frames[i].cut_diff > DUAL_CUT_DIFF && (frames[i].luma - frames[i - 1].luma).abs() <= FLASH_LUMA;
+    }
+    is_shot_cut(frames, i)
+}
+
 pub fn shots(frames: &[FrameInfo], (r0, r1): (usize, usize)) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut a = r0;
@@ -441,7 +455,10 @@ pub fn plan_masks(frames: &[FrameInfo], set: &StillSet, range: (usize, usize)) -
     let mut merged: Vec<MaskSeg> = Vec::new();
     for m in segs {
         if let Some(last) = merged.last_mut() {
-            let near = m.layout == last.layout && m.start >= last.end && m.start - last.end <= 8 * fps && (last.end..m.start).all(|i| layout_at(i) == m.layout);
+            // 中間換了鏡頭（另一個鏡頭夾在中間）不併，交給 AI 的相鄰鏡頭：11/06 第 2 段 7:55 兩段綜藝節目
+            // （同一張靜圖）中間 4 秒是本節目棚內觸控螢幕的手板，被併成一段遮掉
+            let cut_between = (last.end.saturating_sub(3).max(r0 + 1)..(m.start + 3).min(r1)).any(|i| is_any_cut(frames, i));
+            let near = m.layout == last.layout && m.start >= last.end && m.start - last.end <= 8 * fps && (last.end..m.start).all(|i| layout_at(i) == m.layout) && (m.start == last.end || !cut_between);
             if near && (m.layout == Layout::Dual || m.still == last.still) {
                 last.end = m.end;
                 continue;
@@ -477,7 +494,10 @@ pub fn fill_sandwich_gaps(frames: &[FrameInfo], masks: &[MaskSeg]) -> Vec<MaskSe
         if let Some(prev) = out.last().cloned() {
             let (g0, g1) = (prev.end, m.start);
             let program = |a: usize, b: usize| frames[a..b].iter().filter(|f| f.program).count() * 10 >= (b - a) * 9;
-            if g1 > g0 && g1 - g0 <= lim && g1 <= frames.len() && program(g0, g1) {
+            // 空檔本身是另一個鏡頭（裡面或頭尾 3 格內有換鏡頭）就不直接補，交給 AI 的相鄰鏡頭判斷：
+            // 11/06 第 2 段 7:55（側錄 42:06–42:10）兩段綜藝節目中間是本節目棚內觸控螢幕的手板，整段被補遮
+            let cut_near = (g0.saturating_sub(3).max(1)..(g1 + 3).min(frames.len())).any(|i| is_any_cut(frames, i));
+            if g1 > g0 && g1 - g0 <= lim && g1 <= frames.len() && program(g0, g1) && !cut_near {
                 let mut lay: Vec<Layout> = frames[g0..g1].iter().map(|f| f.layout).collect();
                 smooth_layouts(&mut lay);
                 let mut i = g0;
@@ -625,7 +645,8 @@ pub enum AiKind {
 
 /// 相鄰鏡頭最長看幾秒（沒找到鏡頭切換就只看這麼長）、最短幾秒才問
 pub const SCENE_MAX_SECS: f64 = 15.0;
-pub const SCENE_MIN_SECS: f64 = 1.0;
+/// 11/06 第 1 段 8:29 水電爸爸躺下那個鏡頭只有 0.57 秒（之後切回棚內），以前 1 秒以下不問就露出來
+pub const SCENE_MIN_SECS: f64 = 0.3;
 pub const SCENE_NOTE: &str = "AI 接上相鄰鏡頭（同一場畫面）";
 
 /// 空檔最長幾秒還問 AI（太長多半中間換了別的內容）
@@ -717,21 +738,23 @@ pub fn ai_candidates(frames: &[FrameInfo], set: &StillSet, seg: &Segment, masks:
     }
     // 空檔全部問；灰色地帶只問前幾處
     out.truncate(gaps + AI_MAX_WEAK_PER_SEGMENT);
-    // ③ 滿版遮罩前後緊接著的鏡頭（雙框只有左框在換，看不出鏡頭切換，不問）
+    // ③ 遮罩前後緊接著的鏡頭。雙框看左框換畫面（`is_any_cut`）、只拿左框給 AI 看：
+    // 11/06 第 2 段 8:21、8:38、9:27 雙框小框是同一個綜藝節目的其他鏡頭，以前雙框不問就露出來
     let lim = (SCENE_MAX_SECS * FPS) as usize;
     let min_len = (SCENE_MIN_SECS * FPS) as usize;
     for (k, m) in masks.iter().enumerate() {
-        if m.layout != Layout::Full {
-            continue;
-        }
         let prev_end = if k > 0 { masks[k - 1].end } else { 0 };
         let next_start = masks.get(k + 1).map_or(frames.len(), |n| n.start).min(frames.len());
         // 前面：往前找最近的鏡頭切換（最多 15 秒、不跨過前一段遮罩）
+        // 換鏡頭或換版型都算邊界（雙框的鏡頭不會跨到滿版）
+        let edge = |i: usize| is_any_cut(frames, i) || (i > 0 && frames[i].layout != frames[i - 1].layout);
         let lo = m.start.saturating_sub(lim).max(prev_end);
-        let before = ((lo + 1..m.start).rev().find(|&i| is_shot_cut(frames, i)).unwrap_or(lo), m.start);
+        // 不到 SCENE_MIN_SECS 的碎鏡頭併進下一個一起問：11/07 重跑 11/06 第 2 段 50:27.6 BTS「ARIRANG」混剪
+        // 每 0.17 秒一刀，每個鏡頭都太短不問，相鄰鏡頭一路斷掉
+        let before = ((lo + 1..m.start.saturating_sub(min_len).max(lo + 1)).rev().find(|&i| edge(i)).unwrap_or(lo), m.start);
         // 後面：到下一個鏡頭切換為止
         let hi = (m.end + lim).min(next_start);
-        let after = (m.end, (m.end + 1..hi).find(|&i| is_shot_cut(frames, i)).unwrap_or(hi));
+        let after = (m.end, ((m.end + min_len).min(hi)..hi).find(|&i| edge(i)).unwrap_or(hi));
         for (a, b) in [before, after] {
             // 跟「灰色地帶」重疊也照樣問（灰色地帶問的是來源字、這裡問是不是同一場）：11/07 重跑 11/06 第 4 段 1:10:25，
             // 別段靜圖加進來後多了一個灰色地帶蓋住這個鏡頭，AI 說來源字不同，原本會接上的跳舞畫面就露出來。
@@ -741,10 +764,10 @@ pub fn ai_candidates(frames: &[FrameInfo], set: &StillSet, seg: &Segment, masks:
                 continue;
             }
             let g = &frames[a..b];
-            let full = g.iter().filter(|f| f.layout == Layout::Full).count() * 10 >= g.len() * 9;
+            let same_layout = g.iter().filter(|f| f.layout == m.layout).count() * 10 >= g.len() * 9;
             let program = g.iter().filter(|f| f.program).count() * 10 >= g.len() * 9;
-            if full && program {
-                out.push(AiCandidate { start: a, end: b, layout: Layout::Full, stills: vec![m.still], samples: samples(a, b), kind: AiKind::Scene });
+            if same_layout && program {
+                out.push(AiCandidate { start: a, end: b, layout: m.layout, stills: vec![m.still], samples: samples(a, b), kind: AiKind::Scene });
             }
         }
     }
@@ -771,6 +794,44 @@ pub fn pick_still(frames: &[FrameInfo], set: &StillSet, seg: &Segment, start: us
     let same: Vec<usize> = usable.iter().copied().filter(|&k| set.stills[k].layout == layout).collect();
     let pool = if same.is_empty() { usable } else { same };
     pool.into_iter().max_by(|x, y| score(*x).total_cmp(&score(*y)))
+}
+
+/// 手動遮罩的時段照版型切開，每一截挑一張靜圖：(開始格, 結束格, 靜圖)。
+/// `chosen` 是使用者選的靜圖（可以好幾張、滿版雙框混著選）：每截用選的裡面同版型、畫面最像的；
+/// 選的裡面沒有這種版型（或都沒選）→ 從這段能用的靜圖挑同版型、畫面最像的（`pick_still`），但平均要 MANUAL_AUTO_MIN 以上；
+/// 挑不到 → 用選的裡面最像的；都沒選 → 這截不遮（靜圖是 None，報告請使用者選）。
+/// 11/07 第 1 段 16:01 歌劇：只打了時間還沒選圖，每張靜圖都只有 0.2 左右，挑到 BTS 演唱會的靜圖蓋上去
+/// 版型抖一下（不到 1.5 秒）不切（`smooth_layouts`）。11/06 第 2 段 16:24 起女團混剪滿版、雙框交錯，
+/// 只能選一張圖時雙框那幾截也用滿版圖整個蓋掉
+pub const MANUAL_AUTO_MIN: f32 = 0.5;
+
+pub fn manual_plan(frames: &[FrameInfo], set: &StillSet, seg: &Segment, start: usize, end: usize, chosen: &[usize]) -> Vec<(usize, usize, Option<usize>)> {
+    let (a, b) = (start.min(frames.len()), end.min(frames.len()));
+    if b <= a {
+        return Vec::new();
+    }
+    let mut lay: Vec<Layout> = frames[a..b].iter().map(|f| f.layout).collect();
+    smooth_layouts(&mut lay);
+    let score = |k: usize, s: usize, e: usize| frames[s..e].iter().map(|f| f.sims.get(k).copied().unwrap_or(0.0)).sum::<f32>();
+    let best = |pool: &mut dyn Iterator<Item = usize>, s: usize, e: usize| pool.max_by(|x, y| score(*x, s, e).total_cmp(&score(*y, s, e)));
+    let mut out: Vec<(usize, usize, Option<usize>)> = Vec::new();
+    let mut i = 0;
+    while i < lay.len() {
+        let mut j = i;
+        while j < lay.len() && lay[j] == lay[i] {
+            j += 1;
+        }
+        let (s, e, layout) = (a + i, a + j, lay[i]);
+        let still = best(&mut chosen.iter().copied().filter(|&k| set.stills[k].layout == layout), s, e)
+            .or_else(|| pick_still(frames, set, seg, s, e).filter(|&k| set.stills[k].layout == layout && score(k, s, e) / (e - s) as f32 >= MANUAL_AUTO_MIN))
+            .or_else(|| best(&mut chosen.iter().copied(), s, e));
+        match out.last_mut() {
+            Some(last) if last.1 == s && last.2 == still => last.1 = e,
+            _ => out.push((s, e, still)),
+        }
+        i = j;
+    }
+    out
 }
 
 /// 手動指定的時段一定遮：跟原本的遮罩重疊的部分讓給手動的（原本的切掉重疊那截，前後剩下的照留）
@@ -1304,6 +1365,16 @@ mod tests {
         for i in (11 * fps..12 * fps).chain(20 * fps..21 * fps) {
             frames[i].sims = vec![0.95];
         }
+        // 中間那個鏡頭是另一個鏡頭（14、19 秒換鏡頭）：規則不併（可能是棚內，11/06 第 2 段 7:55 手板），
+        // 交給 AI 的相鄰鏡頭判斷
+        let m = plan_masks(&frames, &set, (0, frames.len()));
+        assert_eq!(m.iter().map(|x| (x.start / fps, x.end / fps)).collect::<Vec<_>>(), vec![(10, 14), (19, 23)], "{m:?}");
+        let seg = Segment { n: 1, pieces: vec![(0, frames.len())], start_ok: true, end_ok: true };
+        let c = ai_candidates(&frames, &set, &seg, &m);
+        assert!(c.iter().any(|c| c.kind == AiKind::Scene && (c.start, c.end) == (14 * fps, 19 * fps)), "{c:?}");
+        // 同一個鏡頭裡判斷斷了 5 秒（中間沒換鏡頭）：照樣併
+        frames[14 * fps].cut_diff = 0.0;
+        frames[19 * fps].cut_diff = 0.0;
         let m = plan_masks(&frames, &set, (0, frames.len()));
         assert_eq!(m.len(), 1, "{m:?}");
         assert_eq!((m[0].start, m[0].end), (10 * fps, 23 * fps));
@@ -1330,7 +1401,8 @@ mod tests {
         let seg = Segment { n: 2, pieces: vec![(0, n)], start_ok: true, end_ok: true };
         let m = |a: usize, b: usize| MaskSeg { start: a * fps, end: b * fps, layout: Layout::Dual, still: 0, by_label: false, iou: 0.0, ai: false, note: None };
         let mut masks = vec![m(20, 25), m(43, 50)];
-        let c = ai_candidates(&frames, &set, &seg, &masks);
+        // 雙框遮罩前後的鏡頭也會另外問（相鄰鏡頭），這裡只看空檔
+        let c: Vec<AiCandidate> = ai_candidates(&frames, &set, &seg, &masks).into_iter().filter(|c| c.kind == AiKind::Gap).collect();
         assert_eq!(c.len(), 1, "{c:?}");
         assert_eq!((c[0].start, c[0].end, c[0].kind), (25 * fps, 43 * fps, AiKind::Gap));
         assert_eq!(c[0].stills, vec![0]);
@@ -1342,7 +1414,7 @@ mod tests {
         assert!(masks[0].ai);
         // 空檔超過 60 秒、或版型不同就不問
         let far = vec![m(0, 5), m(70, 75)];
-        assert!(ai_candidates(&frames, &set, &seg, &far).is_empty());
+        assert!(ai_candidates(&frames, &set, &seg, &far).iter().all(|c| c.kind != AiKind::Gap));
     }
 
     #[test]
@@ -1467,9 +1539,18 @@ mod tests {
             f.sims = vec![0.1, 0.95];
         }
         let seg = Segment { n: 2, pieces: vec![(0, frames.len())], start_ok: true, end_ok: true };
+        // 20、24 秒都換鏡頭：中間 4 秒是另一個鏡頭（11/06 第 2 段 7:55 棚內手板），不直接補，交給 AI 的相鄰鏡頭
         let m = segment_masks(&frames, &set, &seg);
         assert_eq!(m.len(), 2, "{m:?}");
-        assert_eq!((m[0].start, m[0].end, m[1].start, m[1].end), (10 * fps, 24 * fps, 24 * fps, 30 * fps));
+        assert_eq!((m[0].start, m[0].end, m[1].start, m[1].end), (10 * fps, 20 * fps, 24 * fps, 30 * fps));
+        assert!(m.iter().all(|x| x.note.is_none()));
+        // 同一個鏡頭裡（中間沒換鏡頭）判斷斷了 4 秒：直接補
+        frames[20 * fps].cut_diff = 0.0;
+        frames[24 * fps].cut_diff = 0.0;
+        let m = segment_masks(&frames, &set, &seg);
+        assert_eq!(m.first().map(|x| x.start), Some(10 * fps));
+        assert_eq!(m.last().map(|x| x.end), Some(30 * fps));
+        assert!(m.windows(2).all(|w| w[0].end == w[1].start), "{m:?}");
     }
 
     /// 11/02 第 2 段 8:25：滿版遮罩前後緊接的鏡頭（來源字不同）→ 問 AI 是不是同一場；說是就接上
@@ -1559,6 +1640,51 @@ mod tests {
         let seg = Segment { n: 1, pieces: vec![(0, frames.len())], start_ok: true, end_ok: true };
         assert_eq!(pick_still(&frames, &set, &seg, 20 * fps, 30 * fps), Some(1));
         assert_eq!(pick_still(&frames, &set, &seg, 0, 10 * fps), Some(0));
+    }
+
+    /// 手動遮罩選好幾張：時段照版型切開，雙框那截用雙框圖、滿版那截用滿版圖
+    #[test]
+    fn manual_plan_splits_by_layout() {
+        let fps = FPS as usize;
+        let mut set = one_still_set();
+        let mut dual = set.stills[0].clone();
+        dual.name = "dual.jpg".into();
+        dual.layout = Layout::Dual;
+        dual.template = None;
+        set.stills.push(dual);
+        let mut frames: Vec<FrameInfo> = (0..30 * fps)
+            .map(|_| {
+                let mut f = frame(true);
+                f.sims = vec![0.1, 0.1];
+                f
+            })
+            .collect();
+        for f in &mut frames[10 * fps..20 * fps] {
+            f.layout = Layout::Dual;
+        }
+        // 雙框裡抖一下滿版（不到 1.5 秒）不切
+        for f in &mut frames[14 * fps..14 * fps + 10] {
+            f.layout = Layout::Full;
+        }
+        let seg = Segment { n: 1, pieces: vec![(0, frames.len())], start_ok: true, end_ok: true };
+        let got: Vec<(usize, usize, Option<usize>)> = manual_plan(&frames, &set, &seg, 5 * fps, 25 * fps, &[0, 1]).iter().map(|&(s, e, k)| (s / fps, e / fps, k)).collect();
+        assert_eq!(got, vec![(5, 10, Some(0)), (10, 20, Some(1)), (20, 25, Some(0))]);
+        // 只選了滿版圖：雙框那截的雙框靜圖畫面不像（0.1）→ 不自動挑，改用選的滿版圖
+        let got: Vec<Option<usize>> = manual_plan(&frames, &set, &seg, 5 * fps, 25 * fps, &[0]).iter().map(|p| p.2).collect();
+        assert_eq!(got, vec![Some(0)]);
+        // 雙框靜圖夠像（0.7）→ 雙框那截自動挑它
+        for f in &mut frames[10 * fps..20 * fps] {
+            f.sims = vec![0.1, 0.7];
+        }
+        let got: Vec<Option<usize>> = manual_plan(&frames, &set, &seg, 5 * fps, 25 * fps, &[0]).iter().map(|p| p.2).collect();
+        assert_eq!(got, vec![Some(0), Some(1), Some(0)]);
+        // 都沒選、畫面也不像：不遮（不要亂挑一張蓋上去）
+        let got: Vec<Option<usize>> = manual_plan(&frames, &set, &seg, 0, 5 * fps, &[]).iter().map(|p| p.2).collect();
+        assert_eq!(got, vec![None]);
+        // 都沒有雙框靜圖：雙框那截也用選的滿版圖（手動指定的時段一定遮）
+        set.stills.truncate(1);
+        let got: Vec<(usize, usize, Option<usize>)> = manual_plan(&frames, &set, &seg, 5 * fps, 25 * fps, &[0]).iter().map(|&(s, e, k)| (s / fps, e / fps, k)).collect();
+        assert_eq!(got, vec![(5, 25, Some(0))]);
     }
 
     /// 11/06 第 1 段 12:47：AI 接上後面一個鏡頭後，再後面那個鏡頭要變成新的題目（呼叫端一輪一輪問到不再變）

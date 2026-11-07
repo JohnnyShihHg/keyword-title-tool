@@ -1,10 +1,10 @@
 // 自動切段頁「手動遮罩」：自動判斷漏掉的地方，指定時段一定遮（蓋過自動判斷的）。
 // 時段是成品的段內時間，可以直接貼同事回報的剪輯時間碼「00;16;01;20-00;16;10;25」（;＝29.97 掉格、:＝不掉格，最後一節是格數）
-// 或一般的「16:01.6-16:10.8」。靜圖可以不選：Rust 端挑這段時間畫面最像的（plan::pick_still）。
+// 或一般的「16:01.6-16:10.8」。靜圖可以選好幾張：Rust 端照版型切開，每截用同版型最像的；不選就從這段能用的挑（plan::manual_plan）。
 // 設定依日期存在 localStorage，改了就送給監看中的 Rust（autocut_set_manual_masks）。
 // 和 bars.js 共用 acParseTime、acFmtTime；和 autocut.js 共用 invoke、$、dialog、dateInput、convertFileSrc、acStatus、acMessage。
 
-let acMasks = {}; // 段號 → [{ ranges: "16:01.6-16:10.8", still: "" }]
+let acMasks = {}; // 段號 → [{ ranges: "16:01.6-16:10.8", stills: [路徑…] }]（舊設定是單張的 still）
 let acMasksDate = null;
 let acMaskEls = {}; // 段號 → { details, count, list, items: [{ spec, chips }] }
 
@@ -60,8 +60,17 @@ function acMaskComplete(m) {
   return !!(acParseMaskRanges(m.ranges || "") || []).length;
 }
 
+/** 選的靜圖（舊設定只有一張 still，讀進來時併進 stills） */
+function acMaskStills(m) {
+  if (m.still) {
+    m.stills = [...new Set([...(m.stills || []), m.still])];
+    delete m.still;
+  }
+  return (m.stills ||= []);
+}
+
 function acMaskPayload(n) {
-  return (acMasks[n] || []).filter(acMaskComplete).map((m) => ({ ranges: acParseMaskRanges(m.ranges), still: m.still || "" }));
+  return (acMasks[n] || []).filter(acMaskComplete).map((m) => ({ ranges: acParseMaskRanges(m.ranges), stills: acMaskStills(m) }));
 }
 
 function acPushMasks(n) {
@@ -90,7 +99,7 @@ function acBuildMasks() {
       const el = { details, count: details.querySelector(".ac-bar-count"), list: details.querySelector(".ac-bar-list"), items: [] };
       details.querySelector(".ac-bar-add").onclick = (e) => {
         e.preventDefault(); // 不要觸發收合
-        (acMasks[n] ||= []).push({ ranges: "", still: "" });
+        (acMasks[n] ||= []).push({ ranges: "", stills: [] });
         acSaveMasks();
         details.open = true;
         acBuildMaskItems(n);
@@ -112,41 +121,53 @@ function acBuildMaskItems(n) {
     ...specs.map((m, i) => {
       const item = document.createElement("div");
       item.className = "ac-bar-item";
-      item.innerHTML = `<button type="button" class="ac-bar-thumb"></button>
-        <div class="ac-bar-fields">
+      item.innerHTML = `<div class="ac-bar-fields">
           <label>時段（成品段內時間）<input class="ac-mask-ranges" spellcheck="false" placeholder="可以直接貼：00;16;01;20-00;16;10;25；或 16:01.6-16:10.8，好幾段用逗號分開" /></label>
+          <div class="ac-mask-label">靜圖（可以選好幾張：滿版的地方用滿版圖、雙框的地方用雙框圖蓋小框，各自挑最像的；不選＝自動挑）</div>
+          <div class="ac-mask-stills"></div>
           <div class="ac-bar-chips muted"></div>
         </div>
         <button type="button" class="ghost small danger ac-bar-del">刪除</button>`;
       const q = (s) => item.querySelector(s);
-      const thumb = q(".ac-bar-thumb");
-      const drawThumb = () => {
-        thumb.replaceChildren();
-        thumb.title = m.still ? `${m.still}\n點一下換別張；右鍵＝改回自動挑` : "沒選＝自動挑這段畫面最像的靜圖\n點一下自己選（要是靜圖資料夾裡的圖）";
-        if (m.still) {
-          const img = document.createElement("img");
-          img.src = convertFileSrc(m.still);
-          img.alt = m.still.split(/[\\/]/).pop();
-          img.onerror = () => thumb.replaceChildren(img.alt);
-          thumb.append(img);
-        } else thumb.append(Object.assign(document.createElement("span"), { textContent: "自動挑靜圖" }));
+      const list = acMaskStills(m);
+      const box = q(".ac-mask-stills");
+      const drawStills = () => {
+        box.replaceChildren(
+          ...list.map((path, j) => {
+            const t = document.createElement("button");
+            t.type = "button";
+            t.className = "ac-bar-thumb ac-mask-thumb";
+            t.title = `${path}\n點一下移除這張`;
+            const img = document.createElement("img");
+            img.src = convertFileSrc(path);
+            img.alt = path.split(/[\\/]/).pop();
+            img.onerror = () => t.replaceChildren(img.alt);
+            t.append(img);
+            t.onclick = () => {
+              list.splice(j, 1);
+              drawStills();
+              acPushMasks(n);
+            };
+            return t;
+          }),
+        );
+        const add = document.createElement("button");
+        add.type = "button";
+        add.className = "ac-bar-thumb ac-mask-thumb";
+        add.title = "選靜圖（要是靜圖資料夾裡的圖，可以一次選好幾張）";
+        add.append(Object.assign(document.createElement("span"), { textContent: list.length ? "＋ 再加" : "＋ 選靜圖（不選＝自動挑）" }));
+        add.onclick = async () => {
+          const dir = list.length ? list[list.length - 1].replace(/[\\/][^\\/]*$/, "") : $("acStillsDir")?.value?.trim() || undefined;
+          const picked = await dialog.open({ multiple: true, defaultPath: dir, filters: [{ name: "圖片", extensions: ["jpg", "jpeg", "png"] }] });
+          const paths = (Array.isArray(picked) ? picked : picked ? [picked] : []).filter((p) => !list.includes(p));
+          if (!paths.length) return;
+          list.push(...paths);
+          drawStills();
+          acPushMasks(n);
+        };
+        box.append(add);
       };
-      drawThumb();
-      thumb.onclick = async () => {
-        const dir = m.still ? m.still.replace(/[\\/][^\\/]*$/, "") : $("acStillsDir")?.value?.trim() || undefined;
-        const path = await dialog.open({ multiple: false, defaultPath: dir, filters: [{ name: "圖片", extensions: ["jpg", "jpeg", "png"] }] });
-        if (!path) return;
-        m.still = path;
-        drawThumb();
-        acPushMasks(n);
-      };
-      thumb.oncontextmenu = (e) => {
-        e.preventDefault();
-        if (!m.still) return;
-        m.still = "";
-        drawThumb();
-        acPushMasks(n);
-      };
+      drawStills();
       const ranges = q(".ac-mask-ranges");
       ranges.value = m.ranges || "";
       const commit = () => {
