@@ -289,7 +289,6 @@ $("acStillsSeg").value = "";
 $("acStillsSeg").addEventListener("change", acFillCands);
 $("acStillsPasteBtn").addEventListener("click", () => {
   if (!acStillsDir()) return acMessage("請先在上面選靜圖資料夾");
-  $("acReplace").open = true;
   $("acStillsPaste").classList.remove("hidden");
   $("acStillsMsg").focus();
 });
@@ -315,16 +314,13 @@ $("acStillsAddBtn").addEventListener("click", async () => {
   $("acStillsMsg").focus();
 });
 $("acStillsRefresh").addEventListener("click", acLoadStills);
-$("acReplace").addEventListener("toggle", () => {
-  if ($("acReplace").open) acLoadStills();
-});
 
 // 圖片拖進「替換畫面」：拖到貼訊息的框＝加進候選；拖到某一段＝直接加進那段
 {
   const IMG_RE = /\.(jpe?g|png)$/i;
   let hover = null;
   const targetAt = (pos) => {
-    if ($("page-autocut").classList.contains("hidden") || !$("acReplace").open || !pos) return null;
+    if ($("page-autocut").classList.contains("hidden") || !pos) return null;
     const dpr = window.devicePixelRatio || 1;
     const el = document.elementFromPoint(pos.x / dpr, pos.y / dpr);
     return el?.closest("#acStillsPaste:not(.hidden), .ac-still-seg") || null;
@@ -357,7 +353,7 @@ window.onSettingsChanged = () => {
 // 監看中靜圖資料夾變了（別台電腦放進來的），狀態更新時順便重讀；開著才讀、最多 15 秒一次（資料夾可能在網路上）
 let acStillsReadAt = 0;
 listen("autocut-status", () => {
-  if (!$("acReplace").open || Date.now() - acStillsReadAt < 15000) return;
+  if (Date.now() - acStillsReadAt < 15000) return;
   acStillsReadAt = Date.now();
   acLoadStills();
 });

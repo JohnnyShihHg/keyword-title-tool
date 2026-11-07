@@ -516,7 +516,8 @@ input { padding: 6px 10px; }
 .preview-wrap.card { align-items: stretch; }
 .preview-wrap video, .player-box { max-width: none; }
 .preview-wrap video { max-height: 50vh; border-radius: 10px; }
-.v-player:not(:has(.player-box video:not(.hidden)))::before { content: "按「▶ 從頭播放時間軸」或點時間軸，在這裡播放"; display: flex; align-items: center; justify-content: center; aspect-ratio: 16 / 9; border-radius: 10px; background: #111; color: #8b8e98; font-size: 12px; padding: 12px; text-align: center; }
+/* 切點微調器開著時不放黑色提示框：提示框在微調器上面，按播放後提示框消失，微調器會往上跳（11/07） */
+.v-player:not(:has(.player-box video:not(.hidden))):not(:has(.trim-editor:not(.hidden)))::before { content: "按「▶ 從頭播放時間軸」或點時間軸，在這裡播放"; display: flex; align-items: center; justify-content: center; aspect-ratio: 16 / 9; border-radius: 10px; background: #111; color: #8b8e98; font-size: 12px; padding: 12px; text-align: center; }
 
 /* 輸出：寬視窗是右欄的一張卡片；縮小時浮在視窗最底（見下方 @media） */
 .out-dock { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; box-shadow: var(--shadow); }

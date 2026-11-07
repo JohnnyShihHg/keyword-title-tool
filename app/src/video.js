@@ -1492,18 +1492,22 @@ function useFlashCandidate(n, i) {
  * 從 from 秒往後找第一個閃白。沒給 from：重新偵測，從開頭 2 分半之後找（片子比這還
  * 還短就從頭）。next：接著目前這個往後找，找到的排在後面，可以用「上一個」退回。
  */
-/** 放入影片後自動偵測的那一輪：選「切在閃白」的段（有放的）都抓到閃白時，問要不要開始轉檔。 */
+/**
+ * 放入影片後：六段都放好、選「切在閃白」的段都抓到閃白，才問要不要開始轉檔。
+ * 11/07：以前放了一段、抓到閃白就跳出來問，其他段還沒放
+ */
 let flashAnnounce = false;
 
 async function announceFlashDone() {
   if (!flashAnnounce) return;
-  const segs = [1, 2, 3, 4, 5, 6].filter((n) => store[`s${n}`] && segTrim[n].on && usesCutAt(n));
-  if (!segs.length || segs.some((n) => segFlash[n]?.state !== "found")) return;
+  if ([1, 2, 3, 4, 5, 6].some((n) => !store[`s${n}`])) return;
+  const segs = [1, 2, 3, 4, 5, 6].filter((n) => segTrim[n].on && usesCutAt(n));
+  if (segs.some((n) => segFlash[n]?.state !== "found")) return;
   flashAnnounce = false;
   const where = segs.map((n) => `第${SEGMENT_NAMES[n - 1]}段 ${fmtPrecise(segTrim[n].auto?.end ?? 0)}`).join("、");
   const go = await showNotice({
-    title: "閃白判斷完成",
-    message: `${where}，請問開始轉檔嗎？`,
+    title: segs.length ? "六段都放好了，閃白判斷完成" : "六段都放好了",
+    message: segs.length ? `${where}，請問開始轉檔嗎？` : "請問開始轉檔嗎？",
     okText: "開始轉檔",
     cancelText: "稍後",
     input: { label: "輸出檔名", value: $("fullName").value.trim() || fullDefaultName() },
@@ -1555,8 +1559,10 @@ async function loadSegment(n, path) {
   }
   await applySegTrim(n);
   renderFlashUi(n);
-  if (usesCutAt(n)) flashAnnounce = true;
-  detectSegFlash(n);
+  flashAnnounce = true;
+  // 只砍片尾的段不用抓閃白：放好就看看六段是不是到齊了
+  if (usesCutAt(n) && segTrim[n].on) detectSegFlash(n);
+  else announceFlashDone();
 }
 
 $("fullSegments").replaceChildren(
