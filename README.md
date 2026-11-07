@@ -19,6 +19,8 @@
   - ffmpeg、yt-dlp 第一次使用時從設定頁下載到程式資料夾
 - **自動切段**：監看側錄資料夾，每錄完一個 10 分鐘檔就掃描；用標題條判斷節目／廣告、OCR 對文稿分段、依靜圖遮蓋翻攝畫面，完整一段就輸出 `第N段.mp4`，各段到齊合成 `全集.mp4`（OCR 需要 Windows 繁體中文 OCR）
 
+各欄位的詳細說明見 [docs/使用說明.md](docs/使用說明.md)。
+
 ## 安裝
 
 到 [Releases](../../releases/latest) 下載 `KeywordTitleTool_x.y.z_x64-setup.exe` 執行。

@@ -113,8 +113,8 @@ function acBuildBarItems(n) {
       item.className = "ac-bar-item";
       item.innerHTML = `<button type="button" class="ac-bar-thumb"></button>
         <div class="ac-bar-fields">
-          <label>要換掉的舊標題<input class="ac-bar-old" list="acBarTitles${n}" spellcheck="false" placeholder="從文稿選，或自己打（標題條上原本的字）" /></label>
-          <label>時段<input class="ac-bar-manual" spellcheck="false" placeholder="留空＝自動找；手動：29:55-31:18, 32:00-32:10（成品段內時間）" /></label>
+          <label>要換掉的舊標題<input class="ac-bar-old" list="acBarTitles${n}" spellcheck="false" placeholder="標題條上原本寫錯的字（可以從文稿選）" /></label>
+          <label>時段<input class="ac-bar-manual" spellcheck="false" placeholder="空白＝自動找；或填成品時間，例如 29:55-31:18" /></label>
           <div class="ac-bar-chips muted"></div>
         </div>
         <button type="button" class="ghost small danger ac-bar-del">刪除</button>`;

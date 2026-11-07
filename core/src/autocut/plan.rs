@@ -834,6 +834,53 @@ pub fn manual_plan(frames: &[FrameInfo], set: &StillSet, seg: &Segment, start: u
     out
 }
 
+/// 手動遮罩「跳過棚內」：把時段切成一個一個鏡頭（換鏡頭、換版型就切），每個鏡頭再交給 AI 判斷是不是本節目的棚內／圖卡。
+/// 太短的碎鏡頭（不到 SCENE_MIN_SECS）併進前一個；太長的（超過 MANUAL_SHOT_MAX_SECS）切成幾截各問一次，
+/// 免得左框中間換了內容（雙框沒有硬切）只看到一格。回傳 (開始格, 結束格, 版型)
+pub const MANUAL_SHOT_MAX_SECS: f64 = 8.0;
+
+pub fn manual_shots(frames: &[FrameInfo], start: usize, end: usize) -> Vec<(usize, usize, Layout)> {
+    let (a, b) = (start.min(frames.len()), end.min(frames.len()));
+    if b <= a {
+        return Vec::new();
+    }
+    let mut lay: Vec<Layout> = frames[a..b].iter().map(|f| f.layout).collect();
+    smooth_layouts(&mut lay);
+    let min_len = (SCENE_MIN_SECS * FPS) as usize;
+    let max_len = (MANUAL_SHOT_MAX_SECS * FPS) as usize;
+    let mut cuts: Vec<usize> = vec![a];
+    for i in a + 1..b {
+        if lay[i - a] != lay[i - a - 1] || is_any_cut(frames, i) {
+            cuts.push(i);
+        }
+    }
+    cuts.push(b);
+    let mut out: Vec<(usize, usize, Layout)> = Vec::new();
+    for w in cuts.windows(2) {
+        let (s, e) = (w[0], w[1]);
+        let l = lay[s - a];
+        match out.last_mut() {
+            // 碎鏡頭：併進前一個（同版型才併）
+            Some(last) if e - s < min_len && last.2 == l && last.1 == s => last.1 = e,
+            _ => out.push((s, e, l)),
+        }
+    }
+    // 第一個是碎鏡頭：併進後一個
+    if out.len() > 1 && out[0].1 - out[0].0 < min_len && out[1].2 == out[0].2 {
+        let first = out.remove(0);
+        out[0].0 = first.0;
+    }
+    // 太長的切成幾截
+    let mut split = Vec::new();
+    for (s, e, l) in out {
+        let n = (e - s).div_ceil(max_len).max(1);
+        for k in 0..n {
+            split.push((s + (e - s) * k / n, s + (e - s) * (k + 1) / n, l));
+        }
+    }
+    split
+}
+
 /// 手動指定的時段一定遮：跟原本的遮罩重疊的部分讓給手動的（原本的切掉重疊那截，前後剩下的照留）
 pub fn apply_manual(masks: &mut Vec<MaskSeg>, start: usize, end: usize, still: usize, layout: Layout) {
     if end <= start {
@@ -1640,6 +1687,25 @@ mod tests {
         let seg = Segment { n: 1, pieces: vec![(0, frames.len())], start_ok: true, end_ok: true };
         assert_eq!(pick_still(&frames, &set, &seg, 20 * fps, 30 * fps), Some(1));
         assert_eq!(pick_still(&frames, &set, &seg, 0, 10 * fps), Some(0));
+    }
+
+    /// 手動遮罩跳過棚內：照換鏡頭、換版型切；碎鏡頭併進前一個；太長的切成幾截
+    #[test]
+    fn manual_shots_split_by_cut_and_layout() {
+        let fps = FPS as usize;
+        let mut frames: Vec<FrameInfo> = (0..40 * fps).map(|_| frame(true)).collect();
+        frames[5 * fps].cut_diff = 60.0;
+        frames[5 * fps + 3].cut_diff = 60.0; // 0.1 秒的碎鏡頭
+        for f in &mut frames[10 * fps..30 * fps] {
+            f.layout = Layout::Dual;
+        }
+        frames[15 * fps].cut_diff = 15.0; // 雙框左框換畫面
+        let got: Vec<(usize, usize, Layout)> = manual_shots(&frames, 0, 30 * fps).iter().map(|&(s, e, l)| (s * 10 / fps, e * 10 / fps, l)).collect();
+        assert_eq!(
+            got,
+            vec![(0, 51, Layout::Full), (51, 100, Layout::Full), (100, 150, Layout::Dual), (150, 224, Layout::Dual), (224, 300, Layout::Dual)],
+            "{got:?}"
+        );
     }
 
     /// 手動遮罩選好幾張：時段照版型切開，雙框那截用雙框圖、滿版那截用滿版圖

@@ -70,7 +70,7 @@ function acMaskStills(m) {
 }
 
 function acMaskPayload(n) {
-  return (acMasks[n] || []).filter(acMaskComplete).map((m) => ({ ranges: acParseMaskRanges(m.ranges), stills: acMaskStills(m) }));
+  return (acMasks[n] || []).filter(acMaskComplete).map((m) => ({ ranges: acParseMaskRanges(m.ranges), stills: acMaskStills(m), skip_studio: !!m.skip_studio }));
 }
 
 function acPushMasks(n) {
@@ -93,7 +93,7 @@ function acBuildMasks() {
     ...[1, 2, 3, 4, 5, 6].map((n) => {
       const details = document.createElement("details");
       details.className = "ac-bar-seg";
-      details.open = open.has(n) || !!(acMasks[n] || []).length;
+      details.open = open.has(n); // 預設收起來（東西多時整頁太長）；有幾個遮罩看標題旁的數字
       details.innerHTML = `<summary><span class="ac-bar-name">第 ${n} 段</span><span class="ac-bar-count"></span><span class="spacer"></span>
         <button type="button" class="ghost small ac-bar-add">＋ 新增遮罩</button></summary><div class="ac-bar-list"></div>`;
       const el = { details, count: details.querySelector(".ac-bar-count"), list: details.querySelector(".ac-bar-list"), items: [] };
@@ -122,8 +122,9 @@ function acBuildMaskItems(n) {
       const item = document.createElement("div");
       item.className = "ac-bar-item";
       item.innerHTML = `<div class="ac-bar-fields">
-          <label>時段（成品段內時間）<input class="ac-mask-ranges" spellcheck="false" placeholder="可以直接貼：00;16;01;20-00;16;10;25；或 16:01.6-16:10.8，好幾段用逗號分開" /></label>
-          <div class="ac-mask-label">靜圖（可以選好幾張：滿版的地方用滿版圖、雙框的地方用雙框圖蓋小框，各自挑最像的；不選＝自動挑）</div>
+          <label>時段（成品段內時間）<input class="ac-mask-ranges" spellcheck="false" placeholder="例如 00;16;01;20-00;16;10;25 或 16:01.6-16:10.8" /></label>
+          <label class="ac-mask-skip"><input type="checkbox" class="ac-mask-skip-box" /> 跳過棚內、自己的圖卡（問 AI；不確定的不遮）</label>
+          <div class="ac-mask-label">要蓋的圖（可多選：滿版、雙框各一張）</div>
           <div class="ac-mask-stills"></div>
           <div class="ac-bar-chips muted"></div>
         </div>
@@ -168,6 +169,12 @@ function acBuildMaskItems(n) {
         box.append(add);
       };
       drawStills();
+      const skip = q(".ac-mask-skip-box");
+      skip.checked = !!m.skip_studio;
+      skip.onchange = () => {
+        m.skip_studio = skip.checked;
+        acPushMasks(n);
+      };
       const ranges = q(".ac-mask-ranges");
       ranges.value = m.ranges || "";
       const commit = () => {
