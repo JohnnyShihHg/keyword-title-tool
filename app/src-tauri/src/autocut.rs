@@ -1111,6 +1111,13 @@ struct Watcher {
     last_manual: HashMap<usize, Vec<ManualMask>>,
     /// 上次規劃時「自動出片」有沒有開（監看中打開 → 重新規劃，完整的段送去出片）
     last_auto_render: bool,
+    /// 「從幾點開始看」那一刻某段正在播、開頭不在讀到的檔裡：往前多讀幾個側錄檔（最多 MAX_LOOKBACK 個）
+    lookback: usize,
+    /// 「從幾點開始看」之前還有幾個側錄檔可以往前讀
+    lookback_avail: usize,
+    /// 這次列出來的檔已經往前讀了幾個（往前多讀要等真的讀到了才再往前，不然一輪裡會連加好幾次）
+    lookback_listed: usize,
+    last_since: Option<String>,
     /// 壓 BAR 時段的邊界窗口 (lo, hi, 進場?) → 對準的那一格（要解碼一小段，結果記起來）
     bar_edges: HashMap<(usize, usize, bool), usize>,
     /// AI 補判（沒設金鑰＝None）與判斷過的結果（存在 .autocut\ai.tsv，同一個地方不重複問）
@@ -1160,6 +1167,10 @@ impl Watcher {
             last_bars: HashMap::new(),
             last_manual: HashMap::new(),
             last_auto_render: true,
+            lookback: 0,
+            lookback_avail: 0,
+            lookback_listed: 0,
+            last_since: None,
             bar_edges: HashMap::new(),
             rerendered: HashSet::new(),
         })
@@ -1179,7 +1190,8 @@ impl Watcher {
             // 停止時砍掉 ffmpeg 造成的錯誤不用報
             match self.poll().or_else(|e| if self.shared.stopped() { Ok(false) } else { Err(e) }) {
                 // 整批模式：資料夾裡的檔都處理過就結束，出片佇列由呼叫端等它送完
-                Ok(all_done) if self.cfg.batch && all_done => break,
+                // 還要再規劃一輪（例如「從幾點開始看」要往前多讀檔）就先不結束
+                Ok(all_done) if self.cfg.batch && all_done && !self.dirty => break,
                 Ok(_) => {}
                 Err(e) => {
                     *self.shared.message.lock().unwrap() = e.clone();
@@ -1226,6 +1238,11 @@ impl Watcher {
                 self.log(if self.ai.is_some() { "AI 金鑰／模型換了，之後用新的" } else { "AI 金鑰清掉了，之後不問 AI" });
             }
             self.dirty = true;
+        }
+        // 開始時間改了：往前多讀的檔重新算
+        if self.cfg.since != self.last_since {
+            self.last_since = self.cfg.since.clone();
+            self.lookback = 0;
         }
         let auto = self.shared.auto_render.load(Ordering::SeqCst);
         if auto != self.last_auto_render {
@@ -1319,7 +1336,7 @@ impl Watcher {
     }
 
     /// 側錄檔清單（依檔名裡的時間排序）：(檔名, 路徑, 大小)
-    fn list_files(&self) -> Result<Vec<(String, PathBuf, u64)>, String> {
+    fn list_files(&mut self) -> Result<Vec<(String, PathBuf, u64)>, String> {
         let rd = std::fs::read_dir(&self.cfg.watch_dir).map_err(|e| format!("讀不到側錄資料夾：{e}"))?;
         let mut all: Vec<(String, PathBuf, u64)> = rd
             .filter_map(|e| e.ok())
@@ -1334,10 +1351,19 @@ impl Watcher {
         if all.iter().any(|f| cache::name_timestamp(&f.0).is_some()) {
             all.retain(|f| cache::name_timestamp(&f.0).is_some());
             all.sort_by_key(|f| (cache::name_timestamp(&f.0), f.0.clone()));
-            // 側錄資料夾是整天的頻道錄影：只看檔名時間在「幾點開始」之後的檔
-            if let Some(since) = self.cfg.since.as_deref().map(|s| s.replace([':', '：'], "")).filter(|s| s.len() == 4 && s.chars().all(|c| c.is_ascii_digit())) {
-                all.retain(|f| cache::name_timestamp(&f.0).is_some_and(|t| t[8..12] >= *since));
-            }
+            // 側錄資料夾是整天的頻道錄影：只看「幾點開始」之後的。
+            // 填到分（21:50）：照舊只看檔名時間在這之後的檔；
+            // 填到秒（21:55:40）：從含這一秒的那個檔開始看，檔裡這一秒之前的畫面在規劃時當成非節目（見 replan）
+            // 那一刻有一段正在播、開頭在更早的檔：再往前多讀 lookback 個檔（見 replan）
+            let start = |f: &(String, PathBuf, u64)| cache::name_timestamp(&f.0).and_then(|t| clock_of(&t));
+            let from = match since_clock(self.cfg.since.as_deref()) {
+                Some((sec, true)) => all.iter().rposition(|f| start(f).is_some_and(|t| t <= sec)).unwrap_or(0),
+                Some((sec, false)) => all.iter().position(|f| start(f).is_some_and(|t| t >= sec)).unwrap_or(all.len()),
+                None => 0,
+            };
+            self.lookback_avail = from;
+            self.lookback_listed = self.lookback.min(from);
+            all.drain(..from.saturating_sub(self.lookback));
         } else {
             all.retain(|f| !is_output_name(&f.0));
             all.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1528,6 +1554,8 @@ impl Watcher {
         let mut frames: Vec<FrameInfo> = Vec::new();
         let mut ocr: BTreeMap<usize, String> = BTreeMap::new();
         let mut files: Vec<(PathBuf, f64, f64)> = Vec::new();
+        // 「從幾點開始看」那一刻在時間軸上的哪一格（在讀到的檔裡才有）
+        let mut since_at: Option<usize> = None;
         // 接縫：下一檔開頭重複了前一檔最後一秒多 → 前一檔結尾拿掉那幾格（兩份一模一樣，拿哪份都一樣；
         // 拿前一檔的，後面每個檔的「檔內時間＝時間軸−檔開頭」照舊成立，出片、截圖都不用改）
         let mut log = String::new();
@@ -1547,9 +1575,70 @@ impl Watcher {
             // 整體時間軸＝各檔格數依序相加（不用秒數相加，每檔是 17,984 格＝600.066 秒）
             files.push((s.path.clone(), secs(off), secs(keep)));
             frames.extend(s.frames[..keep].iter().cloned());
+            if let (Some((since, _)), Some(start)) = (since_clock(self.cfg.since.as_deref()), cache::name_timestamp(&s.name).and_then(|t| clock_of(&t))) {
+                let cut = (((since.saturating_sub(start)) as f64) * FPS).round() as usize;
+                if since >= start && cut < keep {
+                    since_at = Some(off + cut);
+                }
+            }
+        }
+        // 「從幾點開始看」：那一刻之前已經播完的不看（11/09 開場提要在 21:51，填 21:55:40 就避開）；
+        // 那一刻正在播的那一段要從它真正的開頭算（填 2300 時第 4 段 22:55 就開始了），開頭不在讀到的檔裡就往前多讀檔。
+        // 時間＝檔名時間＋檔內秒數，誤差約檔名的一兩秒
+        let fps = FPS as usize;
+        let mut window_start = 0usize;
+        if let Some(tc) = since_at.filter(|&t| t > 0) {
+            let w = &frames[tc.saturating_sub(2 * fps)..tc];
+            let on_air = !w.is_empty() && w.iter().filter(|f| f.program).count() * 2 >= w.len();
+            let mut r = tc;
+            if on_air {
+                // 往前走到連續 5 秒以上沒有標題條（廣告、轉場）為止；走到時間軸開頭都還在播＝開頭在更早的檔
+                let (mut i, mut gap) = (tc, 0usize);
+                while i > 0 {
+                    i -= 1;
+                    if frames[i].program {
+                        r = i;
+                        gap = 0;
+                    } else {
+                        gap += 1;
+                        if gap >= 5 * fps {
+                            break;
+                        }
+                    }
+                }
+                if i == 0 && gap < 5 * fps {
+                    r = 0;
+                }
+            }
+            frames[..r].iter_mut().for_each(|f| f.program = false);
+            window_start = r;
+            if let Some((since, _)) = since_clock(self.cfg.since.as_deref()) {
+                log.push_str(&format!(
+                    "  從 {:02}:{:02}:{:02} 開始看：之前已經播完的不看{}\n",
+                    since / 3600,
+                    since / 60 % 60,
+                    since % 60,
+                    if on_air { "；那一刻正在播的那段從它的開頭算" } else { "" }
+                ));
+            }
         }
         log.push_str(&self.seam_report(&seams));
         let mut segs = plan::plan_segments(&frames, &ocr, &self.titles, &mut log);
+        // 有一段在讀到的範圍一開頭就已經在播（開頭在更早的檔）：往前多讀一個檔，下一輪再規劃
+        if since_clock(self.cfg.since.as_deref()).is_some() {
+            if let Some(seg) = segs.iter().find(|s| !s.start_ok && s.start() <= window_start + 3 * fps) {
+                if self.lookback != self.lookback_listed {
+                    // 已經決定往前多讀了，下一輪列檔才會讀到：先不動
+                    self.dirty = true;
+                } else if self.lookback < self.lookback_avail.min(MAX_LOOKBACK) {
+                    self.lookback += 1;
+                    self.dirty = true;
+                    log.push_str(&format!("  第 {} 段在「從幾點開始看」之前就開始了：往前多讀一個側錄檔找開頭（往前 {} 個）\n", seg.n, self.lookback));
+                } else {
+                    log.push_str(&format!("    ★ 第 {} 段在「從幾點開始看」之前就開始了，往前找不到開頭，不完整、不出片\n", seg.n));
+                }
+            }
+        }
         // 最後一段沒收黑、也等不到錄滿 8 分鐘：看側錄的時鐘（檔名開始時間＋檔案長度）
         let clock = self.scanned.last().and_then(|s| {
             let t = cache::name_timestamp(&s.name)?;
@@ -2239,6 +2328,29 @@ bar {} {mtime} {ranges:?}", bar.image));
         let frames: Vec<image::GrayImage> = o.stdout.chunks_exact((LOGO_W * LOGO_H) as usize).filter_map(|c| image::GrayImage::from_raw(LOGO_W, LOGO_H, c.to_vec())).collect();
         plan::logo_end(&self.logo, &frames).map(|k| s0 + k)
     }
+}
+
+/// 「從幾點開始看」那一刻某段正在播時，最多往前多讀幾個側錄檔找它的開頭（一個檔 10 分鐘，最長一段約 40 分鐘）
+const MAX_LOOKBACK: usize = 6;
+
+/// 「從幾點開始看」→ (當天第幾秒, 有沒有填到秒)。「21:50」「2150」＝到分；「21:55:40」「215540」＝到秒；看不懂＝None
+fn since_clock(since: Option<&str>) -> Option<(u32, bool)> {
+    let d: String = since?.trim().replace([':', '：'], "");
+    if !d.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let n = |r: std::ops::Range<usize>| d.get(r).and_then(|x| x.parse::<u32>().ok());
+    match d.len() {
+        4 => Some(((n(0..2)?).min(23) * 3600 + n(2..4)?.min(59) * 60, false)),
+        6 => Some(((n(0..2)?).min(23) * 3600 + n(2..4)?.min(59) * 60 + n(4..6)?.min(59), true)),
+        _ => None,
+    }
+}
+
+/// 側錄檔名時間（`name_timestamp` 的 20261109215113）→ 當天第幾秒
+fn clock_of(t: &str) -> Option<u32> {
+    let n = |r: std::ops::Range<usize>| t.get(r).and_then(|x| x.parse::<u32>().ok());
+    Some(n(8..10)? * 3600 + n(10..12)? * 60 + n(12..14)?)
 }
 
 /// 側錄時間軸的格 → 成品的段內秒數（不在片段裡就貼到最近的片段邊界）
@@ -3406,6 +3518,18 @@ fn concat_all(ffmpeg: &Path, ffprobe: &Path, segs: &[(usize, PathBuf)], out: &Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn since_accepts_minutes_or_seconds() {
+        assert_eq!(since_clock(Some("21:50")), Some((21 * 3600 + 50 * 60, false)));
+        assert_eq!(since_clock(Some("2150")), Some((21 * 3600 + 50 * 60, false)));
+        assert_eq!(since_clock(Some("21:55:40")), Some((21 * 3600 + 55 * 60 + 40, true)));
+        assert_eq!(since_clock(Some("21：55：40")), Some((21 * 3600 + 55 * 60 + 40, true)));
+        assert_eq!(since_clock(Some("")), None);
+        assert_eq!(since_clock(Some("9:5")), None);
+        assert_eq!(since_clock(None), None);
+        assert_eq!(clock_of("20261109215113"), Some(21 * 3600 + 51 * 60 + 13));
+    }
 
     #[test]
     fn network_paths() {

@@ -178,6 +178,7 @@ function acBuildMaskItems(n) {
       const ranges = q(".ac-mask-ranges");
       ranges.value = m.ranges || "";
       const commit = () => {
+        ranges.value = acDigitsRanges(ranges.value, "tc");
         const ok = acParseMaskRanges(ranges.value) != null;
         ranges.classList.toggle("bad", !ok);
         ranges.title = ok ? "" : "看不懂：每段寫「開始-結束」，例如 00;16;01;20-00;16;10;25 或 16:01.6-16:10.8，好幾段用逗號分開";

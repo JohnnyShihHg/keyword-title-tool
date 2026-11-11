@@ -147,6 +147,7 @@ function acBuildBarItems(n) {
       const manual = q(".ac-bar-manual");
       manual.value = b.manual || "";
       manual.onchange = () => {
+        manual.value = acDigitsRanges(manual.value, "pos");
         const ok = acParseRanges(manual.value) != null;
         manual.classList.toggle("bad", !ok);
         manual.title = ok ? "" : "看不懂：每段寫「開始-結束」，用逗號分開，例如 29:55-31:18, 32:00-32:10";

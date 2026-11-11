@@ -2,7 +2,7 @@
 
 use super::frame::ncc;
 use super::stills::StillSet;
-use super::titles::{which_segment, Titles};
+use super::titles::{which_line, Titles};
 use super::{secs, tc, FrameInfo, Layout, CUT_DIFF, END_TRIM, FLASH_LUMA, FPS, LABEL_IOU, LABEL_IOU_STRONG, SIM_NCC};
 use image::GrayImage;
 use serde::Serialize;
@@ -146,7 +146,9 @@ pub fn plan_segments(frames: &[FrameInfo], ocr: &BTreeMap<usize, String>, titles
         })
         .collect();
     // OCR：每個取樣格 → 段落
-    let labels: Vec<(usize, usize)> = ocr.iter().filter_map(|(f, text)| which_segment(text, titles).map(|(seg, _)| (*f, seg))).collect();
+    // (格, 段, 第幾行標題)
+    let lines: Vec<(usize, usize, usize)> = ocr.iter().filter_map(|(f, text)| which_line(text, titles).map(|(seg, line, _)| (*f, seg, line))).collect();
+    let labels: Vec<(usize, usize)> = lines.iter().map(|&(f, g, _)| (f, g)).collect();
     log.push_str("\n== 節目區塊（標題條）＋ OCR 段落 ==\n");
     let mut pieces: Vec<(usize, usize, usize)> = Vec::new(); // (段, 起, 訖)
     for &(s, e) in &blocks {
@@ -185,36 +187,91 @@ pub fn plan_segments(frames: &[FrameInfo], ocr: &BTreeMap<usize, String>, titles
     let edge_ok_start = |s: usize| splits.contains(&s) || (s >= 5 * fps && nonprog(s - 5 * fps, s) >= 0.8);
     let edge_ok_end = |e: usize| splits.contains(&e) || (e + 5 * fps <= n && nonprog(e, e + 5 * fps) >= 0.8);
 
-    // 一段只取第一個區塊；之後又出現同一段的標題（節目後的預告、重播）不收。
-    // 例外：文稿最後一段收尾常連進兩次廣告（10/27 第 6 段：播 2 分多 → 廣告 4 分半 → 又播 1 分多 → 收黑），
-    // 中間沒有別段、隔不到 LAST_GAP_SECS 又出現的是同一段的下半部，直接接起來（不加轉場）
+    // 同一段的標題可能出現好幾次：開場提要（11/09：21:51 主持人先念第 1 段的標題 14 秒，廣告後 21:55 才正式開始）、
+    // 節目後的預告、重播。先把同一段相連的片接成一組，再挑一組當這段：
+    //   ① 播到文稿這段最後的標題（`covers_end`）的第一組——開場提要只念第一條，播不到最後；
+    //   ② 都還沒播到（錄製中、或 OCR 漏讀）：第一組，除非後面有一組長兩倍以上。
+    // 以前一律取第一組：11/09 把 14 秒的開場提要當成第 1 段出片，真正的第 1 段被當成重播丟掉。
+    // 例外照舊：文稿最後一段收尾常連進兩次廣告（10/27 第 6 段：播 2 分多 → 廣告 4 分半 → 又播 1 分多 → 收黑），
+    // 中間沒有別段、隔不到 LAST_GAP_SECS 又出現的是同一段的下半部，接在同一組（不加轉場）
     let last = titles.keys().max().copied();
-    let mut segs: BTreeMap<usize, Segment> = BTreeMap::new();
+    let mut groups: BTreeMap<usize, Vec<Vec<(usize, usize)>>> = BTreeMap::new();
     for (k, (g, s, e)) in pieces.iter().copied().enumerate() {
-        match segs.get_mut(&g) {
-            None => {
-                segs.insert(g, Segment { n: g, pieces: vec![(s, e)], start_ok: true, end_ok: true });
-            }
-            Some(seg) if seg.pieces.last().is_some_and(|p| p.1 == s) => seg.pieces.push((s, e)),
-            Some(seg) if Some(g) == last && pieces[k - 1].0 == g && secs(s - seg.end()) <= LAST_GAP_SECS => {
+        let list = groups.entry(g).or_default();
+        match list.last_mut() {
+            Some(grp) if grp.last().is_some_and(|p| p.1 == s) => grp.push((s, e)),
+            Some(grp) if Some(g) == last && k > 0 && pieces[k - 1].0 == g && grp.last().is_some_and(|p| secs(s - p.1) <= LAST_GAP_SECS) => {
                 log.push_str(&format!("    → 第 {g} 段（最後一段）廣告後在 {} 繼續，接在後面\n", tc(secs(s))));
-                seg.pieces.push((s, e));
+                grp.push((s, e));
             }
-            Some(_) => log.push_str(&format!("    → 第 {g} 段在 {} 又出現（預告／重播），不收\n", tc(secs(s)))),
+            _ => list.push(vec![(s, e)]),
         }
     }
-    for seg in segs.values_mut() {
+    // 這段「最後的標題」：最後兩行（只有一兩行的段：最後一行／唯一一行）
+    let end_line = |g: usize| {
+        let n = titles.get(&g).map_or(0, |l| l.len());
+        if n >= 3 { n - 2 } else { n.saturating_sub(1) }
+    };
+    let covers_end = |g: usize, grp: &[(usize, usize)]| lines.iter().any(|&(f, sg, line)| sg == g && line >= end_line(g) && grp.iter().any(|&(a, b)| f >= a && f < b));
+    let dur = |grp: &[(usize, usize)]| grp.iter().map(|&(a, b)| b - a).sum::<usize>();
+    let min_len = (MIN_SEGMENT_SECS * FPS) as usize;
+    let mut segs: Vec<Segment> = Vec::new();
+    for (g, list) in groups {
+        let covered = list.iter().position(|grp| covers_end(g, grp));
+        let pick = covered.unwrap_or_else(|| {
+            let mut p = 0;
+            for i in 1..list.len() {
+                if dur(&list[i]) >= 2 * dur(&list[p]) {
+                    p = i;
+                }
+            }
+            p
+        });
+        for (i, grp) in list.iter().enumerate() {
+            if i == pick {
+                continue;
+            }
+            let at = tc(secs(grp[0].0));
+            if i > pick {
+                log.push_str(&format!("    → 第 {g} 段在 {at} 又出現（預告／重播），不收\n"));
+            } else {
+                let why = if covered.is_some() { "沒播到文稿這段最後的標題" } else { "後面那次比它長兩倍以上" };
+                log.push_str(&format!("    → 第 {g} 段在 {at} 的 {:.0} 秒是開場預告（{why}），不收\n", secs(dur(grp))));
+            }
+        }
+        let mut seg = Segment { n: g, pieces: list[pick].clone(), start_ok: true, end_ok: true };
         seg.start_ok = edge_ok_start(seg.start());
         seg.end_ok = if Some(seg.n) == last { last_end_ok(frames, seg.end()) } else { edge_ok_end(seg.end()) };
+        // 安全網（11/09）：沒播到這段最後的標題時——
+        //   後面還有同一段正在錄（可能才是正式的）→ 先等；
+        //   已經播完、本身又短（不到 MIN_SEGMENT_SECS）→ 不像完整一段（開場提要），不出片
+        if covered.is_none() {
+            if list.iter().skip(pick + 1).any(|grp| !edge_ok_end(grp.last().map_or(0, |p| p.1))) && seg.end_ok {
+                seg.end_ok = false;
+                log.push_str(&format!("    → 第 {g} 段後面還有一次正在錄，先等（還沒播到文稿這段最後的標題）\n"));
+            }
+            // 還在錄的不算短（只是還沒播完）
+            if dur(&seg.pieces) < min_len && seg.start_ok && seg.end_ok {
+                seg.start_ok = false;
+                log.push_str(&format!(
+                    "    ★ 第 {g} 段只有 {:.0} 秒、也沒播到文稿這段最後的標題，不像完整一段（開場預告？），不出片\n",
+                    secs(dur(&seg.pieces))
+                ));
+            }
+        }
         // 結尾：人工習慣比切進廣告轉場早約 6 格收（中間隔著廣告的每一片都是）
         let ends: Vec<usize> = (0..seg.pieces.len()).filter(|&k| k + 1 == seg.pieces.len() || seg.pieces[k].1 != seg.pieces[k + 1].0).collect();
         for k in ends {
             let p = &mut seg.pieces[k];
             p.1 = p.1.saturating_sub(END_TRIM).max(p.0 + 1);
         }
+        segs.push(seg);
     }
-    segs.into_values().collect()
+    segs
 }
+
+/// 沒播到文稿這段最後的標題時，至少要這麼長才當成完整一段（11/09 開場提要 14 秒；正式一段最短見過 2 分半）
+pub const MIN_SEGMENT_SECS: f64 = 60.0;
 
 /// 最後一段廣告後還可能回來：隔多久內又出現算同一段；結尾後錄滿這麼久都沒回來也算結束
 pub const LAST_GAP_SECS: f64 = 8.0 * 60.0;
@@ -240,7 +297,15 @@ pub fn last_end_ok(frames: &[FrameInfo], e: usize) -> bool {
 
 /// `23:59:30`／`23:59` → 當天第幾秒；空白或看不懂回傳 None（不用這個條件）
 pub fn parse_clock(s: &str) -> Option<u32> {
-    let p: Vec<u32> = s.trim().replace('：', ":").split(':').map(|x| x.parse().ok()).collect::<Option<_>>()?;
+    let s = s.trim().replace('：', ":");
+    // 只打數字：2359→23:59、235930→23:59:30
+    let s = if !s.contains(':') && s.chars().all(|c| c.is_ascii_digit()) && matches!(s.len(), 3..=6) {
+        let d = format!("{:0>w$}", s, w = if s.len() <= 4 { 4 } else { 6 });
+        d.as_bytes().chunks(2).map(|c| String::from_utf8_lossy(c).to_string()).collect::<Vec<_>>().join(":")
+    } else {
+        s
+    };
+    let p: Vec<u32> = s.split(':').map(|x| x.parse().ok()).collect::<Option<_>>()?;
     match p[..] {
         [h, m] if h < 24 && m < 60 => Some(h * 3600 + m * 60),
         [h, m, s] if h < 24 && m < 60 && s < 60 => Some(h * 3600 + m * 60 + s),
@@ -1215,6 +1280,8 @@ mod tests {
     fn clock_ends_last_segment_only_past_cutoff() {
         assert_eq!(parse_clock("23:59:30"), Some(86370));
         assert_eq!(parse_clock("23：59"), Some(86340));
+        assert_eq!(parse_clock("2359"), Some(86340));
+        assert_eq!(parse_clock("235930"), Some(86370));
         assert_eq!(parse_clock(""), None);
         assert_eq!(parse_clock("25:00"), None);
         let fps = FPS as usize;
@@ -1260,6 +1327,65 @@ mod tests {
         frames.iter_mut().for_each(|f| f.luma = 100.0);
         frames.extend((0..LAST_GAP_SECS as usize * fps).map(|_| frame(false)));
         assert!(plan_segments(&frames, &ocr, &titles, &mut String::new()).iter().find(|s| s.n == 3).unwrap().complete());
+    }
+
+    /// 11/09：21:51 開場提要念第 1 段第一條標題 14 秒 → 廣告 → 21:55 正式第 1 段（標題一條一條換到最後）。
+    /// 以前取第一次出現的：14 秒的開場提要被當成第 1 段出片，正式的被當成重播丟掉
+    #[test]
+    fn cold_open_teaser_is_not_segment_one() {
+        let titles = parse_titles("第一段\n藍營華山論劍找戰犯趙少康再遭點名\n國民黨沒有人碰過這條線對吧\n才遭柯吃豆腐蔣萬安就一步一步往柯要的地方退\n=======\n第二段\n伊朗忍者部隊潛入以色列境內\n");
+        let l = ["藍營華山論劍找戰犯趙少康再遭點名", "國民黨沒有人碰過這條線對吧", "才遭柯吃豆腐蔣萬安就一步一步往柯要的地方退"];
+        fn add(frames: &mut Vec<FrameInfo>, ocr: &mut BTreeMap<usize, String>, program: bool, sec: usize, texts: &[&str]) {
+            let fps = FPS as usize;
+            let start = frames.len();
+            for i in 0..sec * fps {
+                let mut f = frame(program);
+                if i == 0 {
+                    f.cut_diff = 50.0;
+                }
+                frames.push(f);
+            }
+            if program && !texts.is_empty() {
+                let n = (sec * fps).div_ceil(2 * fps);
+                for (j, k) in (start..frames.len()).step_by(2 * fps).enumerate() {
+                    ocr.insert(k, texts[j * texts.len() / n].to_string());
+                }
+            }
+        }
+        let fps = FPS as usize;
+        let (mut frames, mut ocr) = (Vec::new(), BTreeMap::new());
+        add(&mut frames, &mut ocr, false, 10, &[]);
+        add(&mut frames, &mut ocr, true, 14, &l[..1]); // 開場提要
+        add(&mut frames, &mut ocr, false, 30, &[]);
+        add(&mut frames, &mut ocr, true, 120, &l); // 正式第 1 段
+        add(&mut frames, &mut ocr, false, 10, &[]);
+        add(&mut frames, &mut ocr, true, 60, &["伊朗忍者部隊潛入以色列境內"]);
+        add(&mut frames, &mut ocr, false, 10, &[]);
+        let upto = |sec: usize| -> (Vec<FrameInfo>, BTreeMap<usize, String>) { (frames[..sec * fps].to_vec(), ocr.range(..sec * fps).map(|(k, v)| (*k, v.clone())).collect()) };
+
+        let mut log = String::new();
+        let segs = plan_segments(&frames, &ocr, &titles, &mut log);
+        let one = segs.iter().find(|s| s.n == 1).unwrap();
+        assert_eq!(one.start(), 54 * fps, "取播到最後標題的那次：{log}");
+        assert!(one.complete());
+        assert!(log.contains("開場預告"), "{log}");
+        // 第 2 段不受影響（它是文稿最後一段，要收黑才算結束，這裡只看開頭）
+        let two = segs.iter().find(|s| s.n == 2).unwrap();
+        assert!(two.start_ok && two.start() == 184 * fps, "{log}");
+
+        // 監看中：只錄到開場提要（正式的還沒開始）→ 14 秒、沒播到最後的標題 → 不出片
+        let (f, o) = upto(54);
+        let segs = plan_segments(&f, &o, &titles, &mut String::new());
+        assert!(!segs[0].complete(), "開場提要不能自己出片");
+        // 正式的才播 20 秒（還沒長到兩倍）：仍取開場提要，但後面那次正在錄 → 先等
+        let (f, o) = upto(74);
+        let segs = plan_segments(&f, &o, &titles, &mut String::new());
+        assert!(!segs[0].complete());
+        // 正式的播 40 秒（兩倍以上）：改取正式的，錄製中
+        let (f, o) = upto(94);
+        let segs = plan_segments(&f, &o, &titles, &mut String::new());
+        assert_eq!(segs[0].start(), 54 * fps);
+        assert!(segs[0].start_ok && !segs[0].end_ok);
     }
 
     #[test]

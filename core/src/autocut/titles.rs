@@ -64,20 +64,26 @@ pub fn parse_titles(text: &str) -> Titles {
 
 /// OCR 文字屬於哪一段：OCR 的字組（兩字一組）有多少比例出現在某段的某一行標題裡（≥60%）
 pub fn which_segment(ocr: &str, titles: &Titles) -> Option<(usize, f32)> {
+    which_line(ocr, titles).map(|(n, _, hit)| (n, hit))
+}
+
+/// 同 `which_segment`，另外回傳對到這段的第幾行標題（從 0 起，照文稿順序）。
+/// 用來判斷一個節目區塊有沒有播到這段最後的標題（開場提要只念第一條）
+pub fn which_line(ocr: &str, titles: &Titles) -> Option<(usize, usize, f32)> {
     let a = bigrams(&norm(ocr));
     if a.len() < 6 {
         return None;
     }
-    let mut best: Option<(usize, f32)> = None;
+    let mut best: Option<(usize, usize, f32)> = None;
     for (n, lines) in titles {
-        for t in lines {
+        for (i, t) in lines.iter().enumerate() {
             let hit = a.iter().filter(|g| t.contains(g)).count() as f32 / a.len() as f32;
-            if best.is_none_or(|b| hit > b.1) {
-                best = Some((*n, hit));
+            if best.is_none_or(|b| hit > b.2) {
+                best = Some((*n, i, hit));
             }
         }
     }
-    best.filter(|b| b.1 >= 0.6)
+    best.filter(|b| b.2 >= 0.6)
 }
 
 #[cfg(test)]
@@ -125,5 +131,6 @@ mod tests {
         assert_eq!(which_segment("伊朗忍者部隊潛入以色到境乃", &t).map(|x| x.0), Some(2));
         assert_eq!(which_segment("完全無關的廣告文字內容在這裡", &t), None);
         assert_eq!(which_segment("太短", &t), None);
+        assert_eq!(which_line("韓國半導體出口雪上加霜", &t).map(|x| (x.0, x.1)), Some((1, 2)), "第 1 段第 3 行");
     }
 }

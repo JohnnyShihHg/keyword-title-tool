@@ -79,7 +79,54 @@ document.querySelectorAll("[data-ac-clear]").forEach((btn) => {
     }
   });
 });
+/**
+ * 時間欄只打數字時換成有冒號的寫法（只用在要填時間的欄位）：
+ *   clock（從幾點開始看、最晚幾點播完）：2300→23:00、930→09:30、235930→23:59:30
+ *   pos（影片裡的時間：壓 BAR、手動遮罩）：1601→16:01、130→1:30、13025→1:30:25、1601.5→16:01.5；一兩位數＝秒，照舊
+ *   tc（手動遮罩）：另外 8 位數＝剪輯時間碼（掉格）00160120→00;16;01;20
+ * 已經有冒號、分號或其他字的不動
+ */
+function acDigitsTime(text, kind) {
+  const raw = String(text ?? "");
+  const t = raw.trim().replace(/[\uFF10-\uFF19\uFF0E]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
+  const m = t.match(/^(\d+)(\.\d+)?$/);
+  if (!m) return raw.trim();
+  const [, d, frac = ""] = m;
+  if (kind === "clock") {
+    if (frac) return t;
+    if (d.length === 3 || d.length === 4) {
+      const x = d.padStart(4, "0");
+      return `${x.slice(0, 2)}:${x.slice(2)}`;
+    }
+    if (d.length === 5 || d.length === 6) {
+      const x = d.padStart(6, "0");
+      return `${x.slice(0, 2)}:${x.slice(2, 4)}:${x.slice(4)}`;
+    }
+    return t;
+  }
+  if (kind === "tc" && d.length === 8 && !frac) return `${d.slice(0, 2)};${d.slice(2, 4)};${d.slice(4, 6)};${d.slice(6)}`;
+  if (d.length <= 2) return t;
+  if (d.length <= 4) {
+    const x = d.padStart(4, "0");
+    return `${Number(x.slice(0, 2))}:${x.slice(2)}${frac}`;
+  }
+  if (d.length <= 6) {
+    const x = d.padStart(6, "0");
+    return `${Number(x.slice(0, 2))}:${x.slice(2, 4)}:${x.slice(4)}${frac}`;
+  }
+  return t;
+}
+
+/** 「1601-1610, 1830-1845」這種時段清單：每個時間各自換（分隔的逗號、橫線照原樣） */
+function acDigitsRanges(text, kind) {
+  return String(text ?? "")
+    .split(/([,，、\n])/)
+    .map((part, i) => (i % 2 ? part : part.split(/(\s*[-~～–]\s*)/).map((x, j) => (j % 2 || !x.trim() ? x : acDigitsTime(x, kind))).join("")))
+    .join("");
+}
+
 $("acEndCutoff").addEventListener("change", () => {
+  $("acEndCutoff").value = acDigitsTime($("acEndCutoff").value, "clock");
   settings.autocut_end_cutoff = $("acEndCutoff").value.trim();
   persistSettings();
   acPushLive();
@@ -90,6 +137,7 @@ $("acRotateSecs").addEventListener("change", () => {
   acPushLive();
 });
 $("acSince").addEventListener("change", () => {
+  $("acSince").value = acDigitsTime($("acSince").value, "clock");
   settings.autocut_since = $("acSince").value.trim();
   persistSettings();
   acPushLive();
@@ -658,6 +706,7 @@ function acBuildVideoItems(n) {
         [".ac-end", "end"],
       ]) {
         q(sel).onchange = async () => {
+          q(sel).value = acDigitsTime(q(sel).value, "pos");
           const text = q(sel).value.trim();
           try {
             v[key] = text ? await invoke("parse_timecode", { input: text }) : null;
