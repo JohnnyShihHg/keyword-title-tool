@@ -27,6 +27,19 @@
 
 首次啟動若出現「Windows 已保護您的電腦」，點「其他資訊」→「仍要執行」。這是因為本程式未購買程式碼簽章憑證，屬預期行為。之後的新版會在程式內提示，按「下載並安裝」即可。
 
+## 協作工具守門員（Tampermonkey 使用者腳本）
+
+在瀏覽器開協作工具（小幫手）時，擋住「一直載入共同文章」「改動沒同步」「螢光閃爍」「捲動被拉回」等毛病，只讀不改文件內容。腳本放在另一個專案：[news-script-tool／tools/collab-guard](https://github.com/JohnnyShihHg/news-script-tool/tree/main/tools/collab-guard)（說明在該資料夾的 README）。
+
+1. 先裝 [Tampermonkey](https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo)。
+2. 把下面這行網址貼進瀏覽器網址列按 Enter，Tampermonkey 會跳出安裝頁，按「安裝」（之後會自動更新）：
+
+```
+https://raw.githubusercontent.com/JohnnyShihHg/news-script-tool/main/tools/collab-guard/collab-guard.user.js
+```
+
+3. 重新整理協作工具那一頁，右下角出現「守門員」小面板就是生效了。
+
 ## 輸出格式
 
 ```
