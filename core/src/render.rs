@@ -14,6 +14,31 @@ pub struct SegmentInput {
     /// 這段上傳後的 YouTube 連結，填在檔頭「串一」後面。
     #[serde(default)]
     pub link: String,
+    /// 這段的製作人，空格、逗號、頓號分隔都可以；接在標題行的主持人後面。
+    #[serde(default)]
+    pub producer: String,
+}
+
+/// `林廷輝, 王小明、陳大文` → `["林廷輝", "王小明", "陳大文"]`；跟主持人同名的、重複的拿掉。
+pub fn producer_names(raw: &str, host: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for n in raw.split(|c: char| c.is_whitespace() || ",，、;；/／".contains(c)) {
+        let n = n.trim();
+        if !n.is_empty() && n != host.trim() && !names.iter().any(|m| m == n) {
+            names.push(n.to_string());
+        }
+    }
+    names
+}
+
+/// 主持人＋製作人：`張炤和` 或 `張炤和 林廷輝`
+fn credits(host: &str, producer: &str) -> String {
+    let names = producer_names(producer, host);
+    if names.is_empty() {
+        host.to_string()
+    } else {
+        format!("{host} {}", names.join(" "))
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -68,6 +93,8 @@ struct Part {
     title: String,
     lines: Vec<String>,
     time: Option<Timecode>,
+    /// 主持人＋製作人
+    credits: String,
 }
 
 /// 依範本排出整份文稿。空的段落直接略過——稿子是分批進來的，
@@ -124,6 +151,7 @@ pub fn render(doc: &DocumentInput) -> Rendered {
             title,
             lines: parsed.lines,
             time,
+            credits: credits(&doc.settings.host, &seg.producer),
         });
     }
 
@@ -160,12 +188,12 @@ pub fn render(doc: &DocumentInput) -> Rendered {
 }
 
 fn title_line(p: &Part, date: &str, settings: &Settings) -> String {
-    format!("{}{}{date}-{}{}", p.title, settings.program_tag, p.number, settings.host)
+    format!("{}{}{date}-{}{}", p.title, settings.program_tag, p.number, p.credits)
 }
 
 fn layout(date: &str, parts: &[Part], doc: &DocumentInput) -> String {
     let settings = &doc.settings;
-    let Settings { host, program_tag: tag, .. } = settings;
+    let Settings { program_tag: tag, .. } = settings;
     let mut out: Vec<String> = Vec::new();
 
     // 檔頭：日期標題、串一～串六、全集，後面接各自的 YouTube 連結（範本留一個空格給連結）。
@@ -223,8 +251,8 @@ fn layout(date: &str, parts: &[Part], doc: &DocumentInput) -> String {
         out.push(String::new());
         out.push(format!(
             // 半形「-」，和各段標題一致；全形「－」字身自帶左右空白，看起來像「 - 」
-            "{time_part}Part{}：{}{tag}{date}-{}{host}",
-            p.number, p.title, p.number
+            "{time_part}Part{}：{}{tag}{date}-{}{}",
+            p.number, p.title, p.number, p.credits
         ));
     }
 
@@ -242,7 +270,19 @@ mod tests {
             text: text.into(),
             time: time.into(),
             link: String::new(),
+            producer: String::new(),
         }
+    }
+
+    #[test]
+    fn producers_follow_host_in_title_and_full_lines() {
+        let mut d = doc(vec![seg("甲標題甲標題甲", ""), seg("乙標題乙標題乙", "1:00")]);
+        d.segments[1].producer = " 林廷輝，王小明、林廷輝,張炤和 ".into();
+        let r = render(&d);
+        assert!(r.text.contains("甲標題甲標題甲【關鍵時刻】20261016-1張炤和\n"));
+        assert!(r.text.contains("乙標題乙標題乙【關鍵時刻】20261016-2張炤和 林廷輝 王小明\n"));
+        assert!(r.text.contains("(00:01:00)Part2：乙標題乙標題乙【關鍵時刻】20261016-2張炤和 林廷輝 王小明\n"));
+        assert_eq!(r.parts[1].title_line, "乙標題乙標題乙【關鍵時刻】20261016-2張炤和 林廷輝 王小明");
     }
 
     fn doc(segments: Vec<SegmentInput>) -> DocumentInput {

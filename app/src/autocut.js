@@ -6,6 +6,7 @@
 const AC_STATES = {
   waiting: ["等待", ""],
   recording: ["錄製中", ""],
+  seeking: ["往前找開頭", ""],
   complete: ["完整", "ok"],
   queued: ["排隊出片", "ok"],
   rendering: ["出片中", "ok"],

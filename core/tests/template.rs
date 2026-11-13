@@ -24,6 +24,7 @@ fn render_fixture(settings: Settings) -> String {
             text: read(&format!("seg{}.txt", i + 1)),
             time: time.to_string(),
             link: String::new(),
+            ..Default::default()
         })
         .collect();
     let r = render(&DocumentInput {
@@ -102,7 +103,7 @@ fn importing_the_real_template_reproduces_it() {
         segments: doc
             .segments
             .iter()
-            .map(|s| SegmentInput { text: s.text.clone(), time: s.time.clone(), link: s.link.clone() })
+            .map(|s| SegmentInput { text: s.text.clone(), time: s.time.clone(), link: s.link.clone(), producer: s.producer.clone() })
             .collect(),
         full_link: doc.full_link.clone(),
         settings,

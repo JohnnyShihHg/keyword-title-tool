@@ -496,9 +496,35 @@ impl Shared {
         let _ = app.emit("autocut-log", line);
     }
 
+    /// 出片／串接失敗時馬上把原因寫進 report.txt（不等下一輪規劃）
+    fn write_report_now(&self) {
+        let dir = self.config.lock().unwrap().as_ref().map(|c| c.output_dir.clone());
+        if let Some(dir) = dir {
+            self.write_report_file(&dir);
+        }
+    }
+
     /// report.txt＝目前的判斷報告＋各階段耗時
     fn write_report_file(&self, output_dir: &str) {
         let mut r = self.report.lock().unwrap().clone();
+        // 出片／串接失敗的原因（ffmpeg 最後幾行），之後才查得到為什麼失敗
+        let mut failed: Vec<String> = Vec::new();
+        for (what, map) in [("輸出", &self.renders), ("串接", &self.chain_renders)] {
+            let map = map.lock().unwrap();
+            let mut ns: Vec<&usize> = map.keys().collect();
+            ns.sort();
+            for n in ns {
+                if let Some(Render::Failed(e)) = map.get(n) {
+                    let lines: Vec<&str> = e.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+                    let tail = lines[lines.len().saturating_sub(6)..].join("\n      ");
+                    failed.push(format!("  第 {n} 段{what}失敗：\n      {tail}\n"));
+                }
+            }
+        }
+        if !failed.is_empty() {
+            r.push_str("\n== 失敗 ==\n");
+            r.push_str(&failed.concat());
+        }
         let stages = self.stages.lock().unwrap();
         r.push_str("\n== 各階段耗時 ==\n");
         let all: f64 = stages.iter().map(|s| s.secs).sum();
@@ -1210,7 +1236,7 @@ impl Watcher {
         }
         // 停止：還在錄製中（缺頭或尾）的段落標不完整
         for p in self.shared.plan.lock().unwrap().iter_mut() {
-            if p.state == "recording" {
+            if p.state == "recording" || p.state == "seeking" {
                 p.state = "incomplete";
             }
         }
@@ -1625,14 +1651,19 @@ impl Watcher {
         log.push_str(&self.seam_report(&seams));
         let mut segs = plan::plan_segments(&frames, &ocr, &self.titles, &mut log);
         // 有一段在讀到的範圍一開頭就已經在播（開頭在更早的檔）：往前多讀一個檔，下一輪再規劃
+        // 這段在畫面上顯示「往前找開頭」，不是「不完整」（還有救，只是要多等一輪）
+        let mut seeking: Option<usize> = None;
         if since_clock(self.cfg.since.as_deref()).is_some() {
             if let Some(seg) = segs.iter().find(|s| !s.start_ok && s.start() <= window_start + 3 * fps) {
                 if self.lookback != self.lookback_listed {
                     // 已經決定往前多讀了，下一輪列檔才會讀到：先不動
                     self.dirty = true;
+                    seeking = Some(seg.n);
+                    log.push_str(&format!("  第 {} 段：等往前多讀的側錄檔讀進來找開頭\n", seg.n));
                 } else if self.lookback < self.lookback_avail.min(MAX_LOOKBACK) {
                     self.lookback += 1;
                     self.dirty = true;
+                    seeking = Some(seg.n);
                     log.push_str(&format!("  第 {} 段在「從幾點開始看」之前就開始了：往前多讀一個側錄檔找開頭（往前 {} 個）\n", seg.n, self.lookback));
                 } else {
                     log.push_str(&format!("    ★ 第 {} 段在「從幾點開始看」之前就開始了，往前找不到開頭，不完整、不出片\n", seg.n));
@@ -1844,7 +1875,9 @@ impl Watcher {
                 plan_segs.push(PlanSeg { n, state: "waiting", rec_start: None, rec_end: None, recorded: 0.0, masks: 0, job: None, bars: Vec::new(), manual: Vec::new() });
                 continue;
             };
-            let state = if !seg.start_ok {
+            let state = if !seg.start_ok && seeking == Some(n) {
+                "seeking"
+            } else if !seg.start_ok {
                 "incomplete"
             } else if seg.complete() {
                 "complete"
@@ -1923,7 +1956,12 @@ impl Watcher {
             r.push_str(&format!("  第 {n} 段：{} 行標題\n", l.len()));
         }
         r.push_str(&log);
-        r.push_str(&plan::report_segments(&planned, &self.stills, self.cfg.rotate_secs.unwrap_or(0.0)));
+        let mut segs_report = plan::report_segments(&planned, &self.stills, self.cfg.rotate_secs.unwrap_or(0.0));
+        if let Some(n) = seeking {
+            // 往前多讀檔還在進行：不是壞掉，跟畫面上的「往前找開頭」一致
+            segs_report = segs_report.replace(&format!("第 {n} 段（不完整，不輸出）"), &format!("第 {n} 段（往前找開頭中，先不出）"));
+        }
+        r.push_str(&segs_report);
         if !self.stills.stills.is_empty() && !frames.is_empty() {
             r.push_str(&plan::report_coverage(&frames, &planned, &self.stills));
         }
@@ -2024,10 +2062,13 @@ impl Watcher {
                 (m.clone(), s.path.clone(), s.layout)
             })
             .collect();
+        // 指紋裡的位置都寫成「檔名@檔內第幾格」：「從幾點開始看」往前多讀一個檔、時間軸整個往後移時，
+        // 同一個判斷的指紋不變，已經出好的段不會被當成「判斷改了」重出
+        let at = |f: usize| anchor(files, f);
         let mut fingerprint = format!(
-            "{:?}\n{}",
-            seg.pieces,
-            masks.iter().map(|(m, p, _)| format!("{} {} {:?} {}", m.start, m.end, m.layout, p)).collect::<Vec<_>>().join("\n")
+            "{}\n{}",
+            seg.pieces.iter().map(|&(s, e)| format!("{} – {}", at(s), at(e))).collect::<Vec<_>>().join(", "),
+            masks.iter().map(|(m, p, _)| format!("{} {} {:?} {}", at(m.start), at(m.end), m.layout, p)).collect::<Vec<_>>().join("\n")
         );
         let watermarks: Vec<String> = self.cfg.watermarks.iter().filter(|p| !p.trim().is_empty()).cloned().collect();
         // 沒加工時指紋跟舊版一樣（之前出好的不用重出）
@@ -2049,8 +2090,9 @@ impl Watcher {
             };
             let ranges = clip_to_pieces(&seg.pieces, &ranges);
             let mtime = std::fs::metadata(&bar.image).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+            let at_ranges: Vec<String> = ranges.iter().map(|&(a, b)| format!("{} – {}", anchor(files, a), anchor(files, b))).collect();
             fingerprint.push_str(&format!("
-bar {} {mtime} {ranges:?}", bar.image));
+bar {} {mtime} {at_ranges:?}", bar.image));
             bars.push((bar.image.clone(), ranges));
         }
         // 只取這段用得到的檔（出片時不用開整天的檔）
@@ -2316,16 +2358,33 @@ bar {} {mtime} {ranges:?}", bar.image));
 
     fn refine_start(&self, files: &[(PathBuf, f64, f64)], s: usize) -> Option<usize> {
         let (s0, count) = plan::refine_window(s);
-        let t0 = secs(s0);
-        let (p, fs, _) = files.iter().rev().find(|(_, fs, _)| *fs <= t0)?;
-        let o = command(&self.ffmpeg)
-            .args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{:.4}", t0 - fs), "-i"])
-            .arg(p)
-            .args(["-frames:v", &count.to_string(), "-an", "-vf", &format!("scale={LOGO_W}:{LOGO_H}:flags=area,format=gray"), "-f", "rawvideo", "-"])
-            .stdin(Stdio::null())
-            .output()
-            .ok()?;
-        let frames: Vec<image::GrayImage> = o.stdout.chunks_exact((LOGO_W * LOGO_H) as usize).filter_map(|c| image::GrayImage::from_raw(LOGO_W, LOGO_H, c.to_vec())).collect();
+        // 轉場可能跨兩個側錄檔（11/12 第 6 段：Logo 在前一檔最後 48 秒、溶接在下一檔開頭）：
+        // 一個檔讀到底還不夠就接著讀下一個檔，每檔只讀時間軸用到的部分（接縫拿掉的格不讀）
+        let mut frames: Vec<image::GrayImage> = Vec::new();
+        let first = files.iter().rposition(|(_, fs, _)| *fs <= secs(s0) + 1e-6)?;
+        for (p, fs, fd) in &files[first..] {
+            if frames.len() >= count {
+                break;
+            }
+            let start = (secs(s0 + frames.len()) - fs).max(0.0);
+            let avail = ((fd - start) * FPS).round().max(0.0) as usize;
+            let want = (count - frames.len()).min(avail);
+            if want == 0 {
+                continue;
+            }
+            let o = command(&self.ffmpeg)
+                .args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{start:.4}"), "-i"])
+                .arg(p)
+                .args(["-frames:v", &want.to_string(), "-an", "-vf", &format!("scale={LOGO_W}:{LOGO_H}:flags=area,format=gray"), "-f", "rawvideo", "-"])
+                .stdin(Stdio::null())
+                .output()
+                .ok()?;
+            let got: Vec<image::GrayImage> = o.stdout.chunks_exact((LOGO_W * LOGO_H) as usize).filter_map(|c| image::GrayImage::from_raw(LOGO_W, LOGO_H, c.to_vec())).collect();
+            if got.is_empty() {
+                break;
+            }
+            frames.extend(got);
+        }
         plan::logo_end(&self.logo, &frames).map(|k| s0 + k)
     }
 }
@@ -2351,6 +2410,15 @@ fn since_clock(since: Option<&str>) -> Option<(u32, bool)> {
 fn clock_of(t: &str) -> Option<u32> {
     let n = |r: std::ops::Range<usize>| t.get(r).and_then(|x| x.parse::<u32>().ok());
     Some(n(8..10)? * 3600 + n(10..12)? * 60 + n(12..14)?)
+}
+
+/// 側錄時間軸的格 → `檔名@檔內第幾格`（指紋用，跟前面讀了幾個檔無關）
+fn anchor(files: &[(PathBuf, f64, f64)], f: usize) -> String {
+    let t = secs(f);
+    match files.iter().rev().find(|(_, fs, _)| *fs <= t + 1e-6).or(files.first()) {
+        Some((p, fs, _)) => format!("{}@{}", p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().to_string()), ((t - fs) * FPS).round() as i64),
+        None => f.to_string(),
+    }
 }
 
 /// 側錄時間軸的格 → 成品的段內秒數（不在片段裡就貼到最近的片段邊界）
@@ -3054,6 +3122,7 @@ fn render_one_segment(app: &AppHandle, shared: &Arc<Shared>, ffprobe: &Path, ffm
                 let e = if shared.stopped() { "已停止".to_string() } else { e };
                 shared.log(app, format!("★ 第 {n} 段輸出失敗：{e}"));
                 shared.renders.lock().unwrap().insert(n, Render::Failed(e));
+                shared.write_report_now();
             }
         }
         shared.publish(app);
@@ -3093,6 +3162,7 @@ fn run_chain(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Pat
             let e = if shared.stopped() { "已停止".to_string() } else { e };
             shared.log(app, format!("★ 第 {n} 段串接失敗：{e}"));
             shared.chain_renders.lock().unwrap().insert(n, Render::Failed(e));
+            shared.write_report_now();
         }
     }
     shared.publish(app);
@@ -3131,16 +3201,33 @@ fn promo_path(cfg: &AutocutConfig, secs: u32) -> Result<&str, String> {
 fn promo_like(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Path, cfg: &AutocutConfig, secs: u32, seg: &Clip) -> Result<String, String> {
     let src = promo_path(cfg, secs)?;
     let info = probe(ffprobe, src)?;
-    if seg.signature.as_deref() == Some(info.copy_signature.as_str()) {
+    let Some(want) = seg.signature.as_deref() else {
+        return Ok(src.to_string());
+    };
+    if want == info.copy_signature {
         return Ok(src.to_string());
     }
-    let dst = Path::new(&cfg.output_dir).join(".autocut").join(format!("promo{secs}-{}.mp4", seg.signature.as_deref().map_or(0, |s| s.bytes().map(u64::from).sum::<u64>())));
+    // 轉好的檔跟正片規格一字不差才算數（不然串接會退回整段重新編碼）
+    let spec_of = |p: &Path| probe(ffprobe, &p.display().to_string()).map(|i| i.copy_signature).unwrap_or_default();
+    let dst = Path::new(&cfg.output_dir).join(".autocut").join(format!("promo{secs}-{}.mp4", want.bytes().map(u64::from).sum::<u64>()));
     let tag = dst.with_extension("src.txt");
     let mtime = std::fs::metadata(src).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
     let stamp = format!("{src}\n{mtime}");
     if dst.is_file() && std::fs::read_to_string(&tag).ok().as_deref() == Some(stamp.as_str()) {
-        return Ok(dst.display().to_string());
+        let got = spec_of(&dst);
+        if got == want {
+            return Ok(dst.display().to_string());
+        }
+        shared.log(app, format!("之前轉好的 promo {secs} 秒規格跟正片不同（{got} ≠ {want}），重轉"));
     }
+    // 照正片的 profile 轉：顯卡預設 Main、CPU 預設 High，不指定的話退回 CPU 就對不上
+    let profile = match want.split('|').nth(1) {
+        Some("Main") => Some("main"),
+        Some("High") => Some("high"),
+        Some("Baseline" | "Constrained Baseline") => Some("baseline"),
+        _ => None,
+    };
+    let profile_args: Vec<&str> = profile.map_or(Vec::new(), |p| vec!["-profile:v", p]);
     let tmp = dst.with_extension("part.mp4");
     let base: Vec<String> = [
         "-hide_banner", "-y", "-loglevel", "error", "-i", src,
@@ -3153,16 +3240,26 @@ fn promo_like(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Pa
     let run = |enc: &[&str]| {
         let mut a = base.clone();
         a.extend(enc.iter().map(|s| s.to_string()));
+        a.extend(profile_args.iter().map(|s| s.to_string()));
         a.extend(tail.clone());
         a.push(tmp.display().to_string());
         run_ffmpeg(shared, ffmpeg, &a, info.duration, &mut |_| {})
     };
     let r = shared.stage(app, &format!("promo {secs} 秒轉成正片規格（只做一次）"), || {
-        run(&["-c:v", "h264_nvenc", "-preset", "p5", "-b:v", "12M", "-pix_fmt", "yuv420p"]).or_else(|_| run(&["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]))
+        run(&["-c:v", "h264_nvenc", "-preset", "p5", "-b:v", "12M", "-pix_fmt", "yuv420p"]).or_else(|e| {
+            shared.log(app, format!("promo {secs} 秒用顯卡轉檔失敗，改用 CPU：{}", e.lines().last().unwrap_or("")));
+            run(&["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"])
+        })
     });
     if let Err(e) = r {
         let _ = std::fs::remove_file(&tmp);
-        shared.log(app, format!("promo 轉檔失敗，改成整段重新編碼：{e}"));
+        shared.log(app, format!("★ promo 轉檔失敗，這段串接改成整段重新編碼（比較慢）：{e}"));
+        return Ok(src.to_string());
+    }
+    let got = spec_of(&tmp);
+    if got != want {
+        let _ = std::fs::remove_file(&tmp);
+        shared.log(app, format!("★ promo {secs} 秒轉完規格還是跟正片不同（{got} ≠ {want}），這段串接改成整段重新編碼（比較慢）"));
         return Ok(src.to_string());
     }
     std::fs::rename(&tmp, &dst).map_err(|e| e.to_string())?;
@@ -3521,6 +3618,19 @@ mod tests {
 
     #[test]
     fn since_accepts_minutes_or_seconds() {
+        // 指紋位置跟前面多讀幾個檔無關：同一格畫面，時間軸前面多一個 588 秒的檔，anchor 一樣
+        // 時間軸上的檔開頭都是整數格（replan 用 secs(格數) 算）
+        let (len, shift) = (17_984usize, 17_623usize);
+        let a = vec![(PathBuf::from(r"\\srv\ch03\b.mp4"), 0.0, secs(len)), (PathBuf::from(r"\\srv\ch03\c.mp4"), secs(len), secs(len))];
+        let b = vec![
+            (PathBuf::from(r"\\srv\ch03\a.mp4"), 0.0, secs(shift)),
+            (PathBuf::from(r"\\srv\ch03\b.mp4"), secs(shift), secs(len)),
+            (PathBuf::from(r"\\srv\ch03\c.mp4"), secs(shift + len), secs(len)),
+        ];
+        for f in [0usize, 1234, len - 1, len, len + 77, 2 * len - 5] {
+            assert_eq!(anchor(&a, f), anchor(&b, f + shift), "frame {f}");
+        }
+        assert_eq!(anchor(&a, 1234), "b.mp4@1234");
         assert_eq!(since_clock(Some("21:50")), Some((21 * 3600 + 50 * 60, false)));
         assert_eq!(since_clock(Some("2150")), Some((21 * 3600 + 50 * 60, false)));
         assert_eq!(since_clock(Some("21:55:40")), Some((21 * 3600 + 55 * 60 + 40, true)));

@@ -17,6 +17,7 @@ const segments = SEGMENT_NAMES.map((name, i) => {
     text: root.querySelector(".text"),
     time: root.querySelector(".time"),
     link: root.querySelector(".link"),
+    producer: root.querySelector(".producer"),
     warn: root.querySelector(".segment-warn"),
   };
   if (i === 0) seg.time.title = "沒填就是 00:00:00";
@@ -24,11 +25,13 @@ const segments = SEGMENT_NAMES.map((name, i) => {
     seg.text.value = "";
     seg.time.value = "";
     seg.link.value = "";
+    seg.producer.value = "";
     changed();
   });
   seg.text.addEventListener("input", changed);
   seg.time.addEventListener("input", changed);
   seg.link.addEventListener("input", changed);
+  seg.producer.addEventListener("input", changed);
   seg.time.addEventListener("blur", () => normalizeTime(i));
   segmentsEl.appendChild(root);
   return seg;
@@ -58,7 +61,7 @@ let settings = null;
 function collect() {
   return {
     date: dateInput.value.trim(),
-    segments: segments.map((s) => ({ text: s.text.value, time: s.time.value, link: s.link.value })),
+    segments: segments.map((s) => ({ text: s.text.value, time: s.time.value, link: s.link.value, producer: s.producer.value })),
     full_link: fullLinkInput.value,
     settings,
   };
@@ -89,13 +92,14 @@ function loadDraft() {
     segments[i].text.value = s.text || "";
     segments[i].time.value = s.time || "";
     segments[i].link.value = s.link || "";
+    segments[i].producer.value = s.producer || "";
   });
   fullLinkInput.value = draft?.full_link || "";
   Object.assign(sync, { path: null, mtime: null, text: null, dirty: false, detached: null }, draft?.sync);
 }
 
 function hasContent() {
-  return segments.some((s) => s.text.value.trim() || s.time.value.trim() || s.link.value.trim()) || !!fullLinkInput.value.trim();
+  return segments.some((s) => s.text.value.trim() || s.time.value.trim() || s.link.value.trim() || s.producer.value.trim()) || !!fullLinkInput.value.trim();
 }
 
 /** 把匯入／共用資料夾讀到的內容放進六段（空的就清空）。 */
@@ -105,6 +109,7 @@ function applyDoc(doc) {
     s.text.value = seg.text;
     s.time.value = seg.time;
     s.link.value = seg.link;
+    s.producer.value = seg.producer || "";
   });
   fullLinkInput.value = doc.full_link;
 }
@@ -258,6 +263,7 @@ $("clearAllBtn").addEventListener("click", async () => {
     s.text.value = "";
     s.time.value = "";
     s.link.value = "";
+    s.producer.value = "";
   });
   fullLinkInput.value = "";
   dateInput.value = today();

@@ -1017,7 +1017,15 @@ pub fn apply_ai(frames: &[FrameInfo], masks: &mut Vec<MaskSeg>, c: &AiCandidate)
 pub fn report_segments(segs: &[(Segment, Vec<MaskSeg>)], set: &StillSet, rotate_secs: f64) -> String {
     let mut r = String::from("\n== 段落 ==\n");
     for (seg, masks) in segs {
-        r.push_str(&format!("第 {} 段{}：長 {}，遮罩 {} 段\n", seg.n, if seg.complete() { "" } else { "（不完整，不輸出）" }, tc(seg.duration()), masks.len()));
+        // 開頭沒抓到＝不完整；開頭有了、結尾還沒錄到＝還在等後面的檔（不是壞掉）
+        let label = if seg.complete() {
+            ""
+        } else if seg.start_ok {
+            "（還沒錄到結尾，等後面的檔）"
+        } else {
+            "（不完整，不輸出）"
+        };
+        r.push_str(&format!("第 {} 段{label}：長 {}，遮罩 {} 段\n", seg.n, tc(seg.duration()), masks.len()));
         for (s, e) in &seg.pieces {
             r.push_str(&format!("  側錄 {} – {}\n", tc(secs(*s)), tc(secs(*e))));
         }

@@ -17,6 +17,8 @@ pub struct ImportedSegment {
     /// `00:27:08`；匯出檔裡是 `--:--:--` 或沒有就空白
     pub time: String,
     pub link: String,
+    /// 標題行主持人後面的製作人（`張炤和 林廷輝` → `林廷輝`）
+    pub producer: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -67,8 +69,8 @@ fn header_link(line: &str) -> Option<(usize, &str)> {
     Some((i, strip_separator(chars.as_str())))
 }
 
-/// `段標題【關鍵時刻】20261014-1張炤和` → (段標題, 日期, 段號)。全集行（`(…)Part1：`）不算。
-fn split_title_line<'a>(line: &'a str, settings: &Settings) -> Option<(&'a str, String, usize)> {
+/// `段標題【關鍵時刻】20261014-1張炤和 林廷輝` → (段標題, 日期, 段號, 製作人)。全集行（`(…)Part1：`）不算。
+fn split_title_line<'a>(line: &'a str, settings: &Settings) -> Option<(&'a str, String, usize, String)> {
     let tag = settings.program_tag.trim();
     let at = if tag.is_empty() { None } else { line.rfind(tag) }?;
     let title = &line[..at];
@@ -81,7 +83,14 @@ fn split_title_line<'a>(line: &'a str, settings: &Settings) -> Option<(&'a str, 
     if !(1..=SEGMENT_COUNT).contains(&number) || title.trim().is_empty() {
         return None;
     }
-    Some((title, date.to_string(), number))
+    // 段號後面是主持人，再後面（空格隔開）是製作人
+    let credits = rest[1..].trim();
+    let host = settings.host.trim();
+    let producer = match credits.strip_prefix(host).filter(|_| !host.is_empty()) {
+        Some(p) => p.trim(),
+        None => credits.split_once(char::is_whitespace).map_or("", |(_, p)| p.trim()),
+    };
+    Some((title, date.to_string(), number, producer.to_string()))
 }
 
 /// 全集段的 `(00:27:08)Part3：…` 或 `（００：２７：０８）Part3：…` → (段號, 時間)
@@ -162,7 +171,7 @@ pub fn import(text: &str, settings: &Settings) -> ImportedDocument {
         let Some(pos) = content.iter().position(|l| split_title_line(l, settings).is_some()) else {
             continue;
         };
-        let (title, date, number) = split_title_line(content[pos], settings).unwrap();
+        let (title, date, number, producer) = split_title_line(content[pos], settings).unwrap();
         if doc.date.is_empty() {
             doc.date = date;
         }
@@ -179,6 +188,7 @@ pub fn import(text: &str, settings: &Settings) -> ImportedDocument {
         }
         let list = content[pos + 1..].join("\n");
         doc.segments[index].text = format!("開場\n{title}\n{list}").trim_end().to_string();
+        doc.segments[index].producer = producer;
     }
     doc
 }
@@ -201,6 +211,7 @@ mod tests {
                     text: fixture(&format!("seg{n}.txt")),
                     time: times[n - 1].clone(),
                     link: if n == 2 { "https://youtu.be/abc".into() } else { String::new() },
+                    producer: if n == 6 { "林廷輝, 王小明".into() } else { String::new() },
                 })
                 .collect(),
             full_link: "https://youtu.be/full".into(),
@@ -214,7 +225,12 @@ mod tests {
             segments: doc
                 .segments
                 .iter()
-                .map(|s| SegmentInput { text: s.text.clone(), time: s.time.clone(), link: s.link.clone() })
+                .map(|s| SegmentInput {
+                    text: s.text.clone(),
+                    time: s.time.clone(),
+                    link: s.link.clone(),
+                    producer: s.producer.clone(),
+                })
                 .collect(),
             full_link: doc.full_link.clone(),
             settings: settings.clone(),
@@ -231,6 +247,8 @@ mod tests {
         assert_eq!(imported.segments[1].link, "https://youtu.be/abc");
         assert_eq!(imported.segments[0].link, "", "empty links stay empty");
         assert_eq!(imported.segments[1].time, "00:27:08");
+        assert_eq!(imported.segments[5].producer, "林廷輝 王小明");
+        assert_eq!(imported.segments[0].producer, "");
         let again = render(&back_to_input(&imported, &input.settings)).text;
         assert_eq!(again, exported);
     }
