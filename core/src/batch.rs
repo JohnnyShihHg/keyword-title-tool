@@ -18,7 +18,7 @@ fn is_name(s: &str) -> bool {
 
 enum Marker<'a> {
     /// 「一段」「第一段」「1段」「3段 政峰」：一定是新的一段。
-    Segment(&'a str),
+    Segment(u32, &'a str),
     /// 「2-1 家名」「2-2厚之」：第 2 段的第幾位講者；段號跟上一個一樣就不切開。
     Part(u32, &'a str),
 }
@@ -33,7 +33,7 @@ fn marker(line: &str) -> Option<Marker<'_>> {
     if let Some(rest) = after.strip_prefix('段') {
         // 名字前面要有空格，免得「一段時間…」這種標題被當成段號
         let ok = rest.is_empty() || (rest.starts_with(char::is_whitespace) && is_name(rest.trim()));
-        return ok.then(|| Marker::Segment(rest.trim()));
+        return ok.then(|| Marker::Segment(num, rest.trim()));
     }
     // 「2-1」只接受阿拉伯數字、前面不加「第」
     if body.len() != line.len() || !line.starts_with(|c: char| c.is_ascii_digit() || ('１'..='９').contains(&c)) {
@@ -51,11 +51,12 @@ fn marker(line: &str) -> Option<Marker<'_>> {
 pub fn split_batch(text: &str) -> Vec<String> {
     let text = text.replace("\r\n", "\n");
     let mut parts: Vec<Vec<&str>> = vec![Vec::new()];
-    let mut part_of: Option<u32> = None; // 上一個「N-M」的 N
+    let mut part_of: Option<u32> = None; // 現在這段的段號（「二段」或「2-1」的 2）
     for line in text.lines() {
         let name = match marker(line) {
-            Some(Marker::Segment(name)) => {
-                part_of = None;
+            Some(Marker::Segment(num, name)) => {
+                // 「二段」後面接「2-2 政峰」還是同一段
+                part_of = Some(num);
                 name
             }
             Some(Marker::Part(num, name)) => {
@@ -158,5 +159,18 @@ mod tests {
         assert!(second[0].ends_with("亂象增!?"));
         assert!(second[1].starts_with("政峰\n新竹市"));
         assert!(second[1].ends_with("人氣爆棚!"));
+    }
+
+    /// 11/19 23 點那批：「二段」下面接「2-2 政峰」還是第二段，「三段」才切開
+    #[test]
+    fn segment_line_then_sub_part() {
+        let read = std::fs::read_to_string(format!("{}/tests/fixtures/batch/1119-23.txt", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let parts = split_batch(&read);
+        assert_eq!(parts.len(), 3);
+        assert!(parts[0].starts_with("開場\n川習會") && parts[0].ends_with("另一面呢?"));
+        assert!(parts[1].starts_with("家名\nmomo") && parts[1].contains("\n\n政峰\n\"網攻狂潮\"") && parts[1].ends_with("血袋成血糕!"));
+        assert!(parts[2].starts_with("政峰\n比台灣政治"));
+        // 段號不同的「N-M」還是切開
+        assert_eq!(split_batch("二段\nA\n3-1 乙\nB"), ["A", "乙\nB"]);
     }
 }
