@@ -184,8 +184,8 @@ pub fn plan_segments(frames: &[FrameInfo], ocr: &BTreeMap<usize, String>, titles
     // 素材剛好斷在節目中間（就算那一刻標題條剛好消失）都算不完整。
     let splits: Vec<usize> = pieces.windows(2).filter(|w| w[0].2 == w[1].1).map(|w| w[0].2).collect();
     let nonprog = |a: usize, b: usize| frames[a..b].iter().filter(|f| !f.program).count() as f32 / (b - a).max(1) as f32;
-    let edge_ok_start = |s: usize| splits.contains(&s) || (s >= 5 * fps && nonprog(s - 5 * fps, s) >= 0.8);
-    let edge_ok_end = |e: usize| splits.contains(&e) || (e + 5 * fps <= n && nonprog(e, e + 5 * fps) >= 0.8);
+    let edge_ok_start = |s: usize| splits.contains(&s) || (s >= 5 * fps && nonprog(s - 5 * fps, s) >= EDGE_NONPROGRAM);
+    let edge_ok_end = |e: usize| splits.contains(&e) || (e + 5 * fps <= n && nonprog(e, e + 5 * fps) >= EDGE_NONPROGRAM);
 
     // 同一段的標題可能出現好幾次：開場提要（11/09：21:51 主持人先念第 1 段的標題 14 秒，廣告後 21:55 才正式開始）、
     // 節目後的預告、重播。先把同一段相連的片接成一組，再挑一組當這段：
@@ -272,6 +272,8 @@ pub fn plan_segments(frames: &[FrameInfo], ocr: &BTreeMap<usize, String>, titles
 
 /// 沒播到文稿這段最後的標題時，至少要這麼長才當成完整一段（11/09 開場提要 14 秒；正式一段最短見過 2 分半）
 pub const MIN_SEGMENT_SECS: f64 = 60.0;
+/// 段落頭尾前後 5 秒，至少這個比例是非節目畫面（轉場／廣告），才算看得到完整的頭尾
+pub const EDGE_NONPROGRAM: f32 = 0.8;
 
 /// 最後一段廣告後還可能回來：隔多久內又出現算同一段；結尾後錄滿這麼久都沒回來也算結束
 pub const LAST_GAP_SECS: f64 = 8.0 * 60.0;
@@ -339,9 +341,14 @@ pub fn refine_window(s: usize) -> (usize, usize) {
 /// 最後一格「還像 Logo」（≥0.6）之後、相似度掉到 <0.25 的第一格。之後呼叫端再 + START_DELAY。
 pub fn logo_end(logo: &GrayImage, frames: &[GrayImage]) -> Option<usize> {
     let sims: Vec<f32> = frames.iter().map(|g| ncc(logo, g)).collect();
-    let last_logo = sims.iter().rposition(|&v| v >= 0.6)?;
-    (last_logo + 1..sims.len()).find(|&k| sims[k] < 0.25)
+    let last_logo = sims.iter().rposition(|&v| v >= LOGO_STILL)?;
+    (last_logo + 1..sims.len()).find(|&k| sims[k] < LOGO_GONE)
 }
+
+/// Logo 畫面「還像 Logo」的相似度（NCC）
+pub const LOGO_STILL: f32 = 0.6;
+/// 溶接到棚內、跟 Logo 已經不像的相似度（NCC）
+pub const LOGO_GONE: f32 = 0.25;
 
 /// 來源字命中：IoU 夠高；或 IoU 普通但畫面也跟那個來源的靜圖有幾分像
 /// （「翻攝 X ○○」不同主題外形很像，只看字形會把機器人當成忍者）。
@@ -361,8 +368,11 @@ pub fn label_hit(f: &FrameInfo, set: &StillSet) -> bool {
     if f.iou >= LABEL_IOU_STRONG {
         return true;
     }
-    f.iou >= LABEL_IOU && t.stills.iter().any(|&k| f.sims[k] >= 0.6)
+    f.iou >= LABEL_IOU && t.stills.iter().any(|&k| f.sims[k] >= LABEL_WITH_SIM)
 }
+
+/// 來源字只有普通像（LABEL_IOU）時，畫面也要跟那個來源的靜圖有這麼像才算命中
+pub const LABEL_WITH_SIM: f32 = 0.6;
 
 /// 版型平滑：前後都是同一種版型、中間只維持不到 1.5 秒的另一種版型 → 當成前後那種（判斷偶爾抖一下不算數）
 pub fn smooth_layouts(lay: &mut [Layout]) {
@@ -380,6 +390,9 @@ pub fn smooth_layouts(lay: &mut [Layout]) {
         k = j;
     }
 }
+
+/// 靠畫面相似命中（SIM_NCC）的遮罩，往前後延伸到相似度還有這麼高的格（雙框只有左框在換，整張畫面看不出鏡頭切換）
+pub const SIM_EXTEND: f32 = 0.55;
 
 pub fn plan_masks(frames: &[FrameInfo], set: &StillSet, range: (usize, usize)) -> Vec<MaskSeg> {
     let stills = &set.stills;
@@ -443,7 +456,7 @@ pub fn plan_masks(frames: &[FrameInfo], set: &StillSet, range: (usize, usize)) -
         // 靠畫面相似命中的靜圖：往前後延伸到「還算像」為止（雙框只有左框在換，整張畫面看不出鏡頭切換）
         let ks: Vec<usize> = (0..stills.len()).filter(|&k| frames[s..e].iter().any(|f| f.sims[k] >= SIM_NCC)).collect();
         if !ks.is_empty() {
-            let like = |i: usize| ks.iter().any(|&k| frames[i].sims[k] >= 0.55);
+            let like = |i: usize| ks.iter().any(|&k| frames[i].sims[k] >= SIM_EXTEND);
             let lim = 10 * fps;
             while s > r0 && s + lim > e && like(s - 1) {
                 s -= 1;
@@ -619,6 +632,7 @@ pub fn reused_segments(frames: &[FrameInfo], set: &StillSet, seg: &Segment) -> V
         };
         'pieces: for &(a, b) in &seg.pieces {
             let (mut run, mut best) = (0usize, 0f32);
+            #[allow(clippy::needless_range_loop, reason = "i 是格號，跟 pieces 的區間對照著看比較清楚")]
             for i in a..b.min(frames.len()) {
                 if strong(&frames[i]) {
                     run += 1;

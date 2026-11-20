@@ -8,6 +8,34 @@ const dateInput = $("date");
 const output = $("output");
 const segmentsEl = $("segments");
 
+// --- 依日期存的設定（手動遮罩、壓 BAR、串接、YouTube…）：全部走這兩個，不要自己再寫 localStorage ---
+
+/** localStorage 的 key：「種類:日期」（日期空白＝today） */
+function dayKey(kind) {
+  return `${kind}:${dateInput.value.trim() || "today"}`;
+}
+
+/** 讀當天的設定；沒有或壞掉＝fallback */
+function dayLoad(kind, fallback) {
+  try {
+    return JSON.parse(localStorage.getItem(dayKey(kind))) ?? fallback;
+  } catch (e) {
+    console.error("讀不到設定", kind, e);
+    return fallback;
+  }
+}
+
+/** 存當天的設定；存不進去回傳錯誤訊息（呼叫端要顯示出來），成功回傳 null */
+function daySave(kind, value) {
+  try {
+    localStorage.setItem(dayKey(kind), JSON.stringify(value));
+    return null;
+  } catch (e) {
+    console.error("存不了設定", kind, e);
+    return String(e);
+  }
+}
+
 /** 每段的 DOM 參照：{ root, text, time, warn } */
 const segments = SEGMENT_NAMES.map((name, i) => {
   const root = $("segmentTpl").content.firstElementChild.cloneNode(true);

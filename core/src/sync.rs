@@ -47,9 +47,11 @@ mod tests {
 
     #[test]
     fn default_path() {
-        let p = file_path(&Settings::default(), "20261016").unwrap();
+        assert_eq!(file_path(&Settings::default(), "20261016"), None); // 預設沒填根目錄
+        let settings = Settings { sync_root: r"\\server\share".to_string(), ..Settings::default() };
+        let p = file_path(&settings, "20261016").unwrap();
         let s = p.to_string_lossy();
-        assert!(s.starts_with(r"\\數媒yt上傳\yt上傳"), "{s}");
+        assert!(s.starts_with(r"\\server\share"), "{s}");
         assert!(s.contains("1016關鍵"));
         assert!(s.ends_with("20261016關鍵標題1-6.txt"));
     }

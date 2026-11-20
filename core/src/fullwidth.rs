@@ -53,7 +53,7 @@ pub fn to_fullwidth(line: &str) -> Converted {
 
     Converted {
         text: out,
-        odd_quotes: quote_count % 2 != 0,
+        odd_quotes: !quote_count.is_multiple_of(2),
     }
 }
 

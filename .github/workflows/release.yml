@@ -18,9 +18,13 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # 只測 core：app crate 沒有測試，編譯錯誤會在 release job 建置時抓到。
-      - name: Rust tests
-        run: cargo test -p keyword-title-core
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # 跟本機一樣跑 scripts/check.ps1（測試＋clippy＋JS 檢查），沒過就不打包。
+      - name: Check
+        shell: pwsh
+        run: ./scripts/check.ps1
 
   release:
     needs: test

@@ -323,6 +323,7 @@ struct Done {
 }
 
 /// 出片佇列的工作
+#[allow(clippy::large_enum_variant, reason = "佇列裡同時只有幾個工作，不值得為了大小把 RenderJob 包成 Box")]
 enum Job {
     /// 遮蓋出正片
     Segment(RenderJob),
@@ -810,6 +811,39 @@ pub fn autocut_report(state: State<'_, AutocutState>) -> String {
 pub fn autocut_set_titles(state: State<'_, AutocutState>, text: String) {
     if let Some(s) = state.shared.lock().unwrap().as_ref() {
         *s.titles_text.lock().unwrap() = text;
+    }
+}
+
+/// 當天手動設定（手動遮罩、壓 BAR、串接）另存的檔案：成品資料夾\.autocut\{kind}-{YYYYMMDD}.json。
+/// 畫面上的設定平常存在瀏覽器的 localStorage，換電腦、清掉程式資料就不見；這份是備份，
+/// localStorage 沒有那天的設定時從這裡讀回來。kind 只接受英數字，避免組出奇怪的路徑。
+fn day_file(dir: &str, date: &str, kind: &str) -> Result<PathBuf, String> {
+    let ok = |s: &str, n: usize| !s.is_empty() && s.len() <= n && s.chars().all(|c| c.is_ascii_alphanumeric());
+    if dir.trim().is_empty() || !ok(date, 8) || date.len() != 8 || !ok(kind, 20) {
+        return Err(format!("設定檔名稱不對：{kind}-{date}"));
+    }
+    Ok(Path::new(dir).join(".autocut").join(format!("{kind}-{date}.json")))
+}
+
+/// 寫當天設定（先寫暫存檔再改名，寫到一半斷電也不會留下壞掉的檔）
+#[tauri::command]
+pub fn autocut_day_save(dir: String, date: String, kind: String, json: String) -> Result<(), String> {
+    let path = day_file(&dir, &date, &kind)?;
+    let fail = |e: std::io::Error| format!("{}：{e}", path.display());
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(fail)?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(fail)?;
+    std::fs::rename(&tmp, &path).map_err(fail)
+}
+
+/// 讀當天設定；沒有這個檔＝None
+#[tauri::command]
+pub fn autocut_day_load(dir: String, date: String, kind: String) -> Result<Option<String>, String> {
+    let path = day_file(&dir, &date, &kind)?;
+    match std::fs::read_to_string(&path) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}：{e}", path.display())),
     }
 }
 
@@ -2379,7 +2413,7 @@ bar {} {mtime} {at_ranges:?}", bar.image));
                 .stdin(Stdio::null())
                 .output()
                 .ok()?;
-            let got: Vec<image::GrayImage> = o.stdout.chunks_exact((LOGO_W * LOGO_H) as usize).filter_map(|c| image::GrayImage::from_raw(LOGO_W, LOGO_H, c.to_vec())).collect();
+            let got: Vec<image::GrayImage> = o.stdout.as_chunks::<{ (LOGO_W * LOGO_H) as usize }>().0.iter().filter_map(|c| image::GrayImage::from_raw(LOGO_W, LOGO_H, c.to_vec())).collect();
             if got.is_empty() {
                 break;
             }
@@ -2483,7 +2517,7 @@ fn seam_audio(ffmpeg: &Path, path: &Path, tail: bool) -> Result<Vec<i16>, String
     if o.stdout.len() < 2 * seam::SR / 2 {
         return Err(String::from_utf8_lossy(&o.stderr).trim().chars().take(200).collect());
     }
-    Ok(o.stdout.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect())
+    Ok(o.stdout.as_chunks::<2>().0.iter().map(|c| i16::from_le_bytes([c[0], c[1]])).collect())
 }
 
 /// 接縫確認用的畫面：結尾最後 `n` 格或開頭最前 `n` 格，64×36 灰階
@@ -2504,7 +2538,7 @@ fn seam_frames(ffmpeg: &Path, path: &Path, tail: bool, n: usize) -> Result<Vec<V
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("無法執行 ffmpeg：{e}"))?;
-    let mut frames: Vec<Vec<u8>> = o.stdout.chunks_exact(SZ).map(|c| c.to_vec()).collect();
+    let mut frames: Vec<Vec<u8>> = o.stdout.as_chunks::<SZ>().0.iter().map(|c| c.to_vec()).collect();
     if frames.len() < n {
         return Err("畫面不夠".into());
     }
@@ -3112,7 +3146,9 @@ fn render_one_segment(app: &AppHandle, shared: &Arc<Shared>, ffprobe: &Path, ffm
         let ok = r.is_ok();
         match r {
             Ok(()) => {
-                let _ = std::fs::write(marker_path(job), &job.fingerprint);
+                if let Err(e) = std::fs::write(marker_path(job), &job.fingerprint) {
+                    shared.log(app, format!("★ 第 {n} 段的出片紀錄寫不進去（下次可能會重出）：{e}"));
+                }
                 let output = job.out.display().to_string();
                 shared.renders.lock().unwrap().insert(n, Render::Done { output: output.clone(), fingerprint: job.fingerprint.clone() });
                 shared.log(app, format!("第 {n} 段完成：{output}"));
@@ -3152,7 +3188,9 @@ fn run_chain(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Pat
     let r = shared.stage(app, &format!("串接第 {n} 段（{what}）"), || render_chain(app, shared, ffmpeg, ffprobe, cfg, n, &chain, &seg_out, &out));
     match r {
         Ok(()) => {
-            let _ = std::fs::write(chain_marker(cfg, n), &fp);
+            if let Err(e) = std::fs::write(chain_marker(cfg, n), &fp) {
+                shared.log(app, format!("★ 第 {n} 段的串接紀錄寫不進去（下次可能會重接）：{e}"));
+            }
             let output = out.display().to_string();
             shared.chain_renders.lock().unwrap().insert(n, Render::Done { output: output.clone(), fingerprint: fp });
             shared.log(app, format!("第 {n} 段串接完成：{output}"));
@@ -3263,7 +3301,9 @@ fn promo_like(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Pa
         return Ok(src.to_string());
     }
     std::fs::rename(&tmp, &dst).map_err(|e| e.to_string())?;
-    let _ = std::fs::write(&tag, stamp);
+    if let Err(e) = std::fs::write(&tag, stamp) {
+        shared.log(app, format!("★ promo {secs} 秒的轉檔紀錄寫不進去（下次會再轉一次）：{e}"));
+    }
     Ok(dst.display().to_string())
 }
 
@@ -3282,7 +3322,7 @@ fn render_chain(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &
     let dir = out.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir).map_err(|e| format!("無法建立 {}：{e}", dir.display()))?;
     let tmp = out.with_extension("part.mp4");
-    let spec = RenderSpec { clips, transition: cfg.transition, width: W as u32, height: H as u32, fps: "30000/1001".into(), encoder: cfg.encoder.unwrap_or(Encoder::X264), output: tmp.display().to_string() };
+    let spec = RenderSpec { clips, transition: cfg.transition, width: W, height: H, fps: "30000/1001".into(), encoder: cfg.encoder.unwrap_or(Encoder::X264), output: tmp.display().to_string() };
     let list = Path::new(&cfg.output_dir).join(".autocut").join(format!("第{n}段.chain.txt"));
     let r = render_spec(app, shared, ffmpeg, spec, &list, &mut |p| {
         shared.chain_renders.lock().unwrap().insert(n, Render::Rendering(p));
@@ -3378,7 +3418,9 @@ fn maybe_concat_all(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprob
     *shared.all_progress.lock().unwrap() = None;
     match ok {
         Ok(chapters) => {
-            let _ = std::fs::write(&marker, fp);
+            if let Err(e) = std::fs::write(&marker, fp) {
+                shared.log(app, format!("★ 全集的出片紀錄寫不進去（下次可能會重出）：{e}"));
+            }
             let path = out.display().to_string();
             *shared.all.lock().unwrap() = Some(path.clone());
             shared.log(app, format!("全集完成：{path}"));
@@ -3411,7 +3453,7 @@ fn render_all(app: &AppHandle, shared: &Arc<Shared>, ffmpeg: &Path, ffprobe: &Pa
     }
     let tmp = out.with_extension("part.mp4");
     *shared.all_progress.lock().unwrap() = Some(0.0);
-    let spec = RenderSpec { clips, transition: cfg.transition, width: W as u32, height: H as u32, fps: "30000/1001".into(), encoder: cfg.encoder.unwrap_or(Encoder::X264), output: tmp.display().to_string() };
+    let spec = RenderSpec { clips, transition: cfg.transition, width: W, height: H, fps: "30000/1001".into(), encoder: cfg.encoder.unwrap_or(Encoder::X264), output: tmp.display().to_string() };
     let (places, _) = video::plan(&spec);
     let chapters = seg_at.iter().map(|&(n, k)| (n, places[k].visible_at)).collect();
     let list = Path::new(&cfg.output_dir).join(".autocut").join("全集.list.txt");
@@ -3613,6 +3655,29 @@ fn concat_all(ffmpeg: &Path, ffprobe: &Path, segs: &[(usize, PathBuf)], out: &Pa
 }
 
 #[cfg(test)]
+mod day_file_tests {
+    use super::*;
+
+    #[test]
+    fn day_settings_round_trip_and_reject_odd_names() {
+        let dir = std::env::temp_dir().join(format!("kwt-day-{}", std::process::id()));
+        let d = dir.to_str().unwrap().to_string();
+        let s = |x: &str| x.to_string();
+        assert_eq!(autocut_day_load(d.clone(), s("20261120"), s("acMasks")).unwrap(), None);
+        autocut_day_save(d.clone(), s("20261120"), s("acMasks"), s(r#"{"1":[]}"#)).unwrap();
+        autocut_day_save(d.clone(), s("20261120"), s("acMasks"), s(r#"{"2":[]}"#)).unwrap(); // 覆蓋
+        assert_eq!(autocut_day_load(d.clone(), s("20261120"), s("acMasks")).unwrap().as_deref(), Some(r#"{"2":[]}"#));
+        assert!(dir.join(".autocut").join("acMasks-20261120.json").is_file());
+        assert!(!dir.join(".autocut").join("acMasks-20261120.json.tmp").exists());
+        for (date, kind) in [("today", "acMasks"), ("2026112", "acMasks"), ("20261120", "../x"), ("20261120", "")] {
+            assert!(autocut_day_save(d.clone(), s(date), s(kind), s("{}")).is_err(), "{date} {kind}");
+        }
+        assert!(autocut_day_save(s(" "), s("20261120"), s("acMasks"), s("{}")).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -3643,7 +3708,7 @@ mod tests {
 
     #[test]
     fn network_paths() {
-        assert!(on_network(Path::new(r"\\10.3.20.33\yt上傳\1028關鍵\替換畫面")));
+        assert!(on_network(Path::new(r"\\server\yt上傳\1028關鍵\替換畫面")));
         assert!(on_network(Path::new(r"\\?\UNC\server\share")));
         assert!(!on_network(Path::new(r"\\?\C:\Users\user\Downloads")));
         assert!(!on_network(Path::new("/tmp/stills")));

@@ -1,0 +1,3 @@
+# clippy 設定（scripts/check.ps1 用 -D warnings 跑，警告＝錯誤）
+# AI 補判、手動遮罩的中間結果是 (起, 訖, 靜圖) 這種 tuple 的巢狀 Vec／Result，拆成 type 反而難讀
+type-complexity-threshold = 400

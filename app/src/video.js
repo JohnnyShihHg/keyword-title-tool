@@ -145,7 +145,9 @@ function showNotice({ title, message, okText = "好", cancelText = null, input =
       if (e.key === "Enter") ok.click();
     };
     cancel.onclick = () => close(false);
-    box.onclick = (e) => e.target === box && close(false);
+    box.onclick = (e) => {
+      if (e.target === box) close(false);
+    };
     document.onkeydown = (e) => {
       if (e.key === "Escape") close(false);
     };
@@ -234,7 +236,9 @@ async function installTools(which) {
     $("toolsMsg").textContent = "下載完成";
     if (which !== "ytdlp") {
       $("encoderReport").textContent = "偵測中…";
-      invoke("detect_encoder", { force: true }).then(showEncoderReport).catch(() => {});
+      invoke("detect_encoder", { force: true })
+        .then(showEncoderReport)
+        .catch((e) => ($("encoderReport").textContent = `⚠ 偵測失敗：${e}`));
     }
   } catch (e) {
     $("toolsMsg").textContent = `⚠ ${e}`;
@@ -506,7 +510,8 @@ function createPanel(prefix, buildSequence, defaultName, hooks = {}) {
     await loadInto(player, store[item.key].path);
     player.currentTime = seconds;
     tl.switching = false;
-    if (play) await player.play().catch(() => {});
+    // 播放被下一次跳轉打斷（AbortError）是正常的，記在 console 就好
+    if (play) await player.play().catch((e) => console.debug("play 被打斷", e));
     tlTick();
   }
 

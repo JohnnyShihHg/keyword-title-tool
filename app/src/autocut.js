@@ -23,6 +23,47 @@ function acOutputDir() {
   return settings.autocut_output_dir || settings.output_dir || "";
 }
 
+// 手動遮罩、壓 BAR、串接：除了 localStorage，也另存一份到成品資料夾 .autocut\{種類}-{日期}.json，
+// 換電腦、清掉程式資料都還讀得回來（localStorage 沒有那天的設定才讀檔）。
+const AC_DAY_LABEL = { acMasks: "手動遮罩", acBars: "壓 BAR", acChains: "串接設定" };
+
+function acDayFileArgs(kind) {
+  const date = dateInput.value.trim();
+  const dir = acOutputDir();
+  return dir && /^\d{8}$/.test(date) ? { dir, date, kind } : null;
+}
+
+/** 讀當天設定：localStorage → 成品資料夾的備份 → fallback */
+async function acDayLoad(kind, fallback) {
+  const local = dayLoad(kind, null);
+  if (local != null) return local;
+  const args = acDayFileArgs(kind);
+  if (!args) return fallback;
+  try {
+    const text = await invoke("autocut_day_load", args);
+    return text == null ? fallback : JSON.parse(text) ?? fallback;
+  } catch (e) {
+    acMessage(`⚠ 讀不到${AC_DAY_LABEL[kind]}的備份：${e}`);
+    return fallback;
+  }
+}
+
+/** 存當天設定（兩邊都存），哪邊失敗就在畫面上說 */
+async function acDaySave(kind, value) {
+  const errors = [];
+  const local = daySave(kind, value);
+  if (local) errors.push(`程式裡：${local}`);
+  const args = acDayFileArgs(kind);
+  if (args) {
+    try {
+      await invoke("autocut_day_save", { ...args, json: JSON.stringify(value) });
+    } catch (e) {
+      errors.push(`成品資料夾：${e}`);
+    }
+  }
+  if (errors.length) acMessage(`⚠ ${AC_DAY_LABEL[kind]}沒存好（${errors.join("；")}）`);
+}
+
 /** 側錄資料夾最後一層是日期（2026_10_26）時，換成文稿頁的日期，不用每天重選 */
 function acWatchDir() {
   const dir = settings.autocut_watch_dir || "";
@@ -146,13 +187,13 @@ $("acSince").addEventListener("change", () => {
 $("acAutoRender").addEventListener("change", () => {
   settings.autocut_auto_render = $("acAutoRender").checked;
   persistSettings();
-  invoke("autocut_set_options", { autoRender: $("acAutoRender").checked }).catch(() => {});
+  invoke("autocut_set_options", { autoRender: $("acAutoRender").checked }).catch((e) => acMessage(`⚠ 監看中的設定沒改到：${e}`));
 });
 // 監看中取消勾選也要馬上生效（以前只在開始監看時讀一次，取消了照樣合成全集）
 $("acMakeAll").addEventListener("change", () => {
   settings.autocut_make_all = $("acMakeAll").checked;
   persistSettings();
-  invoke("autocut_set_options", { makeAll: $("acMakeAll").checked }).catch(() => {});
+  invoke("autocut_set_options", { makeAll: $("acMakeAll").checked }).catch((e) => acMessage(`⚠ 監看中的設定沒改到：${e}`));
 });
 $("acCopyShare").addEventListener("change", () => {
   settings.autocut_copy_to_share = $("acCopyShare").checked;
@@ -495,16 +536,10 @@ let acChains = {};
 let acChainsDate = null;
 let acChainEls = {}; // 段號 → { tr, list, count }
 
-function acChainKey() {
-  return `acChains:${dateInput.value.trim() || "today"}`;
-}
-
-function acLoadChains() {
-  acChainsDate = dateInput.value.trim();
-  let saved = null;
-  try {
-    saved = JSON.parse(localStorage.getItem(acChainKey()) || "null");
-  } catch {}
+async function acLoadChains() {
+  const date = (acChainsDate = dateInput.value.trim());
+  const saved = await acDayLoad("acChains", null);
+  if (date !== acChainsDate) return; // 讀檔途中又換了日期
   acChains = {};
   for (const n of [1, 2, 3, 4, 5, 6]) {
     const s = saved?.[n];
@@ -523,9 +558,7 @@ function acLoadChains() {
 }
 
 function acSaveChains() {
-  try {
-    localStorage.setItem(acChainKey(), JSON.stringify(acChains));
-  } catch {}
+  acDaySave("acChains", acChains);
 }
 
 /** 送給 Rust 的設定；不接東西＝null。空白的那列不算；有填但還沒下載好的＝等著 */
@@ -833,6 +866,6 @@ window.onSettingsChanged = () => {
   for (const el of [...document.querySelectorAll("[data-ac-pick], [data-ac-clear]"), dateInput, $("todayBtn")]) el.dataset.acTitle = el.title || "";
   while (!settings) await new Promise((r) => setTimeout(r, 100));
   acFillDirs();
-  acLoadChains();
+  await acLoadChains();
   acShow(await invoke("autocut_status"));
 })();

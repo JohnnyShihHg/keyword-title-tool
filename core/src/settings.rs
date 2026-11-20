@@ -51,7 +51,7 @@ pub struct Settings {
     // --- 共用資料夾同步 ---
     /// 總開關：開著才會自動載入／寫入當天資料夾的 txt
     pub sync_enabled: bool,
-    /// 共用資料夾根目錄，例如 `\\數媒yt上傳\yt上傳`
+    /// 共用資料夾根目錄，例如 `\\伺服器\共用資料夾`（內部位址不寫進程式）
     pub sync_root: String,
     /// 當天資料夾名稱，`{MMDD}` 等代入日期（見 `sync::folder_name`），例如 `{MMDD}關鍵` → `1016關鍵`
     pub sync_folder_format: String,
@@ -134,7 +134,7 @@ impl Default for Settings {
             output_dir: String::new(),
             encoder: "auto".to_string(),
             sync_enabled: false,
-            sync_root: r"\\數媒yt上傳\yt上傳".to_string(),
+            sync_root: String::new(),
             sync_folder_format: "{MMDD}關鍵".to_string(),
             sync_auto_load: true,
             sync_auto_write: true,

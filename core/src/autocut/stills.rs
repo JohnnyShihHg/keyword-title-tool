@@ -272,7 +272,7 @@ mod tests {
     fn still_with_label(shape: u32) -> RgbImage {
         RgbImage::from_fn(W, H, |x, y| {
             let (lx, ly) = (x.wrapping_sub(ROI_FULL.0), y.wrapping_sub(ROI_FULL.1));
-            let on = lx < 160 && ly < 80 && ((lx / 8 + ly / 8 * shape) % 3 == 0);
+            let on = lx < 160 && ly < 80 && (lx / 8 + ly / 8 * shape).is_multiple_of(3);
             if on {
                 image::Rgb([240, 240, 240])
             } else {
@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn stills_in_segment_folders_only_serve_that_segment() {
-        assert_eq!(segment_of_path(r"\\10.3.20.33\yt上傳\替換畫面\第2段\a.jpg"), Some(2));
+        assert_eq!(segment_of_path(r"\\server\yt上傳\替換畫面\第2段\a.jpg"), Some(2));
         assert_eq!(segment_of_path("/s/第六段/a.jpg"), Some(6));
         assert_eq!(segment_of_path("/s/a.jpg"), None);
         let a = still_with_label(1);

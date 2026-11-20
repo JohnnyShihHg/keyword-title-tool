@@ -1,6 +1,6 @@
 // 自動切段頁「壓 BAR」：舊標題出現在標題條的時段，整張蓋上新的 BAR 圖（1920×1080 透明 PNG）。
 // 每段一個可收合的區塊，裡面可以疊加好幾條。時段在 Rust 端用標題條 OCR 自動找、對準到格（autocut.rs 的 bar_ranges）；
-// 填了手動時段就用手動的。設定依日期存在 localStorage，改了就送給監看中的 Rust（autocut_set_bars）。
+// 填了手動時段就用手動的。設定依日期存在 localStorage＋成品資料夾的備份（autocut.js 的 acDayLoad／acDaySave），改了就送給監看中的 Rust（autocut_set_bars）。
 // 和 autocut.js 共用全域的 invoke、$、settings、listen、dialog、dateInput、convertFileSrc、acStatus、acCurrentTitles。
 
 let acBars = {}; // 段號 → [{ old, image, manual }]（manual 是畫面上打的字：「29:55-31:18, 32:00-32:10」）
@@ -8,24 +8,16 @@ let acBarsDate = null;
 let acBarTitles = {}; // 段號 → 文稿這段的標題列表（舊標題的下拉選項）
 let acBarEls = {}; // 段號 → { details, count, list, items: [{ chips, manualInput, ... }] }
 
-function acBarsKey() {
-  return `acBars:${dateInput.value.trim() || "today"}`;
-}
-
-function acLoadBars() {
-  acBarsDate = dateInput.value.trim();
-  try {
-    acBars = JSON.parse(localStorage.getItem(acBarsKey()) || "{}") || {};
-  } catch {
-    acBars = {};
-  }
+async function acLoadBars() {
+  const date = (acBarsDate = dateInput.value.trim());
+  const saved = await acDayLoad("acBars", {});
+  if (date !== acBarsDate) return; // 讀檔途中又換了日期
+  acBars = saved;
   acBuildBars();
 }
 
 function acSaveBars() {
-  try {
-    localStorage.setItem(acBarsKey(), JSON.stringify(acBars));
-  } catch {}
+  acDaySave("acBars", acBars);
 }
 
 /** 「1:02:03.5」「29:55」「95」→ 秒；看不懂回傳 null */
@@ -205,7 +197,10 @@ async function acRefreshBarTitles() {
   let meta = [];
   try {
     meta = await invoke("yt_meta", { text: await acCurrentTitles() });
-  } catch {}
+  } catch (e) {
+    // 文稿還沒填好時讀不到，下拉選單先空著；之後文稿更新會再讀
+    console.warn("讀不到文稿標題（壓 BAR 下拉選單）", e);
+  }
   acBarTitles = Object.fromEntries(meta.map((m) => [m.number, m.description.split("\n").filter((l) => l.trim() && !l.trim().startsWith("#"))]));
   let lists = $("acBarTitleLists");
   if (!lists) {

@@ -211,6 +211,8 @@ fn main() {
             autocut::autocut_set_options,
             autocut::autocut_set_live,
             autocut::autocut_reveal,
+            autocut::autocut_day_save,
+            autocut::autocut_day_load,
             autocut::autocut_copy_to_share,
             autocut::stills_list,
             autocut::stills_add,

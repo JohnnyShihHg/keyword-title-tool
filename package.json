@@ -1,0 +1,12 @@
+{
+  "name": "keyword-title-tool-checks",
+  "private": true,
+  "description": "只放 JS 檢查（eslint）；程式本身不用 node，前端是原生 JS。",
+  "scripts": {
+    "lint": "eslint app/src"
+  },
+  "devDependencies": {
+    "eslint": "10.14.0",
+    "globals": "17.14.0"
+  }
+}

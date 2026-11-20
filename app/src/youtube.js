@@ -15,22 +15,13 @@ let ytRemote = {}; // 影片 ID → { privacy, publish_at }（YouTube 上的實�
 let ytRemoteAt = {}; // 影片 ID → 上次查的時間
 let ytRemoteBusy = false;
 
-function ytKey(kind) {
-  return `${kind}:${dateInput.value.trim() || "today"}`;
-}
-
 function ytLoad(kind) {
-  try {
-    return JSON.parse(localStorage.getItem(ytKey(kind)) || "{}");
-  } catch {
-    return {};
-  }
+  return dayLoad(kind, {});
 }
 
 function ytSave(kind, value) {
-  try {
-    localStorage.setItem(ytKey(kind), JSON.stringify(value));
-  } catch {}
+  const err = daySave(kind, value);
+  if (err) ytMessage(`⚠ 沒存好：${err}`);
 }
 
 function ytMessage(text) {
@@ -175,7 +166,7 @@ function ytPlaylistsFor(n) {
   return [...new Set([...ytRequired().ids, ...(saved === undefined ? ytDefaultPlaylists() : ytIds(saved))])];
 }
 
-/** 共用資料夾（`\\數媒yt上傳\yt上傳\1026關鍵`）裡的 1.jpg～6.jpg */
+/** 共用資料夾（`\\伺服器\共用資料夾\1026關鍵`）裡的 1.jpg～6.jpg */
 async function ytFindThumbs() {
   ytThumbAuto = {};
   ytThumbDir = "";
@@ -307,7 +298,10 @@ function ytPlaylistPicker(getIds, setIds, emptyText) {
   });
   // 右鍵也能貼：浮動視窗裡的右鍵不要被當成點到外面
   search.addEventListener("mousedown", (e) => e.stopPropagation());
-  search.onkeydown = (e) => e.key === "Escape" && pop.classList.add("hidden");
+  // 注意不能寫成 `=> e.key === "Escape" && …`：on 事件回傳 false 會擋掉打字、刪除、Ctrl+V
+  search.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") pop.classList.add("hidden");
+  });
   pop.querySelector(".yt-pl-clear").onclick = () => {
     setIds([]);
     summary();
@@ -740,7 +734,10 @@ setInterval(async () => {
     try {
       const mtime = await invoke("sync_stat", { path: sync.path });
       if ((mtime ?? null) !== sync.mtime) await syncPull(); // 載入後 onDocRefreshed 會重讀標題、關鍵字
-    } catch {}
+    } catch (e) {
+      // 共用資料夾暫時連不到：這個迴圈每分鐘會再看一次
+      console.warn("自動上傳等待中，讀不到共用文稿", e);
+    }
   }
   await ytFindThumbs();
   ytUpdate();

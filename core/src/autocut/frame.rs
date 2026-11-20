@@ -286,8 +286,8 @@ mod tests {
     #[test]
     fn text_lines_ignore_logo_tip_and_background_streak() {
         // 字：一行在 y 15..40；第二行（兩行來源字）在 y 50..75
-        let label = |x: usize, y: usize| (20..160).contains(&x) && (15..40).contains(&y) && (x / 3 + y) % 4 == 0;
-        let second = |x: usize, y: usize| (10..170).contains(&x) && (50..75).contains(&y) && (x / 3 + y) % 4 == 0;
+        let label = |x: usize, y: usize| (20..160).contains(&x) && (15..40).contains(&y) && (x / 3 + y).is_multiple_of(4);
+        let second = |x: usize, y: usize| (10..170).contains(&x) && (50..75).contains(&y) && (x / 3 + y).is_multiple_of(4);
         // 最上面一列台標字腳 4 點、最下面兩列背景亮邊
         let noise = |x: usize, y: usize| (y == 0 && (60..64).contains(&x)) || (y >= 88 && (30..56).contains(&x));
         let m = |f: &dyn Fn(usize, usize) -> bool| Mask::from_fn(180, 90, |x, y| if f(x, y) { 230.0 } else { 40.0 });

@@ -1,31 +1,23 @@
 // 自動切段頁「手動遮罩」：自動判斷漏掉的地方，指定時段一定遮（蓋過自動判斷的）。
 // 時段是成品的段內時間，可以直接貼同事回報的剪輯時間碼「00;16;01;20-00;16;10;25」（;＝29.97 掉格、:＝不掉格，最後一節是格數）
 // 或一般的「16:01.6-16:10.8」。靜圖可以選好幾張：Rust 端照版型切開，每截用同版型最像的；不選就從這段能用的挑（plan::manual_plan）。
-// 設定依日期存在 localStorage，改了就送給監看中的 Rust（autocut_set_manual_masks）。
+// 設定依日期存在 localStorage＋成品資料夾的備份（autocut.js 的 acDayLoad／acDaySave），改了就送給監看中的 Rust（autocut_set_manual_masks）。
 // 和 bars.js 共用 acParseTime、acFmtTime；和 autocut.js 共用 invoke、$、dialog、dateInput、convertFileSrc、acStatus、acMessage。
 
 let acMasks = {}; // 段號 → [{ ranges: "16:01.6-16:10.8", stills: [路徑…] }]（舊設定是單張的 still）
 let acMasksDate = null;
 let acMaskEls = {}; // 段號 → { details, count, list, items: [{ spec, chips }] }
 
-function acMasksKey() {
-  return `acMasks:${dateInput.value.trim() || "today"}`;
-}
-
-function acLoadMasks() {
-  acMasksDate = dateInput.value.trim();
-  try {
-    acMasks = JSON.parse(localStorage.getItem(acMasksKey()) || "{}") || {};
-  } catch {
-    acMasks = {};
-  }
+async function acLoadMasks() {
+  const date = (acMasksDate = dateInput.value.trim());
+  const saved = await acDayLoad("acMasks", {});
+  if (date !== acMasksDate) return; // 讀檔途中又換了日期
+  acMasks = saved;
   acBuildMasks();
 }
 
 function acSaveMasks() {
-  try {
-    localStorage.setItem(acMasksKey(), JSON.stringify(acMasks));
-  } catch {}
+  acDaySave("acMasks", acMasks);
 }
 
 /** 剪輯時間碼「00;16;01;20」「00:16:01:20」→ 秒（29.97fps；用 ; 的是掉格時間碼）；其他格式交給 acParseTime */
