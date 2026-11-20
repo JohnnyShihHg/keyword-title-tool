@@ -200,7 +200,7 @@ fn fresh_token(app: &AppHandle, settings: &Settings, force: bool) -> Result<Stri
 }
 
 /// 呼叫 YouTube API：每次都拿目前有效的 token；回 401（token 過期或失效）就換一張新的再試一次。
-/// 11/21 第三段：傳完影片後設縮圖等了一陣子，接著加播放清單時 token 剛好過期，三個清單都 401。
+/// 11/20 第三段：傳完影片後設縮圖等了一陣子，接著加播放清單時 token 剛好過期，三個清單都 401。
 fn with_token<T>(app: &AppHandle, settings: &Settings, call: impl FnMut(&str) -> Result<T, String>) -> Result<T, String> {
     retry_on_401(|force| fresh_token(app, settings, force), call)
 }
