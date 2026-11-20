@@ -163,13 +163,18 @@ fn token_request(form: &[(&str, &str)]) -> Result<serde_json::Value, String> {
     json(ureq::post(TOKEN_URL).timeout(Duration::from_secs(30)).send_form(form).map_err(http_err)?)
 }
 
-/// 有效的 access token（快過期就用 refresh token 換新的）
-fn access_token(app: &AppHandle, settings: &Settings) -> Result<String, String> {
+/// access token 剩不到這麼久就先換新的（傳完影片後設縮圖、等 YouTube 查得到影片、加好幾個播放清單，前後可能要好幾分鐘）
+const TOKEN_MARGIN_SECS: u64 = 600;
+
+/// 有效的 access token（快過期就用 refresh token 換新的）。
+/// force＝不管存的還剩多久，直接換一張新的（Google 回 401 說存的那張不能用時）。
+/// 呼叫 API 請用 `with_token`，不要自己拿一張一直用。
+fn fresh_token(app: &AppHandle, settings: &Settings, force: bool) -> Result<String, String> {
     let mut t = load_token(app).ok_or("還沒登入 YouTube")?;
     if t.expired {
         return Err(format!("{EXPIRED}，請按「重新登入」"));
     }
-    if t.expires_at > now() + 120 && !t.access_token.is_empty() {
+    if !force && t.expires_at > now() + TOKEN_MARGIN_SECS && !t.access_token.is_empty() {
         return Ok(t.access_token);
     }
     let v = match token_request(&[
@@ -192,6 +197,19 @@ fn access_token(app: &AppHandle, settings: &Settings) -> Result<String, String> 
     t.expires_at = now() + v["expires_in"].as_u64().unwrap_or(3600);
     save_token(app, &t)?;
     Ok(t.access_token)
+}
+
+/// 呼叫 YouTube API：每次都拿目前有效的 token；回 401（token 過期或失效）就換一張新的再試一次。
+/// 11/21 第三段：傳完影片後設縮圖等了一陣子，接著加播放清單時 token 剛好過期，三個清單都 401。
+fn with_token<T>(app: &AppHandle, settings: &Settings, call: impl FnMut(&str) -> Result<T, String>) -> Result<T, String> {
+    retry_on_401(|force| fresh_token(app, settings, force), call)
+}
+
+fn retry_on_401<T>(mut token: impl FnMut(bool) -> Result<String, String>, mut call: impl FnMut(&str) -> Result<T, String>) -> Result<T, String> {
+    match call(&token(false)?) {
+        Err(e) if e.starts_with("HTTP 401") => call(&token(true)?),
+        r => r,
+    }
 }
 
 fn channel_title(token: &str) -> Result<String, String> {
@@ -346,16 +364,17 @@ pub struct VideoState {
 #[tauri::command]
 pub async fn yt_video_states(app: AppHandle, settings: Settings, ids: Vec<String>) -> Result<HashMap<String, VideoState>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let token = access_token(&app, &settings)?;
         let mut out: HashMap<String, VideoState> = ids.iter().map(|id| (id.clone(), VideoState { privacy: None, publish_at: None })).collect();
         for chunk in ids.chunks(50) {
-            let v = json(
-                ureq::get(&format!("https://www.googleapis.com/youtube/v3/videos?part=status&id={}", enc(&chunk.join(","))))
-                    .set("Authorization", &format!("Bearer {token}"))
-                    .timeout(Duration::from_secs(30))
-                    .call()
-                    .map_err(http_err)?,
-            )?;
+            let v = with_token(&app, &settings, |token| {
+                json(
+                    ureq::get(&format!("https://www.googleapis.com/youtube/v3/videos?part=status&id={}", enc(&chunk.join(","))))
+                        .set("Authorization", &format!("Bearer {token}"))
+                        .timeout(Duration::from_secs(30))
+                        .call()
+                        .map_err(http_err)?,
+                )
+            })?;
             for item in v["items"].as_array().into_iter().flatten() {
                 let id = item["id"].as_str().unwrap_or_default().to_string();
                 out.insert(
@@ -437,18 +456,14 @@ fn add_to_playlist(token: &str, video_id: &str, playlist_id: &str) -> Result<(),
 /// 影片傳好後：設縮圖、加播放清單。失敗不算上傳失敗，回傳要提醒的事
 fn finish(app: &AppHandle, settings: &Settings, video_id: &str, thumbnail: Option<&str>, playlist_ids: &[String]) -> Vec<String> {
     let mut warnings = Vec::new();
-    let token = match access_token(app, settings) {
-        Ok(t) => t,
-        Err(e) => return vec![e],
-    };
     if let Some(t) = thumbnail.filter(|t| !t.is_empty()) {
         // 剛傳完的影片偶爾還查不到（404），等一下再試
-        let mut result = set_thumbnail(&token, video_id, t);
+        let mut result = with_token(app, settings, |token| set_thumbnail(token, video_id, t));
         for _ in 0..3 {
             match &result {
                 Err(e) if e.starts_with("HTTP 404") => {
                     std::thread::sleep(Duration::from_secs(10));
-                    result = set_thumbnail(&token, video_id, t);
+                    result = with_token(app, settings, |token| set_thumbnail(token, video_id, t));
                 }
                 _ => break,
             }
@@ -458,7 +473,7 @@ fn finish(app: &AppHandle, settings: &Settings, video_id: &str, thumbnail: Optio
         }
     }
     for p in playlist_ids.iter().filter(|p| !p.is_empty()) {
-        if let Err(e) = add_to_playlist(&token, video_id, p) {
+        if let Err(e) = with_token(app, settings, |token| add_to_playlist(token, video_id, p)) {
             warnings.push(format!("沒加進播放清單（{p}）：{e}"));
         }
     }
@@ -475,17 +490,18 @@ pub struct Playlist {
 #[tauri::command]
 pub async fn yt_playlists(app: AppHandle, settings: Settings) -> Result<Vec<Playlist>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let token = access_token(&app, &settings)?;
         let mut out = Vec::new();
         let mut page = String::new();
         loop {
-            let v = json(
-                ureq::get(&format!("https://www.googleapis.com/youtube/v3/playlists?part=snippet&mine=true&maxResults=50&pageToken={}", enc(&page)))
-                    .set("Authorization", &format!("Bearer {token}"))
-                    .timeout(Duration::from_secs(30))
-                    .call()
-                    .map_err(http_err)?,
-            )?;
+            let v = with_token(&app, &settings, |token| {
+                json(
+                    ureq::get(&format!("https://www.googleapis.com/youtube/v3/playlists?part=snippet&mine=true&maxResults=50&pageToken={}", enc(&page)))
+                        .set("Authorization", &format!("Bearer {token}"))
+                        .timeout(Duration::from_secs(30))
+                        .call()
+                        .map_err(http_err)?,
+                )
+            })?;
             for item in v["items"].as_array().into_iter().flatten() {
                 out.push(Playlist { id: item["id"].as_str().unwrap_or_default().to_string(), title: item["snippet"]["title"].as_str().unwrap_or_default().to_string() });
             }
@@ -576,20 +592,24 @@ fn upload(app: &AppHandle, settings: &Settings, req: &UploadRequest, cancel: &At
     });
     let agent = ureq::AgentBuilder::new().redirects(0).timeout_connect(Duration::from_secs(30)).timeout_read(Duration::from_secs(300)).timeout_write(Duration::from_secs(300)).build();
 
-    let session = agent
-        .post(UPLOAD_URL)
-        .set("Authorization", &format!("Bearer {}", access_token(app, settings)?))
-        .set("Content-Type", "application/json; charset=UTF-8")
-        .set("X-Upload-Content-Type", "video/mp4")
-        .set("X-Upload-Content-Length", &total.to_string())
-        .send_string(&body.to_string())
-        .map_err(http_err)?
-        .header("Location")
-        .ok_or("YouTube 沒有回傳上傳位置")?
-        .to_string();
+    let session = with_token(app, settings, |token| {
+        agent
+            .post(UPLOAD_URL)
+            .set("Authorization", &format!("Bearer {token}"))
+            .set("Content-Type", "application/json; charset=UTF-8")
+            .set("X-Upload-Content-Type", "video/mp4")
+            .set("X-Upload-Content-Length", &total.to_string())
+            .send_string(&body.to_string())
+            .map_err(http_err)?
+            .header("Location")
+            .map(str::to_string)
+            .ok_or_else(|| "YouTube 沒有回傳上傳位置".to_string())
+    })?;
 
     let mut offset = 0u64;
     let mut failures = 0u32;
+    // 上一次被 401 拒絕＝token 失效，下次強制換新的
+    let mut last_401 = false;
     let mut buf = Vec::with_capacity(CHUNK as usize);
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -599,7 +619,8 @@ fn upload(app: &AppHandle, settings: &Settings, req: &UploadRequest, cancel: &At
         buf.clear();
         file.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
         (&mut file).take(end - offset).read_to_end(&mut buf).map_err(|e| e.to_string())?;
-        let token = access_token(app, settings)?;
+        let token = fresh_token(app, settings, last_401)?;
+        last_401 = false;
         let resp = agent
             .put(&session)
             .set("Authorization", &format!("Bearer {token}"))
@@ -616,7 +637,10 @@ fn upload(app: &AppHandle, settings: &Settings, req: &UploadRequest, cancel: &At
             Ok(r) => Err(format!("HTTP {}", r.status())),
             Err(ureq::Error::Status(404 | 410, _)) => return Err("上傳工作階段過期，請重新上傳".into()),
             Err(ureq::Error::Status(code, r)) if code < 500 && code != 401 && code != 408 && code != 429 => return Err(http_err(ureq::Error::Status(code, r))),
-            Err(e) => Err(http_err(e)),
+            Err(e) => {
+                last_401 = matches!(e, ureq::Error::Status(401, _));
+                Err(http_err(e))
+            }
         };
         match next {
             Ok(n) => {
@@ -631,7 +655,7 @@ fn upload(app: &AppHandle, settings: &Settings, req: &UploadRequest, cancel: &At
                 }
                 std::thread::sleep(Duration::from_secs(2u64.pow(failures.min(6))));
                 // 問伺服器實際收到哪裡
-                let token = access_token(app, settings)?;
+                let token = fresh_token(app, settings, last_401)?;
                 if let Ok(r) = agent.put(&session).set("Authorization", &format!("Bearer {token}")).set("Content-Range", &format!("bytes */{total}")).send_bytes(&[]) {
                     match r.status() {
                         200 | 201 => {
@@ -655,6 +679,46 @@ fn received(r: &ureq::Response) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_refreshed_once_on_401() {
+        // 第一次 401 → 強制換新 token 再試一次就成功
+        let mut asked = Vec::new();
+        let mut calls = Vec::new();
+        let r = retry_on_401(
+            |force| {
+                asked.push(force);
+                Ok(if force { "new".to_string() } else { "old".to_string() })
+            },
+            |t| {
+                calls.push(t.to_string());
+                if t == "old" {
+                    Err("HTTP 401：invalid".to_string())
+                } else {
+                    Ok(7)
+                }
+            },
+        );
+        assert_eq!(r, Ok(7));
+        assert_eq!(asked, [false, true]);
+        assert_eq!(calls, ["old", "new"]);
+        // 不是 401 的錯不重試
+        let mut n = 0;
+        let r: Result<(), String> = retry_on_401(|_| Ok("t".to_string()), |_| {
+            n += 1;
+            Err("HTTP 403：quota".into())
+        });
+        assert_eq!((r, n), (Err("HTTP 403：quota".to_string()), 1));
+        // 新 token 也 401 就回傳錯誤，只重試一次
+        let mut n = 0;
+        let r: Result<(), String> = retry_on_401(|_| Ok("t".to_string()), |_| {
+            n += 1;
+            Err("HTTP 401：x".into())
+        });
+        assert!(r.is_err() && n == 2);
+        // refresh token 本身失效（要重新登入）時直接回傳那個錯
+        assert_eq!(retry_on_401(|_| Err::<String, _>("YouTube 登入已過期".to_string()), |_| Ok(1)), Err("YouTube 登入已過期".to_string()));
+    }
 
     #[test]
     fn url_encoding_round_trip() {
