@@ -3,6 +3,7 @@
 #
 #   ./scripts/golden.ps1            比對（動到自動切段、遮蓋就要跑）
 #   ./scripts/golden.ps1 -Update    把這次的結果存成新的答案（確認過結果是對的才用！）
+#   ./scripts/golden.ps1 -Exe 某版.exe   用已經建好的程式跑（例如改程式前的版本建答案），不重新建置
 #
 # 樣本放在 D:\kwt\golden\<案例>\（或環境變數 KWT_GOLDEN）。太大不進 repo，建法見 docs/交接.md「golden 測試」：
 #   case.json     {"watch_dir": "側錄資料夾", "since": "21:50", "end_cutoff": "23:59:30", "only": [1,2]（選填）}
@@ -13,7 +14,7 @@
 #
 # 判定：段落起訖差超過 1 格＝失敗；遮罩**多遮**（答案沒有遮的地方遮了）＝失敗；少遮只警告（寧可少遮）。
 # 樣本或側錄找不到（例如連不到側錄主機）＝跳過並提示，不算失敗。
-param([switch]$Update, [string]$Root = $(if ($env:KWT_GOLDEN) { $env:KWT_GOLDEN } else { "D:\kwt\golden" }))
+param([switch]$Update, [string]$Exe = "", [string]$Root = $(if ($env:KWT_GOLDEN) { $env:KWT_GOLDEN } else { "D:\kwt\golden" }))
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path $PSScriptRoot -Parent)
 $repo = Get-Location
@@ -34,10 +35,15 @@ if (-not $cases.Count) {
     exit 0
 }
 
-Say "== 建置（release）" Cyan
-cargo build -p keyword-title-tool --release --quiet
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-$exe = Join-Path $repo "target\release\keyword-title-tool.exe"
+if ($Exe) {
+    $exe = (Resolve-Path $Exe).Path
+    Say "== 用指定的程式：$exe" Cyan
+} else {
+    Say "== 建置（release）" Cyan
+    cargo build -p keyword-title-tool --release --quiet
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $exe = Join-Path $repo "target\release\keyword-title-tool.exe"
+}
 
 # 「00:12:34.567」→ 秒
 function Sec($tc) {
@@ -109,22 +115,26 @@ foreach ($case in $cases) {
     $cfgPath = Join-Path $out "cfg.json"
     [IO.File]::WriteAllText($cfgPath, ($cfg | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding $false))
     $sw = [Diagnostics.Stopwatch]::StartNew()
-    & $exe --autocut-batch $cfgPath *> (Join-Path $out "batch.log")
+    # 這是視窗程式：用 & 叫不會等它跑完，要 Start-Process -Wait
+    $p = Start-Process -FilePath $exe -ArgumentList "--autocut-batch", "`"$cfgPath`"" -Wait -PassThru -NoNewWindow
+    if ($p.ExitCode) { Say "✖ 重跑失敗（結束碼 $($p.ExitCode)，看 $out\.autocut\batch.log）" Red; $failed++; continue }
     Say ("  重跑 {0:N0} 秒" -f $sw.Elapsed.TotalSeconds)
     $report = Join-Path $out "report.txt"
     if (-not (Test-Path $report)) { Say "✖ 沒產生 report.txt（看 $out\batch.log）" Red; $failed++; continue }
     $got = Parse-Report $report
+    # 掃描快取只是掃描的結果、不是答案：每次都存回去，靜圖簽名改了也只要重掃一次
+    New-Item -ItemType Directory -Force $cache | Out-Null
+    Get-ChildItem "$out\.autocut" -File | Where-Object { $_.Name -match '\.cache$|\.ocr\.tsv$|^seams\.tsv$|^ai\.tsv$' } | Copy-Item -Destination $cache -Force
 
     if ($Update) {
-        New-Item -ItemType Directory -Force $cache | Out-Null
-        Get-ChildItem "$out\.autocut" -File | Where-Object { $_.Name -match '\.cache$|\.ocr\.tsv$|^seams\.tsv$|^ai\.tsv$' } | Copy-Item -Destination $cache -Force
         [IO.File]::WriteAllText((Join-Path $dir "expected.json"), (ConvertTo-Json @($got) -Depth 6), (New-Object Text.UTF8Encoding $false))
         Copy-Item $report (Join-Path $dir "expected-report.txt") -Force
         Say "  已存成新的答案：$($got.Count) 段、$(($got | ForEach-Object { $_.masks.Count } | Measure-Object -Sum).Sum) 個遮罩（請看 expected-report.txt 確認是對的）" Green
         continue
     }
 
-    $want = @(Get-Content (Join-Path $dir "expected.json") -Raw -Encoding UTF8 | ConvertFrom-Json)
+    # Windows PowerShell 5.1 的 ConvertFrom-Json 把整個陣列當成一個物件傳下來，要再攤開
+    $want = @(Get-Content (Join-Path $dir "expected.json") -Raw -Encoding UTF8 | ConvertFrom-Json | ForEach-Object { $_ })
     $bad = 0
     foreach ($w in $want) {
         $g = $got | Where-Object { $_.n -eq $w.n } | Select-Object -First 1

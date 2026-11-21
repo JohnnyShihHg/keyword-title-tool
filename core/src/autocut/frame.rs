@@ -160,7 +160,19 @@ pub fn sim_region(layout: Layout) -> (u32, u32, u32, u32) {
 }
 
 pub fn small_gray(img320: &RgbImage, layout: Layout) -> GrayImage {
-    let (x, y, w, h) = sim_region(layout);
+    gray_of(img320, sim_region(layout))
+}
+
+/// 雙框左框只取字幕以上（BOX.1..BAND.0）：滿版靜圖的小框版本只比這塊（下面是背景和字幕，靜圖裡沒有）
+pub fn box_region() -> (u32, u32, u32, u32) {
+    (BOX.0 / 6, BOX.1 / 6, (BOX.2 - BOX.0) / 6, (BAND.0 - BOX.1) / 6)
+}
+
+pub fn box_gray(img320: &RgbImage) -> GrayImage {
+    gray_of(img320, box_region())
+}
+
+fn gray_of(img320: &RgbImage, (x, y, w, h): (u32, u32, u32, u32)) -> GrayImage {
     let crop = imageops::crop_imm(img320, x, y, w, h).to_image();
     imageops::resize(&imageops::grayscale(&crop), 80, 45, imageops::FilterType::Triangle)
 }
@@ -252,7 +264,17 @@ pub fn judge(buf: &[u8], set: &StillSet) -> (FrameInfo, GrayImage) {
         }
     }
     let g = small_gray(&s320, layout);
-    let sims = set.stills.iter().map(|s| if s.layout == layout { ncc(&s.small, &g) } else { 0.0 }).collect();
+    // 滿版靜圖的小框版本（from_full）只比左框字幕以上那塊
+    let g_box = (layout == Layout::Dual && set.stills.iter().any(|s| s.from_full)).then(|| box_gray(&s320));
+    let sims = set
+        .stills
+        .iter()
+        .map(|s| match (s.layout == layout, s.from_full, &g_box) {
+            (false, ..) => 0.0,
+            (true, true, Some(b)) => ncc(&s.small, b),
+            (true, ..) => ncc(&s.small, &g),
+        })
+        .collect();
     let whole = imageops::resize(&imageops::grayscale(&s320), 80, 45, imageops::FilterType::Triangle);
     let lum = whole.iter().map(|&v| v as f32).sum::<f32>() / whole.len() as f32;
     (FrameInfo { program: bar_present(buf), layout, luma: lum, cut_diff: 0.0, tmpl, iou, sims }, whole)

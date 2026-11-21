@@ -391,6 +391,9 @@ pub fn smooth_layouts(lay: &mut [Layout]) {
     }
 }
 
+/// 真的雙框截圖分數有滿版圖小框版本的這麼多，就用真的截圖蓋（11/20 第 2 段：Still019 對 Still020（小框））
+pub const REAL_STILL_PREFER: f32 = 0.85;
+
 /// 靠畫面相似命中（SIM_NCC）的遮罩，往前後延伸到相似度還有這麼高的格（雙框只有左框在換，整張畫面看不出鏡頭切換）
 pub const SIM_EXTEND: f32 = 0.55;
 
@@ -515,7 +518,14 @@ pub fn plan_masks(frames: &[FrameInfo], set: &StillSet, range: (usize, usize)) -
             };
             let same: Vec<usize> = pool.iter().cloned().filter(|&k| stills[k].layout == layout).collect();
             let pool = if same.is_empty() { pool } else { same };
-            let still = *pool.iter().max_by(|a, b| score[**a].total_cmp(&score[**b])).unwrap();
+            let best = |ks: &mut dyn Iterator<Item = usize>| ks.max_by(|a, b| score[*a].total_cmp(&score[*b]));
+            let mut still = best(&mut pool.iter().copied()).unwrap();
+            // 真的小框截圖跟滿版圖的小框版本都比到時，用真的截圖蓋（小框版本只比字幕以上，總分會偏高）
+            if stills[still].from_full {
+                if let Some(real) = best(&mut pool.iter().copied().filter(|&k| !stills[k].from_full)).filter(|&k| score[k] >= score[still] * REAL_STILL_PREFER) {
+                    still = real;
+                }
+            }
             if let Some(last) = segs.last_mut() {
                 if last.layout == layout && last.still == still && i >= last.end && i - last.end <= two_sec {
                     last.end = j;
@@ -1087,6 +1097,10 @@ pub fn report_coverage(frames: &[FrameInfo], segs: &[(Segment, Vec<MaskSeg>)], s
         // 只給某一段的靜圖：只在那段裡找
         let own = |i: usize| s.segment.is_none_or(|n| segs.iter().any(|(g, _)| g.n == n && g.pieces.iter().any(|(a, b)| i >= *a && i < *b)));
         if let Some((i, f)) = frames.iter().enumerate().filter(|(i, _)| own(*i)).max_by(|a, b| a.1.sims[k].total_cmp(&b.1.sims[k])) {
+            // 滿版圖的小框版本：素材沒在小框播過很正常，有比到（≥ SIM_NCC）才列
+            if s.from_full && f.sims[k] < SIM_NCC {
+                continue;
+            }
             let in_seg = segs.iter().find(|(g, _)| g.pieces.iter().any(|(a, b)| i >= *a && i < *b));
             let masked = segs.iter().any(|(_, ms)| ms.iter().any(|m| i >= m.start && i < m.end));
             let state = match (in_seg, masked) {
@@ -1135,7 +1149,7 @@ mod tests {
     fn one_still_set() -> StillSet {
         let mask = Mask::from_fn(4, 4, |_, _| 0.0);
         StillSet {
-            stills: vec![Still { name: "s.jpg".into(), path: "/s.jpg".into(), segment: None, layout: Layout::Full, template: Some(0), source: StillSet::build(vec![("x.jpg".into(), "/x.jpg".into(), image::RgbImage::new(crate::autocut::W, crate::autocut::H))]).stills[0].source.clone(), small: GrayImage::new(80, 45) }],
+            stills: vec![Still { name: "s.jpg".into(), path: "/s.jpg".into(), segment: None, layout: Layout::Full, template: Some(0), source: StillSet::build(vec![("x.jpg".into(), "/x.jpg".into(), image::RgbImage::new(crate::autocut::W, crate::autocut::H))]).stills[0].source.clone(), small: GrayImage::new(80, 45), from_full: false }],
             templates: vec![Template { layout: Layout::Full, mask, stills: vec![0], generic: false, split: None }],
             off: Vec::new(),
             kin: Vec::new(),

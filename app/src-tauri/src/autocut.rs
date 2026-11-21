@@ -12,7 +12,7 @@ use keyword_title_core::autocut::plan::{self, MaskSeg, Segment};
 use keyword_title_core::autocut::seam::{self, Seam};
 use keyword_title_core::autocut::stills::StillSet;
 use keyword_title_core::autocut::titles::{parse_titles, Titles};
-use keyword_title_core::autocut::{cache, frame, secs, tc, FrameInfo, Layout, BAND, BOX, CANVAS_BYTES, FPS, H, LOGO_H, LOGO_W, START_DELAY, W};
+use keyword_title_core::autocut::{cache, frame, secs, tc, FrameInfo, Layout, BAND, BOX, CANVAS_BYTES, FPS, FULL_IN_BOX, H, LOGO_H, LOGO_W, START_DELAY, W};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
@@ -2093,7 +2093,8 @@ impl Watcher {
             .iter()
             .map(|m| {
                 let s = &self.stills.stills[m.still];
-                (m.clone(), s.path.clone(), s.layout)
+                // 滿版圖的小框版本：檔案是滿版圖，出片時照滿版圖壓進小框
+                (m.clone(), s.path.clone(), if s.from_full { Layout::Full } else { s.layout })
             })
             .collect();
         // 指紋裡的位置都寫成「檔名@檔內第幾格」：「從幾點開始看」往前多讀一個檔、時間軸整個往後移時，
@@ -2238,7 +2239,7 @@ bar {} {mtime} {at_ranges:?}", bar.image));
                         .take(3)
                         .filter_map(|&k| {
                             let st = &self.stills.stills[k];
-                            if st.layout == Layout::Dual { ai::still_box(&st.path, st.layout) } else { ai::still_whole(&st.path) }.ok()
+                            if st.layout == Layout::Dual { ai::still_box(st) } else { ai::still_whole(&st.path) }.ok()
                         })
                         .collect();
                     for chunk in todo.chunks(8) {
@@ -2303,7 +2304,7 @@ bar {} {mtime} {at_ranges:?}", bar.image));
                         .take(2)
                         .filter_map(|&k| {
                             let st = &self.stills.stills[k];
-                            if layout == Layout::Dual { ai::still_box(&st.path, st.layout) } else { ai::still_whole(&st.path) }.ok()
+                            if layout == Layout::Dual { ai::still_box(st) } else { ai::still_whole(&st.path) }.ok()
                         })
                         .collect();
                     if rimgs.is_empty() {
@@ -2607,11 +2608,11 @@ fn ai_eval(ffmpeg: &Path, stills: &StillSet, gemini: &ai::Gemini, files: &[(Path
         .map(|&k| {
             let s = &stills.stills[k];
             if boxed {
-                ai::still_box(&s.path, s.layout)
+                ai::still_box(s)
             } else if whole {
                 ai::still_whole(&s.path)
             } else {
-                ai::still_crop(&s.path, c.layout)
+                ai::still_crop(s, c.layout)
             }
         })
         .collect::<Result<_, _>>()?;
@@ -2694,7 +2695,8 @@ fn grab_whole(ffmpeg: &Path, files: &[(PathBuf, f64, f64)], frame: usize) -> Res
 
 mod ai {
     use base64::Engine as _;
-    use keyword_title_core::autocut::image::{self, imageops, ImageFormat};
+    use keyword_title_core::autocut::image::{self, imageops, ImageFormat, RgbImage};
+    use keyword_title_core::autocut::stills::{full_into_box, Still};
     use keyword_title_core::autocut::{Layout, H, W};
     use std::collections::HashMap;
     use std::path::Path;
@@ -2733,13 +2735,20 @@ mod ai {
         pub kind: Vec<String>,
     }
 
-    /// 雙框靜圖的左框（滿版靜圖就整張）縮成跟 `grab_box` 差不多大的 PNG
-    pub fn still_box(path: &str, layout: Layout) -> Result<Vec<u8>, String> {
-        use keyword_title_core::autocut::{BAND, BOX};
+    /// 靜圖 1920×1080；滿版圖的小框版本（from_full）先照實際雙框的樣子壓進左框
+    fn open_still(st: &Still) -> Result<RgbImage, String> {
+        let path = &st.path;
         let img = image::open(path).map_err(|e| format!("讀不到靜圖 {path}：{e}"))?.to_rgb8();
         let img = if img.dimensions() != (W, H) { imageops::resize(&img, W, H, imageops::FilterType::Triangle) } else { img };
+        Ok(if st.from_full { full_into_box(&img) } else { img })
+    }
+
+    /// 雙框靜圖的左框（滿版靜圖就整張）縮成跟 `grab_box` 差不多大的 PNG
+    pub fn still_box(st: &Still) -> Result<Vec<u8>, String> {
+        use keyword_title_core::autocut::{BAND, BOX};
+        let img = open_still(st)?;
         let (bw, bh) = (BOX.2 - BOX.0, BOX.3.min(BAND.0) - BOX.1);
-        let crop = if layout == Layout::Dual { imageops::crop_imm(&img, BOX.0, BOX.1, bw, bh).to_image() } else { img };
+        let crop = if st.layout == Layout::Dual { imageops::crop_imm(&img, BOX.0, BOX.1, bw, bh).to_image() } else { img };
         let crop = imageops::resize(&crop, bw * 3 / 4, bh * 3 / 4, imageops::FilterType::Lanczos3);
         let mut out = std::io::Cursor::new(Vec::new());
         image::DynamicImage::ImageRgb8(crop).write_to(&mut out, ImageFormat::Png).map_err(|e| e.to_string())?;
@@ -2756,9 +2765,8 @@ mod ai {
     }
 
     /// 靜圖的同一塊（PNG）
-    pub fn still_crop(path: &str, layout: Layout) -> Result<Vec<u8>, String> {
-        let img = image::open(path).map_err(|e| format!("讀不到靜圖 {path}：{e}"))?.to_rgb8();
-        let img = if img.dimensions() != (W, H) { imageops::resize(&img, W, H, imageops::FilterType::Triangle) } else { img };
+    pub fn still_crop(st: &Still, layout: Layout) -> Result<Vec<u8>, String> {
+        let img = open_still(st)?;
         let (x, y, w, h, k) = crop_box(layout);
         let crop = imageops::crop_imm(&img, x, y, w, h).to_image();
         let crop = imageops::resize(&crop, w * k, h * k, imageops::FilterType::Lanczos3);
@@ -3525,7 +3533,9 @@ fn render_segment(app: &AppHandle, shared: &Shared, ffmpeg: &Path, job: &RenderJ
             }
             Layout::Dual => {
                 let (bw, bh) = (BOX.2 - BOX.0, BOX.3.min(BAND.0) - BOX.1);
-                let src = if *still_layout == Layout::Dual { format!("scale={W}:{H},crop={bw}:{bh}:{}:{}", BOX.0, BOX.1) } else { format!("scale=-2:{bh},crop={bw}:{bh}") };
+                // 滿版圖蓋小框：照實際雙框的樣子（FULL_IN_BOX 那塊不等比例壓進框）
+                let (fx, fy, fw, fh) = FULL_IN_BOX;
+                let src = if *still_layout == Layout::Dual { format!("scale={W}:{H},crop={bw}:{bh}:{}:{}", BOX.0, BOX.1) } else { format!("scale={W}:{H},crop={fw}:{fh}:{fx}:{fy},scale={bw}:{bh}") };
                 g.push(format!("[{inp}:v]{src},format=yuv420p[d{si}]"));
                 g.push(format!("[{cur}][d{si}]overlay={}:{}:{en}[m{si}]", BOX.0, BOX.1));
             }

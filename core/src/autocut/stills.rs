@@ -1,7 +1,7 @@
 //! 靜圖 → 版型、來源字樣板、小灰階。吃已解碼的圖（讀檔在 app 端）。
 
-use super::frame::{layout_from_strip, luma, small_gray, Mask, Strip};
-use super::{Layout, H, ROI_DUAL, ROI_FULL, W};
+use super::frame::{box_gray, layout_from_strip, luma, small_gray, Mask, Strip};
+use super::{Layout, BAND, BOX, FULL_IN_BOX, H, ROI_DUAL, ROI_FULL, W};
 use image::{imageops, GrayImage, RgbImage};
 
 #[derive(Clone)]
@@ -19,6 +19,9 @@ pub struct Still {
     pub source: SourceText,
     /// 80×45 灰階（比相似度用）
     pub small: GrayImage,
+    /// 滿版靜圖自動做的「小框版本」（layout＝Dual、path 是原本的滿版圖）：同一支素材在雙框左框播時也比得到。
+    /// 只比畫面（沒有來源字樣板），出片時把滿版圖照 `FULL_IN_BOX` 壓進小框蓋上
+    pub from_full: bool,
 }
 
 #[derive(Clone)]
@@ -86,6 +89,7 @@ impl StillSet {
         images.sort_by(|a, b| file_name(&a.1).cmp(file_name(&b.1)).then_with(|| a.1.cmp(&b.1)));
         let mut stills = Vec::new();
         let mut templates: Vec<Template> = Vec::new();
+        let mut fulls: Vec<(usize, RgbImage)> = Vec::new();
         for (name, path, img) in images {
             let img = if img.dimensions() != (W, H) { imageops::resize(&img, W, H, imageops::FilterType::Triangle) } else { img };
             let lum = |x: u32, y: u32| luma(&img.get_pixel(x, y).0);
@@ -122,7 +126,28 @@ impl StillSet {
             let small = small_gray(&s320, layout);
             let segment = segment_of_path(&path);
             let source = SourceText::from_image(&img, layout);
-            stills.push(Still { name, path, segment, layout, template, source, small });
+            if layout == Layout::Full {
+                fulls.push((idx, img.clone()));
+            }
+            stills.push(Still { name, path, segment, layout, template, source, small, from_full: false });
+        }
+        // 滿版靜圖的小框版本：排在所有靜圖後面（原本的編號、樣板都不變）。製作單位現在只給滿版大圖，
+        // 同一支素材在雙框左框播時要靠這張比到。只比畫面、不做來源字樣板（壓進小框的字太小，容易誤認）
+        for (k, img) in fulls {
+            let canvas = full_into_box(&img);
+            let s320 = imageops::resize(&canvas, 320, 180, imageops::FilterType::Triangle);
+            let base = &stills[k];
+            let still = Still {
+                name: format!("{}（小框）", base.name),
+                path: base.path.clone(),
+                segment: base.segment,
+                layout: Layout::Dual,
+                template: None,
+                source: SourceText::from_image(&canvas, Layout::Dual),
+                small: box_gray(&s320),
+                from_full: true,
+            };
+            stills.push(still);
         }
         let kin = (0..templates.len())
             .map(|a| (0..templates.len()).map(|b| a == b || (templates[a].layout == templates[b].layout && templates[a].mask.iou(&templates[b].mask) >= 0.5)).collect())
@@ -178,7 +203,10 @@ impl StillSet {
     /// 快取簽名：每張靜圖的檔名＋版型＋樣板編號。靜圖增減、換圖造成判斷改變，簽名就不同
     /// 開頭是比對算法的版本：每格來源字比對的算法改了就換，舊的掃描快取全部作廢重掃
     pub fn signature(&self) -> String {
-        let stills = self.stills.iter().map(|s| format!("{}|{}|{}", file_name(&s.path), s.layout == Layout::Dual, s.template.map(|t| t as i64).unwrap_or(-1)));
+        let stills = self.stills.iter().map(|s| {
+            let kind = if s.from_full { "|box" } else { "" };
+            format!("{}|{}|{}{kind}", file_name(&s.path), s.layout == Layout::Dual, s.template.map(|t| t as i64).unwrap_or(-1))
+        });
         std::iter::once(SIGNATURE_VERSION.to_string()).chain(stills).collect::<Vec<_>>().join("\n")
     }
 
@@ -188,10 +216,21 @@ impl StillSet {
         for s in &self.stills {
             let t = s.template.map(|k| format!("樣板 #{k}")).unwrap_or_else(|| "無來源字→比畫面".into());
             let seg = s.segment.map(|n| format!("只用在第 {n} 段")).unwrap_or_else(|| "每段都比".into());
-            r.push_str(&format!("  {}  {}  {}  {}\n", s.name, s.layout.zh(), t, seg));
+            let layout = if s.from_full { "滿版圖壓進小框" } else { s.layout.zh() };
+            r.push_str(&format!("  {}  {}  {}  {}\n", s.name, layout, t, seg));
         }
         r
     }
+}
+
+/// 滿版圖照實際雙框的樣子壓進左框（`FULL_IN_BOX` 那塊壓成 BOX.0..BOX.2 × BOX.1..BAND.0），框外黑色
+pub fn full_into_box(img: &RgbImage) -> RgbImage {
+    let (x, y, w, h) = FULL_IN_BOX;
+    let part = imageops::crop_imm(img, x, y, w, h).to_image();
+    let squeezed = imageops::resize(&part, BOX.2 - BOX.0, BAND.0 - BOX.1, imageops::FilterType::Triangle);
+    let mut canvas = RgbImage::new(W, H);
+    imageops::replace(&mut canvas, &squeezed, BOX.0 as i64, BOX.1 as i64);
+    canvas
 }
 
 /// 靜圖右上角來源字的點陣（比 `Mask` 範圍寬、只留白字黑邊的點），輪播時確認兩張靜圖的來源字一字不差
@@ -291,8 +330,9 @@ mod tests {
             ("d.jpg".into(), "/s/d.jpg".into(), RgbImage::from_pixel(W, H, image::Rgb([50, 50, 50]))),
         ]);
         let names: Vec<&str> = set.stills.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["a.jpg", "b.jpg", "c.jpg", "d.jpg"], "依路徑排序");
-        assert!(set.stills.iter().all(|s| s.layout == Layout::Full));
+        assert_eq!(names, ["a.jpg", "b.jpg", "c.jpg", "d.jpg", "a.jpg（小框）", "b.jpg（小框）", "c.jpg（小框）", "d.jpg（小框）"], "依路徑排序，小框版本排在最後");
+        assert!(set.stills[..4].iter().all(|s| s.layout == Layout::Full && !s.from_full));
+        assert!(set.stills[4..].iter().all(|s| s.layout == Layout::Dual && s.from_full && s.template.is_none() && s.path.starts_with("/s/")));
         assert_eq!(set.stills[0].template, Some(0));
         assert_eq!(set.stills[1].template, Some(0));
         assert_eq!(set.stills[2].template, Some(1));
@@ -332,6 +372,32 @@ mod tests {
         assert_eq!(crate::autocut::plan::rotate_mask(&set, &m, 0.0), vec![m.clone()], "0＝不輪播");
     }
 
+    /// 11/20 第 2 段：製作單位只給滿版大圖，素材在雙框左框播。小框版本要比得到同一支素材、比不到別的
+    #[test]
+    fn full_still_matches_same_footage_in_small_box() {
+        use crate::autocut::frame::{box_gray, ncc};
+        let footage = |seed: u32| RgbImage::from_fn(W, H, |x, y| image::Rgb([((x * seed / 9 + y / 4) % 200) as u8 + 20, ((y * seed / 13) % 150) as u8 + 40, ((x / 11 + y / 7 * seed) % 180) as u8 + 30]));
+        let set = StillSet::build(vec![("a.jpg".into(), "/s/a.jpg".into(), footage(3))]);
+        let boxed = set.stills.iter().find(|s| s.from_full).expect("滿版圖要有小框版本");
+        // 實際的雙框畫面：左框是同一支素材壓進去，框外是背景，字幕帶有字
+        let dual_frame = |seed: u32| {
+            let mut f = full_into_box(&footage(seed));
+            for (x, y, p) in f.enumerate_pixels_mut() {
+                if !(BOX.0..BOX.2).contains(&x) || !(BOX.1..BAND.0).contains(&y) {
+                    *p = image::Rgb([((x + y) % 60) as u8, 30, 120]);
+                }
+                if (BAND.0..BAND.1).contains(&y) && (x / 13) % 3 == 0 {
+                    *p = image::Rgb([250, 250, 250]);
+                }
+            }
+            imageops::resize(&f, 320, 180, imageops::FilterType::Triangle)
+        };
+        let same = ncc(&boxed.small, &box_gray(&dual_frame(3)));
+        let other = ncc(&boxed.small, &box_gray(&dual_frame(7)));
+        assert!(same > 0.95, "同一支素材 {same}");
+        assert!(other < 0.5, "別的素材 {other}");
+    }
+
     #[test]
     fn stills_in_segment_folders_only_serve_that_segment() {
         assert_eq!(segment_of_path(r"\\server\yt上傳\替換畫面\第2段\a.jpg"), Some(2));
@@ -344,14 +410,15 @@ mod tests {
             ("c.jpg".into(), "/s/c.jpg".into(), still_with_label(2)),
         ]);
         let names: Vec<&str> = set.stills.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["第2段/a.jpg", "第3段/b.jpg", "c.jpg"], "依檔名排序，不看在哪個子資料夾");
+        assert_eq!(names[..3], ["第2段/a.jpg", "第3段/b.jpg", "c.jpg"], "依檔名排序，不看在哪個子資料夾");
+        assert_eq!(names[3..], ["第2段/a.jpg（小框）", "第3段/b.jpg（小框）", "c.jpg（小框）"], "小框版本跟著原圖的段落");
         assert_eq!(set.templates[0].stills, vec![0, 1], "同一個來源字還是同一個樣板");
         let two = set.for_segment(2).unwrap();
         assert_eq!(two.templates[0].stills, vec![0], "第 2 段只看得到自己的和共用的");
-        assert_eq!(two.off, vec![false, true, false]);
+        assert_eq!(two.off, vec![false, true, false, false, true, false]);
         let five = set.for_segment(5).unwrap();
         assert!(five.templates[0].stills.is_empty());
-        assert_eq!(five.off, vec![true, true, false]);
+        assert_eq!(five.off, vec![true, true, false, true, true, false]);
         // 搬到別段：順序、簽名都不變（不用重新掃描）
         let moved = StillSet::build(vec![
             ("第3段/b.jpg".into(), "/s/第3段/b.jpg".into(), still_with_label(1)),
