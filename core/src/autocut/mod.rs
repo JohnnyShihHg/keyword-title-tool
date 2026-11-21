@@ -92,6 +92,8 @@ pub struct FrameInfo {
     /// 命中的來源字樣板與 IoU（-1＝沒有）
     pub tmpl: i16,
     pub iou: f32,
+    /// 來源字範圍讀到幾行字（`Mask::text_lines`）：兩行以上＝有一個看得出是哪支素材的來源字
+    pub label_lines: u8,
     /// 跟每張靜圖的相似度（不同版型＝0）
     pub sims: Vec<f32>,
 }
@@ -118,7 +120,10 @@ pub fn scan_filter(ocr: bool) -> String {
         ROI_DUAL.1,
     );
     if ocr {
-        f.push_str(&format!("[o]fps=1/2,crop={}:{}:{}:{}[ocr];", OCR_BOX.2, OCR_BOX.3, OCR_BOX.0, OCR_BOX.1));
+        f.push_str(&format!(
+            "[o]fps=1/2,crop={}:{}:{}:{}[ocr];",
+            OCR_BOX.2, OCR_BOX.3, OCR_BOX.0, OCR_BOX.1
+        ));
     }
     f.push_str("[s][bar][lf][ld][sg]xstack=inputs=5:layout=0_0|0_180|320_0|320_90|516_0:fill=black,format=rgb24[out]");
     f
@@ -127,7 +132,13 @@ pub fn scan_filter(ocr: bool) -> String {
 /// 秒 → `00:00:00.000`
 pub fn tc(sec: f64) -> String {
     let ms = (sec.max(0.0) * 1000.0).round() as u64;
-    format!("{:02}:{:02}:{:02}.{:03}", ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000)
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        ms / 3_600_000,
+        ms / 60_000 % 60,
+        ms / 1000 % 60,
+        ms % 1000
+    )
 }
 
 /// 格 → 秒

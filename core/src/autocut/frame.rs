@@ -33,8 +33,14 @@ impl Mask {
         let mut bits = vec![false; w * h];
         for y in 0..h {
             for x in 0..w {
-                let (x0, y0, x1, y1) = (x.saturating_sub(r), y.saturating_sub(r), (x + r + 1).min(w), (y + r + 1).min(h));
-                let s = ii[y1 * (w + 1) + x1] - ii[y0 * (w + 1) + x1] - ii[y1 * (w + 1) + x0] + ii[y0 * (w + 1) + x0];
+                let (x0, y0, x1, y1) = (
+                    x.saturating_sub(r),
+                    y.saturating_sub(r),
+                    (x + r + 1).min(w),
+                    (y + r + 1).min(h),
+                );
+                let s = ii[y1 * (w + 1) + x1] - ii[y0 * (w + 1) + x1] - ii[y1 * (w + 1) + x0]
+                    + ii[y0 * (w + 1) + x0];
                 let mean = s / ((x1 - x0) * (y1 - y0)) as f64;
                 let l = lum[y * w + x];
                 bits[y * w + x] = l >= 120.0 && l as f64 - mean >= 30.0;
@@ -43,7 +49,13 @@ impl Mask {
         let row = (0..h).find(|&y| (0..w).filter(|&x| bits[y * w + x]).count() >= 2);
         let col = (0..w).find(|&x| (0..h).filter(|&y| bits[y * w + x]).count() >= 2);
         let count = bits.iter().filter(|b| **b).count();
-        Mask { w, h, bits, bbox: (col.unwrap_or(0), row.unwrap_or(0)), count }
+        Mask {
+            w,
+            h,
+            bits,
+            bbox: (col.unwrap_or(0), row.unwrap_or(0)),
+            count,
+        }
     }
 
     /// 來源字有幾行。範圍最上面會切到「東森新聞」台標的字腳、亮的背景（天空、街景）也會被當成亮點，
@@ -56,8 +68,14 @@ impl Mask {
 
     /// 每一行字的列範圍（起, 訖），規則見 `text_lines`
     pub fn line_spans(&self) -> Vec<(usize, usize)> {
-        let counts: Vec<usize> = (0..self.h).map(|y| (0..self.w).filter(|&x| self.bits[y * self.w + x]).count()).collect();
-        let min_mean = if self.w < ROI_FULL.2 as usize { 4.0 } else { 8.0 };
+        let counts: Vec<usize> = (0..self.h)
+            .map(|y| (0..self.w).filter(|&x| self.bits[y * self.w + x]).count())
+            .collect();
+        let min_mean = if self.w < ROI_FULL.2 as usize {
+            4.0
+        } else {
+            8.0
+        };
         // 一塊一塊：(起, 訖)
         let mut blocks: Vec<(usize, usize)> = Vec::new();
         for y in (0..self.h).filter(|&y| counts[y] >= 3) {
@@ -92,12 +110,21 @@ impl Mask {
         if self.count == 0 || other.count == 0 {
             return (0.0, 0.0);
         }
-        let (lo, hi) = (self.count.min(other.count) as f32, self.count.max(other.count) as f32);
+        let (lo, hi) = (
+            self.count.min(other.count) as f32,
+            self.count.max(other.count) as f32,
+        );
         if lo / hi < 0.3 {
             return (lo / hi, 0.0); // IoU 不可能超過這個比例，省得逐點比
         }
         let on_self = |x: i32, y: i32| self.bits[y as usize * self.w + x as usize];
-        let on_other = |x: i32, y: i32| x >= 0 && y >= 0 && (x as usize) < other.w && (y as usize) < other.h && other.bits[y as usize * other.w + x as usize];
+        let on_other = |x: i32, y: i32| {
+            x >= 0
+                && y >= 0
+                && (x as usize) < other.w
+                && (y as usize) < other.h
+                && other.bits[y as usize * other.w + x as usize]
+        };
         let base_x = other.bbox.0 as i32 - self.bbox.0 as i32;
         let base_y = other.bbox.1 as i32 - self.bbox.1 as i32;
         let (mut full, mut at) = (0f32, (base_x, base_y));
@@ -121,9 +148,17 @@ impl Mask {
         // 第二行以下：樣板有字的範圍切成一個字寬（≈ 行高）一塊
         let (ox, oy) = at;
         let split = split.min(self.h) as i32;
-        let rows: Vec<i32> = (split..self.h as i32).filter(|&y| (0..self.w as i32).any(|x| on_self(x, y))).collect();
-        let cols: Vec<i32> = (0..self.w as i32).filter(|&x| (split..self.h as i32).any(|y| on_self(x, y))).collect();
-        let (Some(&y0), Some(&y1), Some(&x0), Some(&x1)) = (rows.first(), rows.last(), cols.first(), cols.last()) else { return (full, 0.0) };
+        let rows: Vec<i32> = (split..self.h as i32)
+            .filter(|&y| (0..self.w as i32).any(|x| on_self(x, y)))
+            .collect();
+        let cols: Vec<i32> = (0..self.w as i32)
+            .filter(|&x| (split..self.h as i32).any(|y| on_self(x, y)))
+            .collect();
+        let (Some(&y0), Some(&y1), Some(&x0), Some(&x1)) =
+            (rows.first(), rows.last(), cols.first(), cols.last())
+        else {
+            return (full, 0.0);
+        };
         let char_w = ((y1 - y0 + 1) as f32 * 0.9).max(8.0) as i32;
         let n = (((x1 - x0 + 1) as f32 / char_w as f32).round() as i32).max(1);
         let mut worst = 1f32;
@@ -155,7 +190,12 @@ pub fn luma(p: &[u8]) -> f32 {
 pub fn sim_region(layout: Layout) -> (u32, u32, u32, u32) {
     match layout {
         Layout::Full => (0, 0, 320, BAND.0 / 6),
-        Layout::Dual => (BOX.0 / 6, BOX.1 / 6, (BOX.2 - BOX.0) / 6, (BOX.3 - BOX.1) / 6),
+        Layout::Dual => (
+            BOX.0 / 6,
+            BOX.1 / 6,
+            (BOX.2 - BOX.0) / 6,
+            (BOX.3 - BOX.1) / 6,
+        ),
     }
 }
 
@@ -165,7 +205,12 @@ pub fn small_gray(img320: &RgbImage, layout: Layout) -> GrayImage {
 
 /// 雙框左框只取字幕以上（BOX.1..BAND.0）：滿版靜圖的小框版本只比這塊（下面是背景和字幕，靜圖裡沒有）
 pub fn box_region() -> (u32, u32, u32, u32) {
-    (BOX.0 / 6, BOX.1 / 6, (BOX.2 - BOX.0) / 6, (BAND.0 - BOX.1) / 6)
+    (
+        BOX.0 / 6,
+        BOX.1 / 6,
+        (BOX.2 - BOX.0) / 6,
+        (BAND.0 - BOX.1) / 6,
+    )
 }
 
 pub fn box_gray(img320: &RgbImage) -> GrayImage {
@@ -174,7 +219,12 @@ pub fn box_gray(img320: &RgbImage) -> GrayImage {
 
 fn gray_of(img320: &RgbImage, (x, y, w, h): (u32, u32, u32, u32)) -> GrayImage {
     let crop = imageops::crop_imm(img320, x, y, w, h).to_image();
-    imageops::resize(&imageops::grayscale(&crop), 80, 45, imageops::FilterType::Triangle)
+    imageops::resize(
+        &imageops::grayscale(&crop),
+        80,
+        45,
+        imageops::FilterType::Triangle,
+    )
 }
 
 pub fn ncc(a: &GrayImage, b: &GrayImage) -> f32 {
@@ -200,8 +250,10 @@ pub type Strip = [[f32; 48]; 72];
 /// 雙框兩框之間的縫每列都是「暗（944–947）、亮（951–954）、暗（973–976）」——這條縫是固定的框線，跟框裡播什麼無關。
 /// （舊版還要求右框左緣 980–983 夠亮，右框剛好是暗的鏡頭就會誤判成滿版，已拿掉）
 pub fn layout_from_strip(s: &Strip) -> Layout {
-    let min = |row: &[f32; 48], a: usize, b: usize| row[a..=b].iter().cloned().fold(f32::MAX, f32::min);
-    let mean = |row: &[f32; 48], a: usize, b: usize| row[a..=b].iter().sum::<f32>() / (b - a + 1) as f32;
+    let min =
+        |row: &[f32; 48], a: usize, b: usize| row[a..=b].iter().cloned().fold(f32::MAX, f32::min);
+    let mean =
+        |row: &[f32; 48], a: usize, b: usize| row[a..=b].iter().sum::<f32>() / (b - a + 1) as f32;
     let ok = s
         .iter()
         .filter(|r| {
@@ -238,7 +290,11 @@ pub fn judge(buf: &[u8], set: &StillSet) -> (FrameInfo, GrayImage) {
     for y in 0..180 {
         for x in 0..320 {
             let i = (y * CW + x) * 3;
-            s320.put_pixel(x as u32, y as u32, image::Rgb([buf[i], buf[i + 1], buf[i + 2]]));
+            s320.put_pixel(
+                x as u32,
+                y as u32,
+                image::Rgb([buf[i], buf[i + 1], buf[i + 2]]),
+            );
         }
     }
     let px = |cx: usize, cy: usize| luma(&buf[(cy * CW + cx) * 3..(cy * CW + cx) * 3 + 3]);
@@ -250,8 +306,12 @@ pub fn judge(buf: &[u8], set: &StillSet) -> (FrameInfo, GrayImage) {
     }
     let layout = layout_from_strip(&strip);
     let label_mask = match layout {
-        Layout::Full => Mask::from_fn(ROI_FULL.2 as usize, ROI_FULL.3 as usize, |x, y| px(LF.0 + x, LF.1 + y)),
-        Layout::Dual => Mask::from_fn(ROI_DUAL.2 as usize, ROI_DUAL.3 as usize, |x, y| px(LD.0 + x, LD.1 + y)),
+        Layout::Full => Mask::from_fn(ROI_FULL.2 as usize, ROI_FULL.3 as usize, |x, y| {
+            px(LF.0 + x, LF.1 + y)
+        }),
+        Layout::Dual => Mask::from_fn(ROI_DUAL.2 as usize, ROI_DUAL.3 as usize, |x, y| {
+            px(LD.0 + x, LD.1 + y)
+        }),
     };
     let (mut tmpl, mut iou) = (-1i16, 0f32);
     for (k, t) in set.templates.iter().enumerate() {
@@ -265,7 +325,8 @@ pub fn judge(buf: &[u8], set: &StillSet) -> (FrameInfo, GrayImage) {
     }
     let g = small_gray(&s320, layout);
     // 滿版靜圖的小框版本（from_full）只比左框字幕以上那塊
-    let g_box = (layout == Layout::Dual && set.stills.iter().any(|s| s.from_full)).then(|| box_gray(&s320));
+    let g_box =
+        (layout == Layout::Dual && set.stills.iter().any(|s| s.from_full)).then(|| box_gray(&s320));
     let sims = set
         .stills
         .iter()
@@ -275,19 +336,46 @@ pub fn judge(buf: &[u8], set: &StillSet) -> (FrameInfo, GrayImage) {
             (true, ..) => ncc(&s.small, &g),
         })
         .collect();
-    let whole = imageops::resize(&imageops::grayscale(&s320), 80, 45, imageops::FilterType::Triangle);
+    let whole = imageops::resize(
+        &imageops::grayscale(&s320),
+        80,
+        45,
+        imageops::FilterType::Triangle,
+    );
     let lum = whole.iter().map(|&v| v as f32).sum::<f32>() / whole.len() as f32;
-    (FrameInfo { program: bar_present(buf), layout, luma: lum, cut_diff: 0.0, tmpl, iou, sims }, whole)
+    let label_lines = label_mask.text_lines().min(u8::MAX as usize) as u8;
+    (
+        FrameInfo {
+            program: bar_present(buf),
+            layout,
+            luma: lum,
+            cut_diff: 0.0,
+            tmpl,
+            iou,
+            label_lines,
+            sims,
+        },
+        whole,
+    )
 }
 
 /// 兩格整張畫面 80×45 灰階的平均差（鏡頭切換）
 pub fn frame_diff(prev: &GrayImage, cur: &GrayImage) -> f32 {
-    prev.iter().zip(cur.iter()).map(|(a, b)| (*a as f32 - *b as f32).abs()).sum::<f32>() / cur.len() as f32
+    prev.iter()
+        .zip(cur.iter())
+        .map(|(a, b)| (*a as f32 - *b as f32).abs())
+        .sum::<f32>()
+        / cur.len() as f32
 }
 
 /// Logo 轉場樣板 → 80×45 灰階（跟 `refine_start` 解出來的小圖比）
 pub fn logo_template(img: &image::DynamicImage) -> GrayImage {
-    imageops::resize(&imageops::grayscale(img), super::LOGO_W, super::LOGO_H, imageops::FilterType::Triangle)
+    imageops::resize(
+        &imageops::grayscale(img),
+        super::LOGO_W,
+        super::LOGO_H,
+        imageops::FilterType::Triangle,
+    )
 }
 
 #[cfg(test)]
@@ -308,15 +396,30 @@ mod tests {
     #[test]
     fn text_lines_ignore_logo_tip_and_background_streak() {
         // 字：一行在 y 15..40；第二行（兩行來源字）在 y 50..75
-        let label = |x: usize, y: usize| (20..160).contains(&x) && (15..40).contains(&y) && (x / 3 + y).is_multiple_of(4);
-        let second = |x: usize, y: usize| (10..170).contains(&x) && (50..75).contains(&y) && (x / 3 + y).is_multiple_of(4);
+        let label = |x: usize, y: usize| {
+            (20..160).contains(&x) && (15..40).contains(&y) && (x / 3 + y).is_multiple_of(4)
+        };
+        let second = |x: usize, y: usize| {
+            (10..170).contains(&x) && (50..75).contains(&y) && (x / 3 + y).is_multiple_of(4)
+        };
         // 最上面一列台標字腳 4 點、最下面兩列背景亮邊
-        let noise = |x: usize, y: usize| (y == 0 && (60..64).contains(&x)) || (y >= 88 && (30..56).contains(&x));
-        let m = |f: &dyn Fn(usize, usize) -> bool| Mask::from_fn(180, 90, |x, y| if f(x, y) { 230.0 } else { 40.0 });
+        let noise = |x: usize, y: usize| {
+            (y == 0 && (60..64).contains(&x)) || (y >= 88 && (30..56).contains(&x))
+        };
+        let m = |f: &dyn Fn(usize, usize) -> bool| {
+            Mask::from_fn(180, 90, |x, y| if f(x, y) { 230.0 } else { 40.0 })
+        };
         assert_eq!(m(&|x, y| label(x, y)).text_lines(), 1);
-        assert_eq!(m(&|x, y| label(x, y) || noise(x, y)).text_lines(), 1, "雜訊不算一行");
+        assert_eq!(
+            m(&|x, y| label(x, y) || noise(x, y)).text_lines(),
+            1,
+            "雜訊不算一行"
+        );
         assert_eq!(m(&|x, y| label(x, y) || second(x, y)).text_lines(), 2);
-        assert_eq!(m(&|x, y| label(x, y) || second(x, y) || noise(x, y)).text_lines(), 2);
+        assert_eq!(
+            m(&|x, y| label(x, y) || second(x, y) || noise(x, y)).text_lines(),
+            2
+        );
         assert_eq!(m(&|_, _| false).text_lines(), 0);
     }
 
@@ -351,7 +454,17 @@ mod tests {
 
     #[test]
     fn mask_iou_identical_and_shifted() {
-        let glyph = |ox: usize| move |x: usize, y: usize| if (20 + ox..40 + ox).contains(&x) && (30..34).contains(&y) || (25 + ox..28 + ox).contains(&x) && (20..50).contains(&y) { 230.0 } else { 40.0 };
+        let glyph = |ox: usize| {
+            move |x: usize, y: usize| {
+                if (20 + ox..40 + ox).contains(&x) && (30..34).contains(&y)
+                    || (25 + ox..28 + ox).contains(&x) && (20..50).contains(&y)
+                {
+                    230.0
+                } else {
+                    40.0
+                }
+            }
+        };
         let a = Mask::from_fn(100, 70, glyph(0));
         let b = Mask::from_fn(100, 70, glyph(7));
         assert!(a.count > 50);
@@ -371,14 +484,36 @@ mod tests {
                     bits[y * 180..y * 180 + n].fill(true);
                 }
             }
-            Mask { w: 180, h: 90, count: bits.iter().filter(|b| **b).count(), bits, bbox: (0, 0) }
+            Mask {
+                w: 180,
+                h: 90,
+                count: bits.iter().filter(|b| **b).count(),
+                bits,
+                bbox: (0, 0),
+            }
         };
         // 「翻攝 Youtube」＋下面零星亮點、離很遠的一塊亮背景、最底下兩列
-        assert_eq!(mask(&[(15, 39, 50), (50, 50, 4), (59, 60, 10), (73, 82, 25), (88, 89, 40)]).text_lines(), 1);
+        assert_eq!(
+            mask(&[
+                (15, 39, 50),
+                (50, 50, 4),
+                (59, 60, 10),
+                (73, 82, 25),
+                (88, 89, 40)
+            ])
+            .text_lines(),
+            1
+        );
         // 兩行（「翻攝 X」＋「藍澤鵬程」）
         assert_eq!(mask(&[(15, 40, 50), (50, 74, 60)]).text_lines(), 2);
         // 雙框（110 寬）第一行很淡也算
-        let mut dual = Mask { w: 110, h: 75, bits: vec![false; 110 * 75], bbox: (0, 0), count: 0 };
+        let mut dual = Mask {
+            w: 110,
+            h: 75,
+            bits: vec![false; 110 * 75],
+            bbox: (0, 0),
+            count: 0,
+        };
         for y in 17..=31 {
             dual.bits[y * 110..y * 110 + if y % 2 == 0 { 3 } else { 6 }].fill(true);
         }
@@ -399,12 +534,18 @@ mod tests {
         };
         let label = |alt: &[usize]| {
             Mask::from_fn(180, 90, |x, y| {
-                let line1 = (14..36).contains(&y) && (20..20 + 24 * 5).contains(&x) && glyph(x - 20, y - 14, (x - 20) / 24, false);
+                let line1 = (14..36).contains(&y)
+                    && (20..20 + 24 * 5).contains(&x)
+                    && glyph(x - 20, y - 14, (x - 20) / 24, false);
                 let line2 = (50..72).contains(&y) && (4..4 + 24 * 7).contains(&x) && {
                     let k = (x - 4) / 24;
                     glyph(x - 4, y - 50, k + 10, alt.contains(&k))
                 };
-                if line1 || line2 { 230.0 } else { 40.0 }
+                if line1 || line2 {
+                    230.0
+                } else {
+                    40.0
+                }
             })
         };
         let tmpl = label(&[]);
